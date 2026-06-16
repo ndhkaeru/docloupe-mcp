@@ -712,8 +712,10 @@ IMPORTANT — writing values that start with = + - :
   • Values starting with "+" or "-" are already stored as text automatically
     when they are not numbers — no prefix needed.
   • Merging over an existing merged region raises an error — unmerge first.
-  • .xlsm/.xlsb/.xls are rejected (macros/binary would be lost) — convert
-    to .xlsx first.
+  • convert_to_markdown is read-only and can accept Excel-family files readable
+    by the converter.
+  • Session/edit/save tools are .xlsx-only. .xlsm/.xlsb/.xls are rejected
+    there because macros/binary content would be lost — convert to .xlsx first.
   • excel_load with sheet_name loads ONLY that sheet, but excel_save merges
     the other sheets back from disk automatically — nothing is lost.
 
@@ -723,6 +725,9 @@ IMPORTANT — session_key:
   • You do NOT need to reload the file between edits — just reuse the same key.
   • Call excel_reload to discard in-memory changes and re-read from disk.
   • Call excel_close when done to free server memory.
+
+Quick reference — one-shot conversion:
+  convert_to_markdown  read-only Markdown export for Excel-family files; no session
 
 Quick reference — session lifecycle:
   excel_get_info       sheet names + dimensions (no session needed)
@@ -781,6 +786,28 @@ mcp = FastMCP("excel-tools", instructions=_INSTRUCTIONS)
 
 
 # ── 1. Info ───────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def convert_to_markdown(file_path: str) -> TextContent:
+    """
+    Convert an Excel-family file to Markdown in one call without creating a session.
+
+    This read-only conversion is for quick inspection/export workflows. Use
+    excel_load + excel_to_markdown when you need Markdown generated from an
+    editable .xlsx in-memory session, including unsaved changes.
+
+    Args:
+        file_path: Path or file:// URI to an Excel-family file readable by the converter.
+
+    Returns:
+        Markdown content (text/markdown) representing workbook sheets.
+    """
+    from excel_converter import convert_excel_to_markdown
+
+    path = uri_to_path(file_path)
+    data = serialize_excel(str(path))
+    markdown = convert_excel_to_markdown(data)
+    return TextContent(type="text", text=markdown, mimeType="text/markdown")
 
 @mcp.tool()
 def excel_get_info(uri: str) -> str:

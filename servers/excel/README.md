@@ -1,6 +1,8 @@
 # excel-tools
 
-Round-trip Excel workbook editor with session-based reads, sheet operations, rows/columns, styles, merges, data validation, images, and save/reload support.
+Round-trip Excel workbook editor with one-shot Markdown export plus session-based reads, sheet operations, rows/columns, styles, merges, data validation, images, and save/reload support.
+
+Use this server when an agent needs Excel content without dumping an entire workbook into context. The tools can inspect only the needed sheets, rows, columns, or cells, which helps reduce token usage and quota consumption.
 
 ## Status
 
@@ -8,11 +10,15 @@ Implemented and included in the completed DocForge MCP server set.
 
 ## Input
 
-.xlsx only for safe editing; macro/binary formats are rejected to avoid data loss.
+- `convert_to_markdown` is read-only and can convert Excel-family files readable by the converter into Markdown without creating a session.
+- All session/edit/save tools are `.xlsx`-only; macro/binary formats are rejected there to avoid silent data loss.
+- For non-Excel document types, use the matching DocForge MCP server: Markdown, PDF, DOCX, PPTX, CSV, HTML, text, JSON, or JSONL.
 
 ## Recommended Workflow
 
 - Start with `excel_get_info` for sheet dimensions.
+- Use `convert_to_markdown` when you only need a Markdown export and do not need a session.
+- Prefer targeted reads such as `excel_get_rows`, `excel_get_cell`, and `excel_get_column` to avoid spending tokens on irrelevant workbook content.
 - Call `excel_load` and keep the returned `session_key`.
 - Inspect with `excel_to_markdown`, `excel_get_rows`, or cell/column tools.
 - Mutate the session, then call `excel_save` to write an `.xlsx`.
@@ -21,6 +27,7 @@ Implemented and included in the completed DocForge MCP server set.
 
 | Tool | Description |
 | --- | --- |
+| `convert_to_markdown` | Convert an Excel-family file to Markdown in one call without creating a session. |
 | `excel_get_info` | Return summary info about an Excel file: sheet names, row and column counts. |
 | `excel_load` | Load an Excel file into the server session cache and return a session_key. |
 | `excel_save` | Reconstruct an Excel file from session data and write it to disk. |
@@ -63,7 +70,8 @@ Implemented and included in the completed DocForge MCP server set.
 
 ## Notes
 
+- `convert_to_markdown` is read-only, does not require `excel_load`, and is broader than the edit tools because it does not save back to the source file.
 - Editing is session-based: load first, mutate the in-memory workbook, then save.
-- Unsupported macro/binary formats (`.xlsm`, `.xltm`, `.xlsb`, `.xls`) are rejected to avoid silent data loss.
+- Unsupported macro/binary formats (`.xlsm`, `.xltm`, `.xlsb`, `.xls`) are rejected by session/edit/save tools to avoid silent data loss.
 - Row and column indices exposed by editing tools are 0-based unless a tool docstring states otherwise.
 - `excel_capture` depends on LibreOffice being installed and available on the host.

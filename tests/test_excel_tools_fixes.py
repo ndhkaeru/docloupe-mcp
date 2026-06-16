@@ -14,6 +14,7 @@ C.  Internal hyperlinks, docProps and workbook view survive a round-trip;
 """
 import json
 import sys
+import types
 import zipfile
 from pathlib import Path
 
@@ -86,6 +87,34 @@ def test_macro_formats_rejected(tmp_path):
     fake.write_bytes(b"PK")
     with pytest.raises(ValueError, match="not supported"):
         M.excel_load(str(fake))
+
+def test_convert_to_markdown_without_session(tmp_path, monkeypatch):
+    src = tmp_path / "simple.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Name", "Score"])
+    ws.append(["Ada", 10])
+    wb.save(src)
+
+    def fake_convert_excel_to_markdown(data, *, sheet_name=None):
+        assert sheet_name is None
+        assert data["sheets"][0]["name"] == "Data"
+        assert data["sheets"][0]["rows"][1]["cells"][0]["v"] == "Ada"
+        return "# Data\n\n| Name | Score |\n| --- | --- |\n| Ada | 10 |"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "excel_converter",
+        types.SimpleNamespace(convert_excel_to_markdown=fake_convert_excel_to_markdown),
+    )
+
+    before_sessions = dict(M._sessions)
+    result = M.convert_to_markdown(str(src))
+
+    assert result.mimeType == "text/markdown"
+    assert "| Ada | 10 |" in result.text
+    assert M._sessions == before_sessions
 
 
 # ── A3 ────────────────────────────────────────────────────────────────────────
