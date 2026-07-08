@@ -74,3 +74,5 @@ servers/*/converter_utils/
 
 # Local-only build script
 build.ps1
+
+.agents/
