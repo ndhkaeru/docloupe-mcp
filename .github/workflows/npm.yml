@@ -1,0 +1,128 @@
+name: Publish npm package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to package, for example v1.2.3'
+        required: true
+        type: string
+      publish_npm:
+        description: Publish package to npm
+        required: false
+        default: true
+        type: boolean
+      publish_registry:
+        description: Also publish server.json to the MCP Registry
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  npm:
+    name: Publish npm package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
+      PUBLISH_NPM: ${{ github.event_name == 'release' || inputs.publish_npm }}
+      PUBLISH_REGISTRY: ${{ inputs.publish_registry || false }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Validate package metadata sync
+        run: |
+          node - <<'NODE'
+          const pkg = require('./packages/npm/package.json');
+          const server = require('./server.json');
+          const mismatches = [];
+          if (server.version !== pkg.version) mismatches.push(`server.version=${server.version} != package.version=${pkg.version}`);
+          if (server.packages?.[0]?.identifier !== pkg.name) mismatches.push(`server package identifier=${server.packages?.[0]?.identifier} != package.name=${pkg.name}`);
+          if (server.packages?.[0]?.version !== pkg.version) mismatches.push(`server package version=${server.packages?.[0]?.version} != package.version=${pkg.version}`);
+          if (pkg.mcpName !== server.name) mismatches.push(`package mcpName=${pkg.mcpName} != server.name=${server.name}`);
+          if (mismatches.length) {
+            console.error('server.json is out of sync with packages/npm/package.json:');
+            for (const mismatch of mismatches) console.error(`  ${mismatch}`);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Check JavaScript
+        working-directory: packages/npm
+        run: npm run check
+
+      - name: Wait for release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          required=(
+            docforge-mcp-excel-tools-windows-x64.exe docforge-mcp-md-tools-windows-x64.exe docforge-mcp-pdf-tools-windows-x64.exe docforge-mcp-docx-tools-windows-x64.exe docforge-mcp-pptx-tools-windows-x64.exe docforge-mcp-csv-tools-windows-x64.exe docforge-mcp-html-tools-windows-x64.exe docforge-mcp-text-tools-windows-x64.exe docforge-mcp-json-tools-windows-x64.exe
+            docforge-mcp-excel-tools-linux-x64 docforge-mcp-md-tools-linux-x64 docforge-mcp-pdf-tools-linux-x64 docforge-mcp-docx-tools-linux-x64 docforge-mcp-pptx-tools-linux-x64 docforge-mcp-csv-tools-linux-x64 docforge-mcp-html-tools-linux-x64 docforge-mcp-text-tools-linux-x64 docforge-mcp-json-tools-linux-x64
+            docforge-mcp-excel-tools-macos-x64 docforge-mcp-md-tools-macos-x64 docforge-mcp-pdf-tools-macos-x64 docforge-mcp-docx-tools-macos-x64 docforge-mcp-pptx-tools-macos-x64 docforge-mcp-csv-tools-macos-x64 docforge-mcp-html-tools-macos-x64 docforge-mcp-text-tools-macos-x64 docforge-mcp-json-tools-macos-x64
+            docforge-mcp-excel-tools-macos-arm64 docforge-mcp-md-tools-macos-arm64 docforge-mcp-pdf-tools-macos-arm64 docforge-mcp-docx-tools-macos-arm64 docforge-mcp-pptx-tools-macos-arm64 docforge-mcp-csv-tools-macos-arm64 docforge-mcp-html-tools-macos-arm64 docforge-mcp-text-tools-macos-arm64 docforge-mcp-json-tools-macos-arm64
+          )
+          for i in {1..45}; do
+            assets=$(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name')
+            missing=0
+            for item in "${required[@]}"; do
+              if ! grep -qx "$item" <<<"$assets"; then missing=1; break; fi
+            done
+            if [ "$missing" -eq 0 ]; then exit 0; fi
+            sleep 20
+          done
+          echo "Timed out waiting for all release assets for ${RELEASE_TAG}" >&2
+          exit 1
+
+      - name: Prepare native npm assets
+        working-directory: packages/npm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
+        run: npm run prepare:native
+
+      - name: Dry-run npm pack
+        working-directory: packages/npm
+        run: npm pack --dry-run
+
+      - name: Publish npm package
+        if: env.PUBLISH_NPM == 'true' && env.HAS_NPM_TOKEN == 'true'
+        working-directory: packages/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Skip npm publish without token
+        if: env.PUBLISH_NPM == 'true' && env.HAS_NPM_TOKEN != 'true'
+        run: echo 'NPM_TOKEN not configured; package was validated but not published.'
+
+      - name: Install MCP publisher
+        if: env.PUBLISH_REGISTRY == 'true'
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/download/v1.1.0/mcp-publisher_1.1.0_linux_amd64.tar.gz" | tar xz mcp-publisher
+          chmod +x mcp-publisher
+
+      - name: Publish MCP Registry metadata
+        if: env.PUBLISH_REGISTRY == 'true'
+        run: ./mcp-publisher publish
+

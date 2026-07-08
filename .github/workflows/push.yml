@@ -10,11 +10,27 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: push-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: Test (Windows)
-    runs-on: windows-latest
-    timeout-minutes: 20
+    name: Test (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: macos-13
+            platform: macos-x64
+          - os: macos-14
+            platform: macos-arm64
 
     steps:
       - name: Checkout
@@ -24,35 +40,31 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Create venv
-        shell: pwsh
-        run: |
-          python -m venv .venv-build
-          .\.venv-build\Scripts\python.exe -m pip install -U pip
+          cache: pip
 
       - name: Install dependencies
         shell: pwsh
         run: |
-          .\.venv-build\Scripts\python.exe -m pip install `
-            pytest `
-            "mcp[cli]" `
-            openpyxl `
-            pillow `
-            pdfminer.six `
-            pdfplumber `
-            mammoth `
-            python-pptx `
-            markdownify `
-            beautifulsoup4 `
-            lxml `
-            defusedxml `
-            charset-normalizer
+          python -m venv .venv-build
+          $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
+          & $py -m pip install -U pip
+          & $py -m pip install pytest pyinstaller "mcp[cli]" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
 
-      - name: Compile Markdown server
+      - name: Compile server entrypoints
         shell: pwsh
-        run: .\.venv-build\Scripts\python.exe -m py_compile servers\md\main.py
+        run: |
+          $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
+          $entries = Get-ChildItem servers -Recurse -Filter main.py | ForEach-Object { $_.FullName }
+          & $py -m py_compile @entries
 
       - name: Run tests
         shell: pwsh
-        run: .\.venv-build\Scripts\python.exe -m pytest -q
+        run: |
+          $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
+          & $py -m pytest -q
+
+      - name: Build smoke test (text-tools)
+        shell: pwsh
+        run: |
+          $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
+          & $py -m PyInstaller --clean --onefile --name text-tools --paths servers/text --specpath build --workpath build --distpath dist servers/text/main.py

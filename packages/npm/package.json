@@ -1,0 +1,39 @@
+{
+  "name": "@ndhkaeru/docforge-mcp",
+  "version": "0.1.0",
+  "description": "Run DocForge MCP stdio servers for document workflows via npm/npx.",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "bin": {
+    "docforge-mcp": "bin/docforge-mcp.js",
+    "docforge-excel-tools": "bin/docforge-excel-tools.js",
+    "docforge-md-tools": "bin/docforge-md-tools.js",
+    "docforge-pdf-tools": "bin/docforge-pdf-tools.js",
+    "docforge-docx-tools": "bin/docforge-docx-tools.js",
+    "docforge-pptx-tools": "bin/docforge-pptx-tools.js",
+    "docforge-csv-tools": "bin/docforge-csv-tools.js",
+    "docforge-html-tools": "bin/docforge-html-tools.js",
+    "docforge-text-tools": "bin/docforge-text-tools.js",
+    "docforge-json-tools": "bin/docforge-json-tools.js"
+  },
+  "files": [
+    "bin/",
+    "native/",
+    "README.md"
+  ],
+  "scripts": {
+    "prepare:native": "node prepare-npm-assets.js",
+    "check": "node --check bin/docforge-mcp.js && node --check prepare-npm-assets.js",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ndhkaeru/docforge-mcp.git"
+  },
+  "mcpName": "io.github.ndhkaeru/docforge-mcp",
+  "engines": {
+    "node": ">=18"
+  }
+}
+
+

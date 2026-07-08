@@ -1,5 +1,5 @@
 """
-excel-tools — MCP server for round-trip Excel editing (32 tools).
+excel-tools — MCP server for round-trip Excel editing.
 """
 import sys
 from pathlib import Path
@@ -8,17 +8,24 @@ sys.path.insert(0, str(Path(__file__).parent))
 import copy
 import json
 import re
+import xml.etree.ElementTree as ET
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 
-from core import serialize_excel, reconstruct_excel, uri_to_path
+from core import (
+    diff_xlsx_package,
+    inspect_xlsx_package,
+    reconstruct_excel,
+    serialize_excel,
+    uri_to_path,
+)
 
 # Session cache lives at module level so it persists across tool calls
 _sessions: dict[str, dict] = {}
 
 # Style keys accepted by excel_set_style
-_STYLE_KEYS = frozenset({"fill", "fcolor", "bold", "italic", "size", "font", "wrap", "halign", "valign", "numfmt"})
+_STYLE_KEYS = frozenset({"fill", "fcolor", "bold", "italic", "strike", "underline", "uline", "size", "font", "wrap", "halign", "valign", "numfmt"})
 
 # Blank cell template used when inserting empty cells
 _EMPTY_CELL: dict = {
@@ -28,13 +35,25 @@ _EMPTY_CELL: dict = {
 }
 
 
+def _normalize_underline(value):
+    if value is True:
+        return "single"
+    if value in (False, "", None):
+        return None
+    return value
+
+
 def _apply_style(cell: dict, style: dict) -> None:
     for key, value in style.items():
+        if key == "underline":
+            key = "uline"
         if key in _STYLE_KEYS:
+            if key == "uline":
+                value = _normalize_underline(value)
             cell[key] = value
             if key == "fill":
                 cell.pop("_fill_raw", None)
-            if key in {"fcolor", "bold", "italic", "size", "font"}:
+            if key in {"fcolor", "bold", "italic", "strike", "underline", "uline", "size", "font"}:
                 cell.pop("_font_raw", None)
 
 
@@ -48,16 +67,15 @@ def _drop_raw_fills(sheet: dict) -> None:
                     side.pop("_color_raw", None)
 
 
-_UNSUPPORTED_EXTS = {".xlsm", ".xltm", ".xlsb", ".xls"}
+_LEGACY_OR_BINARY_EXTS = {".xls", ".xlsb"}
 
 
 def _check_supported(path) -> None:
     ext = Path(str(path)).suffix.lower()
-    if ext in _UNSUPPORTED_EXTS:
+    if ext in _LEGACY_OR_BINARY_EXTS:
         raise ValueError(
-            f"'{ext}' files are not supported: saving would silently strip VBA macros "
-            "or binary content. Convert the file to .xlsx first (Excel: Save As → "
-            "Excel Workbook) and work on that copy.")
+            f"'{ext}' files are not supported by the edit engine. Use convert_to_markdown "
+            "for read-only extraction, or convert to an OOXML workbook (.xlsx/.xlsm/.xltx/.xltm).")
 
 
 def _resolve_session_key(session_key: str) -> str:
@@ -83,6 +101,22 @@ def _find_sheet(data: dict, name: str) -> dict:
         available = [s["name"] for s in data["sheets"]]
         raise ValueError(f"Sheet '{name}' not found. Available: {available}")
     return sheet
+
+
+
+def _excel_family_ext(path: str | Path) -> str:
+    return Path(path).suffix.lower()
+
+
+def _check_save_extension_compatible(source: str, dest: str) -> None:
+    src_ext = _excel_family_ext(source)
+    dst_ext = _excel_family_ext(dest)
+    macro_exts = {".xlsm", ".xltm"}
+    non_macro_exts = {".xlsx", ".xltx"}
+    if src_ext in macro_exts and dst_ext in non_macro_exts:
+        raise ValueError(f"Refusing to save macro-enabled {src_ext} workbook as {dst_ext}; choose a macro-enabled extension.")
+    if src_ext in non_macro_exts and dst_ext in macro_exts:
+        raise ValueError(f"Refusing to save non-macro {src_ext} workbook as {dst_ext}; choose a non-macro extension.")
 
 def _excel_range_to_indices(range_ref: str) -> tuple[int, int, int, int]:
     """Convert an Excel A1 range to 0-based inclusive row/column bounds."""
@@ -757,10 +791,17 @@ IMPORTANT — writing values that start with = + - :
   • Merging over an existing merged region raises an error — unmerge first.
   • convert_to_markdown is read-only and can accept Excel-family files readable
     by the converter.
-  • Session/edit/save tools are .xlsx-only. .xlsm/.xlsb/.xls are rejected
-    there because macros/binary content would be lost — convert to .xlsx first.
+  • Session/edit/save tools support OOXML Excel packages: .xlsx, .xlsm,
+    .xltx, and .xltm. Macro/template parts are preserved best-effort.
+    Legacy/binary .xls and .xlsb need read-only conversion or conversion to
+    OOXML before editing.
   • excel_load with sheet_name loads ONLY that sheet, but excel_save merges
     the other sheets back from disk automatically — nothing is lost.
+  • excel_save validates the generated .xlsx before replacing the destination.
+    If validation fails, the existing destination file is left untouched.
+  • Advanced DrawingML/charts/images/unknown OOXML parts are preserved
+    best-effort. Use excel_validate_workbook and excel_diff_package for risky
+    files before trusting a save workflow.
 
 IMPORTANT — session_key:
   • session_key is the absolute file path returned by excel_load.
@@ -778,6 +819,9 @@ Quick reference — session lifecycle:
   excel_get_info       sheet names + dimensions (no session needed)
   excel_load           load file → session_key
   excel_save           write session back to .xlsx (output_path optional)
+  excel_save_as_copy   save to a different .xlsx path without overwriting source
+  excel_validate_workbook validate .xlsx ZIP/XML structure + feature summary
+  excel_diff_package   compare before/after package manifests
   excel_reload         reload from disk, discard unsaved changes
   excel_close          remove session from cache, free memory
 
@@ -798,6 +842,7 @@ Quick reference — reading:
   excel_get_cell       single cell with full style metadata
   excel_get_column     all cells in a column
   excel_find_cells     find literal/regex values or formulas across workbook
+  excel_get_shapes     list captured DrawingML shape/image/chart metadata
 
 Quick reference — editing rows:
   excel_edit_cells     edit cell values across one or more rows
@@ -816,7 +861,9 @@ Quick reference — merge:
   excel_merge_cells    merge a range (unmerge=False) or unmerge origin (unmerge=True)
 
 Quick reference — formatting:
-  excel_set_style      set style on a cell or range (fill/font/font_name/align/numfmt)
+  excel_set_style      set style on a cell/range (fill/fcolor/font/strike/align/numfmt)
+  excel_set_font_color set font color on a cell or range
+  excel_set_strike     enable/disable strikethrough on a cell or range
   excel_set_borders    set/remove borders on a cell range
   excel_set_dimension  set row height (axis="row") or column width (axis="col")
                        • axis="row", index=3, size=20   → set row 3 height to 20pt
@@ -825,6 +872,8 @@ Quick reference — formatting:
   excel_autofit_cols   auto-fit column widths to content (heuristic)
   excel_freeze_panes   freeze header rows and/or columns
   excel_set_data_validation  add dropdown list validation to a cell range
+  excel_update_shape_text    update simple DrawingML textbox/shape text
+  excel_set_shape_style      set simple DrawingML shape fill/outline/text color
 
 Quick reference — search & fill:
   excel_find_rows      find rows matching a value or regex in a column
@@ -889,7 +938,12 @@ def excel_get_info(uri: str) -> str:
     """
     import openpyxl
     path = uri_to_path(uri)
-    wb = openpyxl.load_workbook(str(path), read_only=False, data_only=False)
+    wb = openpyxl.load_workbook(
+        str(path),
+        read_only=False,
+        data_only=False,
+        keep_vba=path.suffix.lower() in {".xlsm", ".xltm"},
+    )
     try:
         info = {
             "source": str(path),
@@ -922,8 +976,9 @@ def excel_load(uri: str, sheet_name: str | None = None) -> str:
     The session_key is then passed to all other excel_* tools.
 
     Args:
-        uri: Local file path or file:// URI to the .xlsx file (.xlsm/.xlsb/.xls
-             are rejected — they would lose macros/binary content on save)
+        uri: Local file path or file:// URI to an OOXML Excel workbook
+             (.xlsx/.xlsm/.xltx/.xltm). Legacy/binary .xls/.xlsb are not
+             handled by the edit engine.
         sheet_name: Sheet to load; omit to load ALL sheets. When a filter is
              used, excel_save automatically merges the unloaded sheets back
              from the file on disk — they are NOT lost.
@@ -966,6 +1021,7 @@ def excel_save(session_key: str, output_path: str | None = None) -> str:
     if output_path:
         _check_supported(output_path)
     dest = output_path or data["source"]
+    _check_save_extension_compatible(data["source"], dest)
 
     to_write = data
     if data.get("_sheet_filter"):
@@ -1007,6 +1063,34 @@ def excel_save(session_key: str, output_path: str | None = None) -> str:
     if warnings:
         msg += "\nWARNINGS: " + "; ".join(warnings)
     return msg
+
+
+@mcp.tool()
+def excel_save_as_copy(session_key: str, output_path: str) -> str:
+    """Save the session to a new .xlsx path without overwriting the source workbook."""
+    if not output_path:
+        raise ValueError("output_path is required for excel_save_as_copy.")
+    source = Path(_get_session(session_key)["source"]).resolve()
+    dest = Path(output_path).resolve()
+    if source == dest:
+        raise ValueError("excel_save_as_copy output_path must differ from the source. Use excel_save to overwrite.")
+    return excel_save(session_key, str(dest))
+
+
+@mcp.tool()
+def excel_validate_workbook(path: str) -> str:
+    """Validate an .xlsx package and report advanced features found."""
+    return json.dumps(inspect_xlsx_package(str(uri_to_path(path))), ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def excel_diff_package(before_path: str, after_path: str) -> str:
+    """Compare two .xlsx ZIP package manifests for save diagnostics."""
+    return json.dumps(
+        diff_xlsx_package(str(uri_to_path(before_path)), str(uri_to_path(after_path))),
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 # ── 4. Reload / Close ─────────────────────────────────────────────────────────
@@ -2285,6 +2369,276 @@ def excel_set_style(
     return f"Styled {cells_styled} cell(s) at {rng} ({list(style.keys())}) in sheet '{sheet_name}'."
 
 
+@mcp.tool()
+def excel_set_font_color(
+    session_key: str,
+    sheet_name: str,
+    r1: int,
+    c1: int,
+    color: str | None,
+    r2: int | None = None,
+    c2: int | None = None,
+) -> str:
+    """Set font color on a cell or range. Color is ARGB hex, or null for auto."""
+    return excel_set_style(session_key, sheet_name, r1, c1, r2, c2, {"fcolor": color})
+
+
+@mcp.tool()
+def excel_set_strike(
+    session_key: str,
+    sheet_name: str,
+    r1: int,
+    c1: int,
+    enabled: bool = True,
+    r2: int | None = None,
+    c2: int | None = None,
+) -> str:
+    """Enable or disable strikethrough on a cell or range."""
+    return excel_set_style(session_key, sheet_name, r1, c1, r2, c2, {"strike": enabled})
+
+
+
+def _shape_anchors(drawing_xml: str) -> list[re.Match]:
+    return list(re.finditer(
+        r"<(?:(?:xdr:)?)(twoCellAnchor|oneCellAnchor|absoluteAnchor)\b.*?</(?:(?:xdr:)?)(?:twoCellAnchor|oneCellAnchor|absoluteAnchor)>",
+        drawing_xml,
+        re.DOTALL,
+    ))
+
+
+def _rgb_hex(color: str | None) -> str | None:
+    if color is None:
+        return None
+    value = color.strip().lstrip("#").upper()
+    if len(value) == 8:
+        value = value[2:]
+    if not re.fullmatch(r"[0-9A-F]{6}", value):
+        raise ValueError("Color must be RGB or ARGB hex, e.g. 'FF0000' or 'FFFF0000'.")
+    return value
+
+
+_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_XDR_NS = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+ET.register_namespace("a", _A_NS)
+ET.register_namespace("xdr", _XDR_NS)
+_SHAPE_CLEAR = "__DOCFORGE_CLEAR__"
+_SHAPE_KEEP = "__DOCFORGE_KEEP__"
+
+
+def _solid_fill_xml(rgb: str) -> str:
+    return f'<a:solidFill><a:srgbClr val="{rgb}"/></a:solidFill>'
+
+
+def _et_local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _et_tostring(elem: ET.Element) -> str:
+    return ET.tostring(elem, encoding="unicode", short_empty_elements=True)
+
+
+def _parse_sp_pr(sp_pr: str) -> ET.Element:
+    wrapper = ET.fromstring(
+        f'<docforge:root xmlns:docforge="urn:docforge" xmlns:xdr="{_XDR_NS}" xmlns:a="{_A_NS}">{sp_pr}</docforge:root>'
+    )
+    return list(wrapper)[0]
+
+
+def _first_child_index(elem: ET.Element, names: set[str]) -> int | None:
+    for idx, child in enumerate(list(elem)):
+        if _et_local(child.tag) in names:
+            return idx
+    return None
+
+
+def _new_solid_fill(rgb: str) -> ET.Element:
+    fill = ET.Element(f"{{{_A_NS}}}solidFill")
+    ET.SubElement(fill, f"{{{_A_NS}}}srgbClr", {"val": rgb})
+    return fill
+
+
+def _new_no_fill() -> ET.Element:
+    return ET.Element(f"{{{_A_NS}}}noFill")
+
+
+def _replace_direct_fill(elem: ET.Element, replacement: ET.Element) -> None:
+    fill_names = {"noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"}
+    for idx, child in enumerate(list(elem)):
+        if _et_local(child.tag) in fill_names:
+            elem.remove(child)
+            elem.insert(idx, replacement)
+            return
+    geom_idx = _first_child_index(elem, {"prstGeom", "custGeom"})
+    insert_at = geom_idx + 1 if geom_idx is not None else 0
+    elem.insert(insert_at, replacement)
+
+
+def _set_shape_fill(sp_pr: str, rgb: str | None) -> str:
+    root = _parse_sp_pr(sp_pr)
+    _replace_direct_fill(root, _new_no_fill() if rgb is None else _new_solid_fill(rgb))
+    return _et_tostring(root)
+
+
+def _set_shape_line(sp_pr: str, rgb_marker, width_pt: float | None) -> str:
+    root = _parse_sp_pr(sp_pr)
+    if width_pt is not None and width_pt < 0:
+        raise ValueError("outline_width_pt must be >= 0.")
+    line = next((c for c in list(root) if _et_local(c.tag) == "ln"), None)
+    if line is None:
+        line = ET.Element(f"{{{_A_NS}}}ln")
+        root.append(line)
+    if width_pt is not None:
+        line.set("w", str(int(round(width_pt * 12700))))
+    if rgb_marker is _SHAPE_CLEAR:
+        _replace_direct_fill(line, _new_no_fill())
+    elif rgb_marker is not _SHAPE_KEEP:
+        _replace_direct_fill(line, _new_solid_fill(rgb_marker))
+    return _et_tostring(root)
+
+
+def _set_shape_text_color(anchor_xml: str, rgb: str) -> str:
+    def patch_rpr(match: re.Match) -> str:
+        tag = match.group(0)
+        if tag.endswith("/>"):
+            tag = tag[:-2] + ">" + _solid_fill_xml(rgb) + "</a:rPr>"
+        elif re.search(r"<a:solidFill\b.*?</a:solidFill>|<a:noFill\s*/>", tag, re.DOTALL):
+            tag = re.sub(r"<a:solidFill\b.*?</a:solidFill>|<a:noFill\s*/>", _solid_fill_xml(rgb), tag, count=1, flags=re.DOTALL)
+        else:
+            tag = tag.replace("</a:rPr>", _solid_fill_xml(rgb) + "</a:rPr>", 1)
+        return tag
+    updated, count = re.subn(r"<a:rPr\b.*?</a:rPr>|<a:rPr\b[^/]*/>", patch_rpr, anchor_xml, flags=re.DOTALL)
+    return updated if count else anchor_xml
+
+@mcp.tool()
+def excel_get_shapes(session_key: str, sheet_name: str | None = None) -> str:
+    """List DrawingML shapes/images/charts captured from loaded sheets."""
+    data = _get_session(session_key)
+    result = {}
+    for sheet in data["sheets"]:
+        if sheet_name and sheet["name"] != sheet_name:
+            continue
+        result[sheet["name"]] = sheet.get("shapes") or []
+    if sheet_name and sheet_name not in result:
+        _find_sheet(data, sheet_name)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def excel_update_shape_text(session_key: str, sheet_name: str, shape_index: int, text: str) -> str:
+    """Update text in a DrawingML shape/textbox by 1-based shape index."""
+    from html import escape
+
+    data = _get_session(session_key)
+    sheet = _find_sheet(data, sheet_name)
+    drawing = sheet.get("drawing_data")
+    if not drawing or not drawing.get("drawing_xml"):
+        raise ValueError(f"Sheet '{sheet_name}' has no captured DrawingML shapes.")
+    if shape_index < 1:
+        raise ValueError("shape_index is 1-based and must be >= 1.")
+
+    anchors = list(re.finditer(
+        r"<(?:(?:xdr:)?)(twoCellAnchor|oneCellAnchor|absoluteAnchor)\b.*?</(?:(?:xdr:)?)(?:twoCellAnchor|oneCellAnchor|absoluteAnchor)>",
+        drawing["drawing_xml"],
+        re.DOTALL,
+    ))
+    if shape_index > len(anchors):
+        raise ValueError(f"shape_index {shape_index} out of bounds; found {len(anchors)} shape(s).")
+
+    match = anchors[shape_index - 1]
+    anchor_xml = match.group(0)
+    text_matches = list(re.finditer(r"<a:t(?:\s[^>]*)?>.*?</a:t>", anchor_xml, re.DOTALL))
+    if not text_matches:
+        raise ValueError(f"Shape {shape_index} has no editable text runs.")
+
+    escaped = escape(text, quote=False)
+    first = True
+    def replace_text_run(m: re.Match) -> str:
+        nonlocal first
+        start_tag = re.match(r"<a:t(?:\s[^>]*)?>", m.group(0)).group(0)
+        value = escaped if first else ""
+        first = False
+        return f"{start_tag}{value}</a:t>"
+
+    new_anchor = re.sub(r"<a:t(?:\s[^>]*)?>.*?</a:t>", replace_text_run, anchor_xml, flags=re.DOTALL)
+    drawing["drawing_xml"] = drawing["drawing_xml"][:match.start()] + new_anchor + drawing["drawing_xml"][match.end():]
+    shapes = sheet.get("shapes") or []
+    if shape_index <= len(shapes):
+        shapes[shape_index - 1]["text"] = text
+    return f"Updated text for shape {shape_index} on sheet '{sheet_name}'."
+
+
+
+@mcp.tool()
+def excel_set_shape_style(
+    session_key: str,
+    sheet_name: str,
+    shape_index: int,
+    fill_color: str | None = None,
+    outline_color: str | None = None,
+    outline_width_pt: float | None = None,
+    text_color: str | None = None,
+    clear_fill: bool = False,
+    clear_outline: bool = False,
+) -> str:
+    """
+    Set simple DrawingML shape style by 1-based shape index.
+
+    Colors accept RGB or ARGB hex. Use clear_fill=True or clear_outline=True to remove fill/outline.
+    Supports simple DrawingML shapes/textboxes captured by excel_load.
+    """
+    data = _get_session(session_key)
+    sheet = _find_sheet(data, sheet_name)
+    drawing = sheet.get("drawing_data")
+    if not drawing or not drawing.get("drawing_xml"):
+        raise ValueError(f"Sheet '{sheet_name}' has no captured DrawingML shapes.")
+    if shape_index < 1:
+        raise ValueError("shape_index is 1-based and must be >= 1.")
+
+    anchors = _shape_anchors(drawing["drawing_xml"])
+    if shape_index > len(anchors):
+        raise ValueError(f"shape_index {shape_index} out of bounds; found {len(anchors)} shape(s).")
+
+    if clear_fill and fill_color is not None:
+        raise ValueError("Use either fill_color or clear_fill, not both.")
+    if clear_outline and outline_color is not None:
+        raise ValueError("Use either outline_color or clear_outline, not both.")
+    fill_rgb = _rgb_hex(fill_color) if fill_color is not None else None
+    outline_rgb = _rgb_hex(outline_color) if outline_color is not None else None
+    text_rgb = _rgb_hex(text_color) if text_color is not None else None
+
+    match = anchors[shape_index - 1]
+    anchor_xml = match.group(0)
+    sp_match = re.search(r"<(?:(?:xdr:)?sp)\b.*?</(?:(?:xdr:)?sp)>", anchor_xml, re.DOTALL)
+    if not sp_match:
+        raise ValueError(f"Shape {shape_index} is not a simple editable DrawingML shape.")
+    shape_xml = sp_match.group(0)
+    sp_pr_match = re.search(r"<(?:(?:xdr:)?spPr)\b.*?</(?:(?:xdr:)?spPr)>", shape_xml, re.DOTALL)
+    if not sp_pr_match:
+        raise ValueError(f"Shape {shape_index} has no editable shape properties.")
+
+    sp_pr = sp_pr_match.group(0)
+    if fill_color is not None or clear_fill:
+        sp_pr = _set_shape_fill(sp_pr, None if clear_fill else fill_rgb)
+    if outline_color is not None or outline_width_pt is not None or clear_outline:
+        outline_marker = _SHAPE_CLEAR if clear_outline else (outline_rgb if outline_color is not None else _SHAPE_KEEP)
+        sp_pr = _set_shape_line(sp_pr, outline_marker, outline_width_pt)
+    shape_xml = shape_xml[:sp_pr_match.start()] + sp_pr + shape_xml[sp_pr_match.end():]
+    anchor_xml = anchor_xml[:sp_match.start()] + shape_xml + anchor_xml[sp_match.end():]
+    if text_rgb is not None:
+        anchor_xml = _set_shape_text_color(anchor_xml, text_rgb)
+
+    drawing["drawing_xml"] = drawing["drawing_xml"][:match.start()] + anchor_xml + drawing["drawing_xml"][match.end():]
+    shapes = sheet.get("shapes") or []
+    if shape_index <= len(shapes):
+        if fill_color is not None or clear_fill:
+            shapes[shape_index - 1]["fill_color"] = None if clear_fill else fill_rgb
+        if outline_color is not None or clear_outline:
+            shapes[shape_index - 1]["outline_color"] = None if clear_outline else outline_rgb
+        if outline_width_pt is not None:
+            shapes[shape_index - 1]["outline_width_pt"] = outline_width_pt
+        if text_color is not None:
+            shapes[shape_index - 1]["text_color"] = text_rgb
+    return f"Updated style for shape {shape_index} on sheet '{sheet_name}'."
 # ── 20. Borders ───────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -2782,6 +3136,10 @@ def excel_fill_rows(
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
+
+
+
+
 
 
 

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ndhkaeru/docforge-mcp",
+  "description": "Local-first MCP servers for Markdown, Excel, PDF, DOCX, PPTX, CSV, HTML, text, JSON document workflows.",
+  "repository": {
+    "url": "https://github.com/ndhkaeru/docforge-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@ndhkaeru/docforge-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

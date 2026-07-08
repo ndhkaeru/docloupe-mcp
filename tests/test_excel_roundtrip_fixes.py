@@ -25,7 +25,7 @@ from openpyxl.styles.colors import Color
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "servers" / "excel"))
 
-from core import reconstruct_excel, serialize_excel  # noqa: E402
+from core import inspect_xlsx_package, reconstruct_excel, serialize_excel  # noqa: E402
 
 
 def _read_part(path: Path, part_name: str) -> str:
@@ -51,6 +51,97 @@ def _tiny_png(path: Path) -> Path:
     from PIL import Image as PILImage
     PILImage.new("RGB", (4, 4), (255, 0, 0)).save(path)
     return path
+
+
+def _add_textbox_drawing(path: Path, text: str = "Original Box") -> None:
+    anchor_xml = f'''<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>5</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="99" name="TextBox 1"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr wrap="square"/><a:lstStyle/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>'''
+    new_drawing_xml = f'''<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{anchor_xml}</xdr:wsDr>'''
+    rels_xml = '''<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>'''
+    with zipfile.ZipFile(path, "r") as zin:
+        names = set(zin.namelist())
+        existing_rels = "xl/worksheets/_rels/sheet1.xml.rels" in names
+        drawing_file = None
+        if existing_rels:
+            rels = zin.read("xl/worksheets/_rels/sheet1.xml.rels").decode("utf-8")
+            for rel_match in re.finditer(r"<Relationship\b([^>]*)/>", rels):
+                attrs = rel_match.group(1)
+                type_m = re.search(r'Type="([^"]+)"', attrs)
+                target_m = re.search(r'Target="([^"]+)"', attrs)
+                if type_m and target_m and type_m.group(1).rstrip("/").endswith("/drawing"):
+                    target = target_m.group(1)
+                    drawing_file = "xl/" + target[3:] if target.startswith("../") else "xl/drawings/" + target.rsplit("/", 1)[-1]
+                    break
+    tmp = path.with_suffix(".patched.xlsx")
+    with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            raw = zin.read(item.filename)
+            if drawing_file and item.filename == drawing_file:
+                xml = raw.decode("utf-8")
+                if "</xdr:wsDr>" in xml:
+                    xml = xml.replace("</xdr:wsDr>", anchor_xml + "</xdr:wsDr>")
+                else:
+                    root_match = re.search(r"<wsDr\b[^>]*>", xml)
+                    if root_match and "xmlns:a=" not in root_match.group(0):
+                        xml = xml[:root_match.end() - 1] + ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' + xml[root_match.end() - 1:]
+                    xml = xml.replace("</wsDr>", anchor_xml.replace("xdr:", "") + "</wsDr>")
+                raw = xml.encode("utf-8")
+            elif not drawing_file and item.filename == "xl/worksheets/sheet1.xml":
+                xml = raw.decode("utf-8")
+                xml = xml.replace("</worksheet>", '<drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/></worksheet>')
+                raw = xml.encode("utf-8")
+            elif not drawing_file and item.filename == "[Content_Types].xml":
+                xml = raw.decode("utf-8")
+                if 'PartName="/xl/drawings/drawing1.xml"' not in xml:
+                    xml = xml.replace("</Types>", '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>')
+                raw = xml.encode("utf-8")
+            zout.writestr(item, raw)
+        if not drawing_file:
+            zout.writestr("xl/worksheets/_rels/sheet1.xml.rels", rels_xml.encode("utf-8"))
+            zout.writestr("xl/drawings/drawing1.xml", new_drawing_xml.encode("utf-8"))
+    tmp.replace(path)
+
+
+def test_reconstruct_validates_before_replace(tmp_path):
+    src = tmp_path / "src.xlsx"
+    out = tmp_path / "out.xlsx"
+
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "safe"
+    wb.save(src)
+    out.write_text("keep me", encoding="utf-8")
+
+    data = serialize_excel(str(src))
+    data["sheets"][0]["drawing_data"] = {
+        "drawing_file": "xl/drawings/drawing1.xml",
+        "drawing_xml": "<not xml",
+        "drawing_rels": None,
+        "files": {},
+    }
+
+    with pytest.raises(ValueError, match="failed validation"):
+        reconstruct_excel(data, str(out))
+
+    assert out.read_text(encoding="utf-8") == "keep me"
+
+
+def test_noop_roundtrip_produces_valid_package(tmp_path):
+    src = tmp_path / "src.xlsx"
+    out = tmp_path / "out.xlsx"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "hello"
+    ws["A1"].font = openpyxl.styles.Font(color="FFFF0000", strike=True)
+    wb.save(src)
+
+    warnings = reconstruct_excel(serialize_excel(str(src)), str(out))
+
+    assert not [w for w in warnings if "failed" in w.lower()]
+    assert inspect_xlsx_package(str(out))["valid"]
+    wb2 = openpyxl.load_workbook(out)
+    assert wb2.active["A1"].value == "hello"
+    assert wb2.active["A1"].font.strike is True
+    assert wb2.active["A1"].font.color.rgb == "FFFF0000"
 
 
 def test_drawing_with_comments_and_hyperlinks_keeps_rels_intact(tmp_path):
@@ -101,6 +192,47 @@ def test_drawing_with_comments_and_hyperlinks_keeps_rels_intact(tmp_path):
         assert any(n.startswith("xl/media/") for n in zf.namelist()), \
             "image lost on second round-trip"
     assert len(openpyxl.load_workbook(out2).active._images) == 1
+
+
+def test_realistic_chart_image_textbox_corpus_roundtrip(tmp_path):
+    src = tmp_path / "corpus.xlsx"
+    out = tmp_path / "corpus-out.xlsx"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Dashboard"
+    for row in range(1, 6):
+        ws.cell(row=row, column=1, value=f"Item {row}")
+        ws.cell(row=row, column=2, value=row * 10)
+    ws["D1"] = "comment"
+    ws["D1"].comment = Comment("visible note", "tester")
+    from openpyxl.chart import BarChart, Reference
+    chart = BarChart()
+    chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=5))
+    chart.title = "Totals"
+    ws.add_chart(chart, "F2")
+    from openpyxl.drawing.image import Image
+    ws.add_image(Image(str(_tiny_png(tmp_path / "img.png"))), "D4")
+    wb.save(src)
+    _add_textbox_drawing(src)
+
+    data = serialize_excel(str(src))
+    assert data["sheets"][0]["shapes"]
+    reconstruct_excel(data, str(out))
+
+    report = inspect_xlsx_package(str(out))
+    assert report["valid"], report
+    _assert_rels_complete(out)
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+        assert any(n.startswith("xl/charts/") for n in names)
+        assert any(n.startswith("xl/media/") for n in names)
+        assert any(n.startswith("xl/drawings/") for n in names)
+        drawing_xml = "\n".join(zf.read(n).decode("utf-8") for n in names if re.match(r"xl/drawings/drawing\d+\.xml$", n))
+        assert "Original Box" in drawing_xml
+
+    wb2 = openpyxl.load_workbook(out)
+    assert wb2["Dashboard"]["D1"].comment is not None
 
 
 def test_gray125_fill_with_colors_is_preserved(tmp_path):
@@ -222,6 +354,45 @@ def test_mc_ignorable_only_lists_declared_prefixes(tmp_path):
     # the x14ac extension attr must still be preserved
     assert "x14ac:dyDescent" in sheet_xml
     assert "xmlns:x14ac" in root
+
+
+def test_prefixed_worksheet_root_attrs_keep_namespace(tmp_path):
+    src = tmp_path / "src.xlsx"
+    out = tmp_path / "out.xlsx"
+
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "x"
+    wb.save(src)
+
+    def patch(xml):
+        return re.sub(
+            r"<worksheet\b[^>]*>",
+            ('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+             'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+             'mc:Ignorable="xr" '
+             'xmlns:xr="http://schemas.microsoft.com/office/spreadsheetml/2014/revision" '
+             'xr:uid="{00000000-0001-0000-0300-000000000000}">'),
+            xml,
+            count=1,
+        )
+
+    tmp = src.with_suffix(".tmp")
+    with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            raw = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                raw = patch(raw.decode("utf-8")).encode("utf-8")
+            zout.writestr(item, raw)
+    tmp.replace(src)
+
+    reconstruct_excel(serialize_excel(str(src)), str(out))
+
+    report = inspect_xlsx_package(str(out))
+    assert report["valid"], report
+    sheet_xml = _read_part(out, "xl/worksheets/sheet1.xml")
+    root = re.search(r"<worksheet\b([^>]*)>", sheet_xml).group(1)
+    assert "xmlns:xr" in root
+    assert "xr:uid" in root
 
 
 def test_diagonal_borders_are_preserved(tmp_path):

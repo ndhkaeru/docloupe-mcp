@@ -1,11 +1,5 @@
 # DocForge MCP
 
-![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)
-![MCP](https://img.shields.io/badge/MCP-stdio-blue)
-![Platform](https://img.shields.io/badge/Windows-x64-lightgrey?logo=windows)
-![Release](https://img.shields.io/github/v/release/ndhkaeru/docforge-mcp?include_prereleases)
-![License](https://img.shields.io/badge/license-Apache--2.0-green)
-
 > **Let coding agents read, convert, and edit common document formats through focused local MCP servers.**
 
 `docforge-mcp` is a local-first [Model Context Protocol](https://modelcontextprotocol.io) toolkit for document workflows. It ships separate `stdio` MCP servers for Markdown, Excel, PDF, DOCX, PPTX, CSV, HTML, plain text, and JSON/JSONL so agents can use the right tool without loading whole files or ad-hoc conversion code into context.
@@ -19,13 +13,13 @@ Everything runs on your machine. There is no hosted service, no remote indexing,
 ## Highlights
 
 - **Markdown-native editing**: outline headings, read/replace/move sections, edit tables, manage diagrams/code blocks, update TOCs, inspect links/images, and work with frontmatter.
-- **Excel round-trip editing**: load `.xlsx` files into sessions, inspect rows/cells/styles, edit sheets/rows/columns, preserve workbook structure, and save back to `.xlsx`.
+- **Excel round-trip editing**: load `.xlsx` files into sessions, inspect rows/cells/styles, edit sheets/rows/columns, validate saves before replace, and preserve advanced workbook parts best-effort.
 - **Broad file support**: use dedicated tools for Markdown, Excel, PDF, DOCX, PPTX, CSV, HTML, plain text, JSON, and JSONL workflows.
 - **Token/quota efficient**: query just the relevant outline, section, table, cell, or converted text instead of sending full files to the model.
 - **Document conversion**: convert PDF, DOCX, PPTX, CSV, HTML, JSON/JSONL, text, and Excel files into Markdown/plain text that agents can reason over.
 - **Small server boundaries**: enable only the MCP servers you need instead of one large all-purpose binary.
 - **Local-only by default**: files remain on the machine running the MCP server.
-- **Release binaries**: Windows x64 `.exe` artifacts are published for each server.
+- **Release binaries**: native artifacts are published for `windows-x64`, `linux-x64`, `macos-x64`, and `macos-arm64`.
 
 ---
 
@@ -33,27 +27,50 @@ Everything runs on your machine. There is no hosted service, no remote indexing,
 
 ### 1. Get the binaries
 
-Download the latest Windows x64 binaries from the [Releases page](https://github.com/ndhkaeru/docforge-mcp/releases).
+Download the latest binaries for your platform from the [Releases page](https://github.com/ndhkaeru/docforge-mcp/releases). Supported platform keys are `windows-x64`, `linux-x64`, `macos-x64`, and `macos-arm64`.
 
 Each server is published as a separate executable:
 
 | Binary | Use it for |
 | --- | --- |
-| `docforge-mcp-md-tools-windows-x64.exe` | Structure-aware Markdown reads and edits. |
-| `docforge-mcp-excel-tools-windows-x64.exe` | Excel-family Markdown export plus `.xlsx` workbook inspection and editing. |
-| `docforge-mcp-pdf-tools-windows-x64.exe` | PDF-to-Markdown text extraction. |
-| `docforge-mcp-docx-tools-windows-x64.exe` | DOCX-to-Markdown conversion. |
-| `docforge-mcp-pptx-tools-windows-x64.exe` | PPTX-to-Markdown conversion. |
-| `docforge-mcp-csv-tools-windows-x64.exe` | CSV-to-Markdown tables. |
-| `docforge-mcp-html-tools-windows-x64.exe` | HTML-to-Markdown conversion. |
-| `docforge-mcp-text-tools-windows-x64.exe` | Plain text and Markdown passthrough reads. |
-| `docforge-mcp-json-tools-windows-x64.exe` | JSON/JSONL passthrough reads. |
+| `docforge-mcp-md-tools-<platform>[.exe]` | Structure-aware Markdown reads and edits. |
+| `docforge-mcp-excel-tools-<platform>[.exe]` | Excel-family Markdown export plus `.xlsx` workbook inspection and editing. |
+| `docforge-mcp-pdf-tools-<platform>[.exe]` | PDF-to-Markdown text extraction. |
+| `docforge-mcp-docx-tools-<platform>[.exe]` | DOCX-to-Markdown conversion. |
+| `docforge-mcp-pptx-tools-<platform>[.exe]` | PPTX-to-Markdown conversion. |
+| `docforge-mcp-csv-tools-<platform>[.exe]` | CSV-to-Markdown tables. |
+| `docforge-mcp-html-tools-<platform>[.exe]` | HTML-to-Markdown conversion. |
+| `docforge-mcp-text-tools-<platform>[.exe]` | Plain text and Markdown passthrough reads. |
+| `docforge-mcp-json-tools-<platform>[.exe]` | JSON/JSONL passthrough reads. |
 
 A `*-sha256sums.txt` file is attached to each release for integrity checks.
 
 ### 2. Add a server to your MCP client
 
-Register the desired binary as a `stdio` server. Replace the path with your downloaded `.exe` path.
+#### Option A: npm/npx
+
+Use the npm launcher and pass the server name as the first argument:
+
+```json
+{
+  "mcpServers": {
+    "docforge-excel": {
+      "command": "npx",
+      "args": ["-y", "@ndhkaeru/docforge-mcp@latest", "excel"]
+    },
+    "docforge-md": {
+      "command": "npx",
+      "args": ["-y", "@ndhkaeru/docforge-mcp@latest", "md"]
+    }
+  }
+}
+```
+
+Supported npm server arguments: `excel`, `md`, `pdf`, `docx`, `pptx`, `csv`, `html`, `text`, and `json`.
+
+#### Option B: downloaded native binaries
+
+Register the desired binary as a `stdio` server. Replace the path with your downloaded platform binary; Windows artifacts end in `.exe`, Linux/macOS artifacts do not.
 
 **OpenAI Codex CLI**
 
@@ -88,7 +105,7 @@ Agents waste context and become brittle when they rely on raw file dumps or one-
 | Read a whole Markdown file to find one section | `markdown_outline` + `read_markdown_section` target exactly what is needed |
 | Rewrite a Markdown table by hand | `md_read_table`, `md_format_table`, and `md_edit_table` operate on table structure |
 | Dump an entire workbook into context | `excel_get_info`, `excel_get_rows`, and `excel_get_cell` inspect only the relevant sheet/range |
-| Risk losing workbook styles while editing | Excel tools preserve styles, merges, dimensions, validations, comments, and images where supported |
+| Risk losing workbook styles or corrupting saves while editing | Excel tools validate `.xlsx` output before replace and preserve styles, merges, dimensions, validations, comments, drawings, charts, and images where supported |
 | Ask an agent to parse DOCX/PDF/PPTX directly | Conversion servers emit Markdown/plain text first |
 
 The result: smaller tool responses, lower token/quota usage, safer edits, and document workflows that are easier to audit.
@@ -117,12 +134,12 @@ One-shot Markdown export for Excel-family files plus session-based `.xlsx` workb
 | Group | Tools |
 | --- | --- |
 | One-shot conversion | `convert_to_markdown` for read-only Markdown export without `excel_load`, `excel_get_workbook_summary`, `excel_get_sheet_preview` |
-| Session lifecycle | `excel_get_info`, `excel_load`, `excel_save`, `excel_reload`, `excel_close` |
-| Reading/export | `excel_to_markdown`, `excel_to_markdown_range`, `excel_read_range`, `excel_find_cells`, `excel_list_tables`, `excel_list_defined_names`, `excel_get_rows`, `excel_get_cell`, `excel_get_column`, `excel_capture`, `excel_extract_images` |
+| Session lifecycle | `excel_get_info`, `excel_load`, `excel_save`, `excel_save_as_copy`, `excel_validate_workbook`, `excel_diff_package`, `excel_reload`, `excel_close` |
+| Reading/export | `excel_to_markdown`, `excel_to_markdown_range`, `excel_read_range`, `excel_find_cells`, `excel_list_tables`, `excel_list_defined_names`, `excel_get_rows`, `excel_get_cell`, `excel_get_column`, `excel_capture`, `excel_extract_images`, `excel_get_shapes` |
 | Sheets | `excel_add_sheet`, `excel_delete_sheet`, `excel_rename_sheet`, `excel_copy_sheet`, `excel_copy_sheet_to`, `excel_move_sheet` |
 | Rows/cells | `excel_clone_rows`, `excel_copy_row`, `excel_insert_rows`, `excel_edit_cells`, `excel_delete_rows`, `excel_clear_range`, `excel_find_rows`, `excel_fill_rows` |
 | Columns | `excel_insert_column`, `excel_copy_column`, `excel_delete_column`, `excel_fill_column` |
-| Layout/style | `excel_merge_cells`, `excel_set_style`, `excel_set_borders`, `excel_set_dimension`, `excel_set_row_height`, `excel_set_column_width`, `excel_autofit_cols`, `excel_freeze_panes`, `excel_set_data_validation` |
+| Layout/style | `excel_merge_cells`, `excel_set_style`, `excel_set_font_color`, `excel_set_strike`, `excel_set_borders`, `excel_set_dimension`, `excel_set_row_height`, `excel_set_column_width`, `excel_autofit_cols`, `excel_freeze_panes`, `excel_set_data_validation`, `excel_update_shape_text`, `excel_set_shape_style` |
 
 ### Conversion servers
 
@@ -213,12 +230,12 @@ Use one MCP entry per server binary you want enabled.
 
 ```toml
 [mcp_servers.md-tools]
-command = "C:/tools/docforge-mcp-md-tools-windows-x64.exe"
+command = "/opt/docforge/docforge-mcp-md-tools-linux-x64"
 args = []
 enabled = true
 
 [mcp_servers.excel-tools]
-command = "C:/tools/docforge-mcp-excel-tools-windows-x64.exe"
+command = "/opt/docforge/docforge-mcp-excel-tools-linux-x64"
 args = []
 enabled = true
 ```
@@ -249,6 +266,12 @@ enabled = true
 
 ### Set up a local environment
 
+```bash
+python -m venv .venv-build
+.venv-build/bin/python -m pip install -U pip
+.venv-build/bin/python -m pip install pytest pyinstaller "mcp[cli]" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
+```
+
 ```powershell
 python -m venv .venv-build
 .\.venv-build\Scripts\python.exe -m pip install -U pip
@@ -257,29 +280,69 @@ python -m venv .venv-build
 
 ### Run tests
 
+```bash
+.venv-build/bin/python -m pytest -q
+```
+
 ```powershell
 .\.venv-build\Scripts\python.exe -m pytest -q
 ```
 
 ### Build locally
 
-Prepare the complete source tree, then use the PyInstaller commands mirrored in `.github/workflows/release.yml` or your local build helper.
+On Windows, use the root helper:
 
-Build output goes to `dist\*-tools.exe` and is ignored by git.
+```powershell
+.uild.ps1              # all servers
+.uild.ps1 -Only excel  # one server smoke build
+```
+
+On Linux/macOS, use the same PyInstaller shape as the release workflow:
+
+```bash
+.venv-build/bin/python -m PyInstaller --clean --onefile --name text-tools --paths servers/text --specpath build --workpath build --distpath dist servers/text/main.py
+```
+
+Build output goes to `dist/*-tools[.exe]` and is ignored by git.
+
+---
+
+## Shipping
+
+Releases are distributed as GitHub Release artifacts. A semver tag such as `v0.1.1` runs `.github/workflows/release.yml`, builds every native server executable for Windows, Linux, and macOS, and uploads checksums.
+
+Release checklist:
+
+1. Update `server.json` version fields when cutting a versioned release.
+2. Run the setup commands above and the platform venv Python with `-m pytest -q`.
+3. Build at least the affected server locally, for example `./build.ps1 -Only excel` on Windows or the PyInstaller command above on Linux/macOS.
+4. Push `main` and confirm the `Push` workflow succeeds.
+5. Push a semver tag such as `v0.1.1` and confirm the `Release` workflow uploads every executable.
+6. Smoke test downloaded artifacts on real files when round-trip behavior changed.
+
+### MCP Registry Metadata
+
+`server.json` records the repository identity and release version in the MCP Registry metadata shape. Keep its top-level `version` and package entry version in sync with GitHub Release tags.
+
+### Tool Description Style
+
+Tool descriptions are written for agent routing: they state when to use the tool, which arguments scope output, which operations are best-effort, and which save/validation steps protect user files.
 
 ---
 
 ## Notes and Limits
 
-- Excel `convert_to_markdown` is read-only and can handle Excel-family files readable by the converter; Excel session/edit/save tools are `.xlsx`-only to avoid silent data loss.
+- Excel `convert_to_markdown` is read-only and can handle Excel-family files readable by the converter. Excel session/edit/save tools support OOXML workbooks (`.xlsx`, `.xlsm`, `.xltx`, `.xltm`) and reject unsafe macro/non-macro extension mismatches.
+- Advanced Excel objects such as DrawingML, macros, external links, pivot tables, slicers, and VML are preserved best-effort; validation warns when advanced parts become orphaned.
 - Use limit parameters such as `sheet_name`, `range_ref`, `max_rows`, `max_cols`, `preview`, `max_chars`, and `include_body=false` when available to keep tool responses small.
 - `excel_capture` requires LibreOffice on the machine running the MCP server.
 - Markdown diagram validation/rendering depends on optional external CLIs such as Mermaid CLI.
 - PDF conversion is best-effort text extraction, not pixel-perfect layout reconstruction.
-- Release binaries are Windows x64 executables.
+- Release binaries are native executables.
 
 ---
 
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
+

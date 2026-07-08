@@ -571,6 +571,246 @@ def _normalize_rel_target(target: str, prefix: str = "xl/") -> str:
     return target
 
 
+def _xlsx_parts(path: str) -> set[str]:
+    import zipfile
+    with zipfile.ZipFile(str(path), "r") as zf:
+        return set(zf.namelist())
+
+
+def inspect_xlsx_package(path: str) -> dict:
+    """Return a compact, validation-oriented summary of an .xlsx package."""
+    import re
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    required = {"[Content_Types].xml", "xl/workbook.xml", "xl/_rels/workbook.xml.rels"}
+    errors: list[str] = []
+    warnings: list[str] = []
+    features: dict[str, int] = {}
+    parts: list[str] = []
+
+    try:
+        with zipfile.ZipFile(str(path), "r") as zf:
+            bad = zf.testzip()
+            if bad:
+                errors.append(f"corrupt zip member: {bad}")
+            parts = sorted(zf.namelist())
+            missing = sorted(required - set(parts))
+            if missing:
+                errors.append(f"missing required parts: {missing}")
+
+            xml_parts = [p for p in parts if p.endswith((".xml", ".rels"))]
+            for part in xml_parts:
+                try:
+                    ET.fromstring(zf.read(part))
+                except Exception as exc:
+                    errors.append(f"invalid XML in {part}: {exc}")
+
+            prefixes = {
+                "drawings": "xl/drawings/",
+                "charts": "xl/charts/",
+                "media": "xl/media/",
+                "vml_drawings": "xl/drawings/vmlDrawing",
+                "pivot_tables": "xl/pivotTables/",
+                "slicers": "xl/slicers/",
+                "external_links": "xl/externalLinks/",
+                "custom_xml": "customXml/",
+            }
+            for name, prefix in prefixes.items():
+                features[name] = sum(1 for p in parts if p.startswith(prefix))
+            features["vba_project"] = int("xl/vbaProject.bin" in parts)
+            features["unknown_parts"] = sum(
+                1 for p in parts
+                if not p.startswith(("_rels/", "docProps/", "xl/", "customXml/"))
+                and p != "[Content_Types].xml"
+            )
+
+            referenced_parts: set[str] = set()
+            for rel_part in [p for p in parts if p.endswith(".rels")]:
+                rel_base = ""
+                if rel_part == "_rels/.rels":
+                    rel_base = ""
+                elif "/_rels/" in rel_part:
+                    folder, rel_name = rel_part.split("/_rels/", 1)
+                    rel_base = folder.rsplit("/", 1)[0] + "/" if "/" in folder else ""
+                    rel_base += rel_name[:-5]
+                try:
+                    rel_xml = zf.read(rel_part).decode("utf-8")
+                    for match in re.finditer(r'\bTarget="([^"]+)"', rel_xml):
+                        target = match.group(1)
+                        if target.startswith(("http://", "https://", "mailto:")):
+                            continue
+                        if target.startswith("/"):
+                            referenced_parts.add(target.lstrip("/"))
+                        else:
+                            import posixpath
+                            referenced_parts.add(posixpath.normpath(posixpath.join(posixpath.dirname(rel_base), target)))
+                except Exception:
+                    pass
+            orphan_advanced = [
+                p for p in parts
+                if p.startswith(("xl/pivotTables/", "xl/externalLinks/"))
+                and p not in referenced_parts
+            ]
+            if orphan_advanced:
+                warnings.append(f"advanced parts are present but not referenced by relationships: {orphan_advanced[:8]}")
+            if any(features.get(k, 0) for k in ("vml_drawings", "pivot_tables", "slicers", "external_links", "vba_project")):
+                warnings.append("workbook contains advanced parts that are preserved best-effort only")
+    except Exception as exc:
+        errors.append(f"cannot read xlsx package: {exc}")
+
+    return {
+        "path": str(path),
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "part_count": len(parts),
+        "features": features,
+    }
+
+
+def validate_xlsx(path: str) -> list[str]:
+    """Raise ValueError if the saved workbook package is structurally broken."""
+    report = inspect_xlsx_package(path)
+    if not report["valid"]:
+        raise ValueError("Saved workbook failed validation: " + "; ".join(report["errors"]))
+    return report["warnings"]
+
+
+def diff_xlsx_package(before: str, after: str) -> dict:
+    """Compare ZIP package manifests for diagnostics after a save."""
+    before_parts = _xlsx_parts(before)
+    after_parts = _xlsx_parts(after)
+    removed = sorted(before_parts - after_parts)
+    added = sorted(after_parts - before_parts)
+    return {
+        "before_part_count": len(before_parts),
+        "after_part_count": len(after_parts),
+        "added": added,
+        "removed": removed,
+        "changed": bool(added or removed),
+    }
+
+
+def _restore_missing_package_parts(source_path: str | None, xlsx_path: str) -> str | None:
+    """Best-effort copy of advanced OOXML parts that openpyxl dropped."""
+    if not source_path or str(source_path) == str(xlsx_path):
+        return None
+    import os
+    import zipfile
+
+    if not os.path.exists(str(source_path)):
+        return None
+
+    tmp = str(xlsx_path) + ".~parts.tmp"
+    def merge_relationships(current_xml: str, source_xml: str, restored_parts: list[str]) -> str:
+        import posixpath
+        import re
+
+        restored = set(restored_parts)
+        existing_ids = set(re.findall(r'\bId="([^"]+)"', current_xml))
+        existing_targets = set(re.findall(r'\bTarget="([^"]+)"', current_xml))
+        additions = []
+        for match in re.finditer(r'<Relationship\b([^>]*)/>', source_xml):
+            rel = match.group(0)
+            attrs = match.group(1)
+            target_m = re.search(r'\bTarget="([^"]+)"', attrs)
+            id_m = re.search(r'\bId="([^"]+)"', attrs)
+            if not target_m:
+                continue
+            target = target_m.group(1)
+            norm = target.lstrip("/") if target.startswith("/") else posixpath.normpath("xl/" + target)
+            if norm not in restored and "vbaProject.bin" not in norm:
+                continue
+            if target in existing_targets:
+                continue
+            if id_m and id_m.group(1) in existing_ids:
+                next_id = 1
+                while f"rId{next_id}" in existing_ids:
+                    next_id += 1
+                new_id = f"rId{next_id}"
+                existing_ids.add(new_id)
+                rel = re.sub(r'\bId="[^"]+"', f'Id="{new_id}"', rel, count=1)
+            elif id_m:
+                existing_ids.add(id_m.group(1))
+            existing_targets.add(target)
+            additions.append(rel)
+        if additions:
+            current_xml = current_xml.replace("</Relationships>", "".join(additions) + "</Relationships>", 1)
+        return current_xml
+
+    def merge_content_types(current_xml: str, source_xml: str, restored_parts: list[str]) -> str:
+        import re
+        workbook_override = re.search(r'<Override\b[^>]*\bPartName="/xl/workbook.xml"[^>]*/>', source_xml)
+        if workbook_override and (
+            "macroEnabled" in workbook_override.group(0)
+            or "template" in workbook_override.group(0)
+        ):
+            current_xml = re.sub(
+                r'<Override\b[^>]*\bPartName="/xl/workbook.xml"[^>]*/>',
+                workbook_override.group(0),
+                current_xml,
+                count=1,
+            )
+        needed_exts = {p.rsplit(".", 1)[-1].lower() for p in restored_parts if "." in p}
+        for match in re.finditer(r'<Default\b[^>]*\bExtension="([^"]+)"[^>]*/>', source_xml):
+            ext = match.group(1).lower()
+            if ext in needed_exts and f'Extension="{ext}"' not in current_xml:
+                current_xml = current_xml.replace("</Types>", match.group(0) + "</Types>", 1)
+        for part in restored_parts:
+            part_name = "/" + part
+            if f'PartName="{part_name}"' in current_xml:
+                continue
+            match = re.search(rf'<Override\b[^>]*\bPartName="{re.escape(part_name)}"[^>]*/>', source_xml)
+            if match:
+                current_xml = current_xml.replace("</Types>", match.group(0) + "</Types>", 1)
+        return current_xml
+
+    try:
+        with zipfile.ZipFile(str(source_path), "r") as src, zipfile.ZipFile(str(xlsx_path), "r") as cur:
+            current = set(cur.namelist())
+            missing = [p for p in src.namelist() if p not in current]
+            source_names = set(src.namelist())
+            if not missing and "xl/vbaProject.bin" not in source_names:
+                return None
+            unsafe_prefixes = (
+                "xl/worksheets/",      # regenerated sheets own their rel ids
+                "xl/drawings/",        # handled by _inject_drawing_data
+                "xl/media/",           # handled through drawing relationships
+                "xl/charts/",          # handled through drawing relationships
+                "xl/printerSettings/", # old sheet rels/pageSetup ids are not stable
+            )
+            restored = [
+                p for p in missing
+                if p not in {"xl/workbook.xml", "xl/styles.xml", "xl/sharedStrings.xml", "[Content_Types].xml", "xl/calcChain.xml"}
+                and not p.startswith(unsafe_prefixes)
+            ]
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in cur.infolist():
+                    raw = cur.read(item.filename)
+                    if item.filename == "[Content_Types].xml":
+                        raw = merge_content_types(
+                            raw.decode("utf-8"),
+                            src.read("[Content_Types].xml").decode("utf-8"),
+                            restored,
+                        ).encode("utf-8")
+                    elif item.filename == "xl/_rels/workbook.xml.rels" and "xl/_rels/workbook.xml.rels" in source_names:
+                        raw = merge_relationships(
+                            raw.decode("utf-8"),
+                            src.read("xl/_rels/workbook.xml.rels").decode("utf-8"),
+                            restored,
+                        ).encode("utf-8")
+                    zout.writestr(item, raw)
+                for part in restored:
+                    zout.writestr(part, src.read(part))
+        os.replace(tmp, str(xlsx_path))
+    except Exception as exc:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"advanced package part passthrough failed: {exc}"
+    return None
+
+
 def _extract_drawing_data(xlsx_path, sheet_file_map: dict) -> dict:
     """
     Extract drawing/chart/image files per sheet name.
@@ -629,75 +869,85 @@ def _extract_drawing_data(xlsx_path, sheet_file_map: dict) -> dict:
     return result
 
 
+def _shape_texts_from_drawing_xml(xml: str) -> list[str]:
+    import re
+    from html import unescape
+    texts = []
+    for block in re.findall(r"<a:t(?:\s[^>]*)?>(.*?)</a:t>", xml, flags=re.DOTALL):
+        texts.append(unescape(re.sub(r"<[^>]+>", "", block)))
+    return texts
+
+
+def _extract_shape_inventory(drawing_data: dict) -> dict:
+    """Build lightweight shape metadata from preserved DrawingML XML."""
+    import re
+    from html import unescape
+    result: dict[str, list[dict]] = {}
+    for sname, sd in drawing_data.items():
+        xml = sd.get("drawing_xml") or ""
+        shapes = []
+        anchor_re = r"<(?:(?:xdr:)?)(twoCellAnchor|oneCellAnchor|absoluteAnchor)\b.*?</(?:(?:xdr:)?)(?:twoCellAnchor|oneCellAnchor|absoluteAnchor)>"
+        for idx, match in enumerate(re.finditer(anchor_re, xml, re.DOTALL), 1):
+            anchor_xml = match.group(0)
+            name_m = re.search(r'<(?:xdr:)?cNvPr\b[^>]*\bname="([^"]*)"', anchor_xml)
+            id_m = re.search(r'<(?:xdr:)?cNvPr\b[^>]*\bid="([^"]*)"', anchor_xml)
+            rel_m = re.search(r'\br:embed="([^"]+)"|\br:link="([^"]+)"', anchor_xml)
+            kind = "shape"
+            if re.search(r"<(?:xdr:)?pic\b", anchor_xml):
+                kind = "picture"
+            elif "graphicData" in anchor_xml and "/chart" in anchor_xml:
+                kind = "chart"
+            elif re.search(r"<(?:xdr:)?sp\b", anchor_xml):
+                kind = "shape"
+            shapes.append({
+                "index": idx,
+                "id": id_m.group(1) if id_m else None,
+                "name": unescape(name_m.group(1)) if name_m else None,
+                "type": kind,
+                "text": "".join(_shape_texts_from_drawing_xml(anchor_xml)) or None,
+                "relationship_id": next((g for g in (rel_m.groups() if rel_m else ()) if g), None),
+            })
+        if shapes:
+            result[sname] = shapes
+    return result
+
+
 def _inject_drawing_data(xlsx_path: str, drawing_data: dict,
                          sheet_name_to_new_file: dict) -> str | None:
     """
-    Inject drawings, charts, and media back into a saved xlsx file.
+    Inject preserved DrawingML drawings, charts, and media into a saved xlsx file.
     sheet_name_to_new_file: {sheet_name: "xl/worksheets/sheetN.xml"} in the NEW file.
     """
     import zipfile, re, os, base64
     if not drawing_data:
-        return
+        return None
     tmp = str(xlsx_path) + ".~draw.tmp"
     try:
         with zipfile.ZipFile(str(xlsx_path), "r") as zin:
-            # Find highest existing drawing/chart/media indices to avoid collisions
             existing = set(zin.namelist())
-            existing_drawings = [f for f in existing if re.match(r"xl/drawings/drawing\d+\.xml$", f)]
-            draw_idx = len(existing_drawings) + 1
-
-            # Mapping from old drawing file → new drawing file
-            file_remaps: dict[str, str] = {}
-            # All extra files to add: {zip_path: bytes}
             extra_files: dict[str, bytes] = {}
-            # Per new sheet file: content injection
-            sheet_xml_patches: dict[str, str] = {}  # sheet_file → drawing rId tag
+            sheet_xml_patches: dict[str, dict] = {}
 
             for sname, sd in drawing_data.items():
                 new_sheet_file = sheet_name_to_new_file.get(sname)
-                if not new_sheet_file:
+                old_drawing = sd.get("drawing_file")
+                drawing_xml = sd.get("drawing_xml")
+                if not new_sheet_file or not old_drawing or not drawing_xml:
                     continue
 
-                old_drawing = sd["drawing_file"]
-                new_drawing = f"xl/drawings/drawing{draw_idx}.xml"
-                draw_idx += 1
-                file_remaps[old_drawing] = new_drawing
+                # Keep original DrawingML part names/relationships. Excel desktop
+                # is stricter than XML validators; remapping complex drawing
+                # packages can break hidden cross-part references.
+                extra_files[old_drawing] = drawing_xml.encode("utf-8")
 
-                extra_files[new_drawing] = sd["drawing_xml"].encode("utf-8")
+                old_rels_content = sd.get("drawing_rels")
+                if old_rels_content:
+                    dr_rels_path = old_drawing.rsplit("/", 1)
+                    extra_files[dr_rels_path[0] + "/_rels/" + dr_rels_path[1] + ".rels"] = old_rels_content.encode("utf-8")
 
-                # Remap files (charts, images) referenced by the drawing's rels
-                new_dr_rels_entries = []
-                old_rels_content = sd.get("drawing_rels") or ""
-                for rm in re.finditer(r'<Relationship\b([^>]+)/>', old_rels_content):
-                    attrs = rm.group(1)
-                    id_m   = re.search(r'\bId="([^"]+)"', attrs)
-                    tgt_m  = re.search(r'\bTarget="([^"]+)"', attrs)
-                    type_m = re.search(r'\bType="([^"]+)"', attrs)
-                    if not (id_m and tgt_m and type_m):
-                        continue
-                    old_tgt = _normalize_rel_target(tgt_m.group(1), "xl/")
-                    if old_tgt in sd["files"]:
-                        # Keep same filename (charts/images can coexist as long as names differ)
-                        # just add if not already present
-                        new_tgt = old_tgt
-                        extra_files[new_tgt] = base64.b64decode(sd["files"][old_tgt])
-                        # Make path relative from xl/drawings/ perspective
-                        rel_tgt = "../" + new_tgt[3:]  # xl/charts/... → ../charts/...
-                        new_dr_rels_entries.append(
-                            f'<Relationship Id="{id_m.group(1)}" Type="{type_m.group(1)}" Target="{rel_tgt}"/>')
+                for fp, payload in (sd.get("files") or {}).items():
+                    extra_files[fp] = base64.b64decode(payload)
 
-                if new_dr_rels_entries:
-                    dr_rels_path = new_drawing.rsplit("/", 1)
-                    new_dr_rels_file = dr_rels_path[0] + "/_rels/" + dr_rels_path[1] + ".rels"
-                    ns = "http://schemas.openxmlformats.org/package/2006/relationships"
-                    extra_files[new_dr_rels_file] = (
-                        f'<Relationships xmlns="{ns}">' +
-                        "".join(new_dr_rels_entries) +
-                        "</Relationships>"
-                    ).encode("utf-8")
-
-                # Worksheet rels — pick an rId that does not collide with the
-                # rels openpyxl already wrote for this sheet (hyperlinks, comments…)
                 parts = new_sheet_file.rsplit("/", 1)
                 new_sheet_rels = parts[0] + "/_rels/" + parts[1] + ".rels"
                 rid = "rId1"
@@ -705,40 +955,43 @@ def _inject_drawing_data(xlsx_path: str, drawing_data: dict,
                     rels_now = zin.read(new_sheet_rels).decode("utf-8")
                     used = [int(m) for m in re.findall(r'\bId="rId(\d+)"', rels_now)]
                     rid = f"rId{max(used, default=0) + 1}"
+
                 sheet_xml_patches[new_sheet_file] = {
                     "drawing_rId": rid,
                     "sheet_rels_file": new_sheet_rels,
-                    "new_drawing_file": new_drawing,
+                    "rel_target": "../drawings/" + old_drawing.rsplit("/", 1)[1],
                 }
 
-            # Build content types additions
+            if not sheet_xml_patches:
+                return None
+
             ct_additions = set()
             for fp in extra_files:
                 ext = fp.rsplit(".", 1)[-1].lower()
                 if ext == "xml":
-                    if "charts" in fp:
-                        ct_additions.add(('Override', fp,
-                            'application/vnd.openxmlformats-officedocument.drawingml.chart+xml'))
-                    elif "drawings/drawing" in fp:
-                        ct_additions.add(('Override', fp,
-                            'application/vnd.openxmlformats-officedocument.drawing+xml'))
+                    if "/charts/" in fp:
+                        ct_additions.add(("Override", fp, "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"))
+                    elif "/drawings/drawing" in fp:
+                        ct_additions.add(("Override", fp, "application/vnd.openxmlformats-officedocument.drawing+xml"))
                 elif ext == "png":
-                    ct_additions.add(('Default', 'png', 'image/png'))
-                elif ext in ("jpg", "jpeg"):
-                    ct_additions.add(('Default', 'jpeg', 'image/jpeg'))
+                    ct_additions.add(("Default", "png", "image/png"))
+                elif ext in {"jpg", "jpeg"}:
+                    ct_additions.add(("Default", ext, "image/jpeg"))
                 elif ext == "gif":
-                    ct_additions.add(('Default', 'gif', 'image/gif'))
+                    ct_additions.add(("Default", "gif", "image/gif"))
+                elif ext == "emf":
+                    ct_additions.add(("Default", "emf", "image/x-emf"))
+                elif ext == "wmf":
+                    ct_additions.add(("Default", "wmf", "image/x-wmf"))
 
-            # Existing sheet rels files that need the drawing relationship added
             draw_type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
-            rels_patches: dict[str, str] = {}
-            for patch in sheet_xml_patches.values():
-                if patch["sheet_rels_file"] in existing:
-                    rel_path = "../drawings/" + patch["new_drawing_file"].rsplit("/", 1)[1]
-                    rels_patches[patch["sheet_rels_file"]] = (
-                        f'<Relationship Id="{patch["drawing_rId"]}" '
-                        f'Type="{draw_type}" Target="{rel_path}"/>'
-                    )
+            rels_patches = {
+                patch["sheet_rels_file"]: (
+                    f'<Relationship Id="{patch["drawing_rId"]}" '
+                    f'Type="{draw_type}" Target="{patch["rel_target"]}"/>'
+                )
+                for patch in sheet_xml_patches.values()
+            }
 
             with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
                 for item in zin.infolist():
@@ -747,69 +1000,50 @@ def _inject_drawing_data(xlsx_path: str, drawing_data: dict,
                     if item.filename in sheet_xml_patches:
                         patch = sheet_xml_patches[item.filename]
                         content = raw.decode("utf-8")
-                        rns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-                        tag = f'<drawing xmlns:r="{rns}" r:id="{patch["drawing_rId"]}"/>'
-                        # CT_Worksheet order: <drawing> must precede legacyDrawing,
-                        # tableParts, extLst, … — insert before the first of them.
-                        anchor = re.search(
-                            r"<(?:legacyDrawing|legacyDrawingHF|picture|oleObjects"
-                            r"|controls|webPublishItems|tableParts|extLst)\b",
-                            content,
-                        )
-                        pos = anchor.start() if anchor else content.rfind("</worksheet>")
-                        content = content[:pos] + tag + content[pos:]
+                        if "<drawing" not in content:
+                            rns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                            tag = f'<drawing xmlns:r="{rns}" r:id="{patch["drawing_rId"]}"/>'
+                            anchor = re.search(
+                                r"<(?:legacyDrawing|legacyDrawingHF|picture|oleObjects"
+                                r"|controls|webPublishItems|tableParts|extLst)\b",
+                                content,
+                            )
+                            pos = anchor.start() if anchor else content.rfind("</worksheet>")
+                            content = content[:pos] + tag + content[pos:]
                         raw = content.encode("utf-8")
 
                     elif item.filename in rels_patches:
                         content = raw.decode("utf-8")
-                        content = content.replace(
-                            "</Relationships>", rels_patches[item.filename] + "</Relationships>", 1)
+                        if rels_patches[item.filename] not in content:
+                            content = content.replace("</Relationships>", rels_patches[item.filename] + "</Relationships>", 1)
                         raw = content.encode("utf-8")
 
                     elif item.filename == "[Content_Types].xml" and ct_additions:
                         content = raw.decode("utf-8")
-                        for ct_entry in ct_additions:
-                            if ct_entry[0] == "Default":
-                                ext_val, mt = ct_entry[1], ct_entry[2]
-                                if f'Extension="{ext_val}"' not in content:
+                        for kind, part_or_ext, content_type in ct_additions:
+                            if kind == "Default":
+                                if f'Extension="{part_or_ext}"' not in content:
                                     content = content.replace(
                                         "</Types>",
-                                        f'<Default Extension="{ext_val}" ContentType="{mt}"/></Types>', 1)
-                            else:
-                                part, mt = ct_entry[1], ct_entry[2]
-                                if f'PartName="/{part}"' not in content:
-                                    content = content.replace(
-                                        "</Types>",
-                                        f'<Override PartName="/{part}" ContentType="{mt}"/></Types>', 1)
+                                        f'<Default Extension="{part_or_ext}" ContentType="{content_type}"/></Types>', 1)
+                            elif f'PartName="/{part_or_ext}"' not in content:
+                                content = content.replace(
+                                    "</Types>",
+                                    f'<Override PartName="/{part_or_ext}" ContentType="{content_type}"/></Types>', 1)
                         raw = content.encode("utf-8")
 
+                    if item.filename in extra_files:
+                        raw = extra_files[item.filename]
                     zout.writestr(item, raw)
 
-                # Add extra files (drawings, charts, media)
                 for fp, fb in extra_files.items():
                     if fp not in existing:
                         zout.writestr(fp, fb)
 
-                # Add worksheet rels files
-                for sname, sd in drawing_data.items():
-                    new_sheet_file = sheet_name_to_new_file.get(sname)
-                    if not new_sheet_file:
-                        continue
-                    patch = sheet_xml_patches.get(new_sheet_file)
-                    if not patch:
-                        continue
-                    sheet_rels = patch["sheet_rels_file"]
-                    new_drawing = patch["new_drawing_file"]
-                    rel_drawing_path = "../drawings/" + new_drawing.rsplit("/", 1)[1]
-                    ns = "http://schemas.openxmlformats.org/package/2006/relationships"
-                    draw_type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
-                    new_rels_content = (
-                        f'<Relationships xmlns="{ns}">'
-                        f'<Relationship Id="{patch["drawing_rId"]}" Type="{draw_type}" Target="{rel_drawing_path}"/>'
-                        f'</Relationships>'
-                    )
-                    if sheet_rels not in existing:
-                        zout.writestr(sheet_rels, new_rels_content.encode("utf-8"))
+                ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+                for rels_file, rel_entry in rels_patches.items():
+                    if rels_file not in existing:
+                        zout.writestr(rels_file, f'<Relationships xmlns="{ns}">{rel_entry}</Relationships>'.encode("utf-8"))
 
         os.replace(tmp, str(xlsx_path))
     except Exception as e:
@@ -817,7 +1051,6 @@ def _inject_drawing_data(xlsx_path: str, drawing_data: dict,
             os.remove(tmp)
         return f"drawings/charts/images passthrough failed: {e}"
     return None
-
 
 def _extract_cf_xml(xlsx_path, sheet_names: list) -> dict:
     """
@@ -1267,15 +1500,27 @@ def _inject_sheet_format_pr(xlsx_path: str, data: dict) -> str | None:
                     if sf_data:
                         content = raw.decode("utf-8")
                         raw_sf = sf_data.get("sheetFormatPr")
+                        root_attrs = _parse_xml_attrs(sf_data.get("root_attrs") or "")
+                        needed = {}
+                        root_prefixes = {
+                            p for p in _xml_prefixed_attrs(sf_data.get("root_attrs") or "")
+                            if p not in {"xmlns", "mc"}
+                        }
+                        for prefix in root_prefixes:
+                            ns_key = f"xmlns:{prefix}"
+                            if root_attrs.get(ns_key):
+                                needed[ns_key] = root_attrs[ns_key]
+                            attr_key = next((k for k in root_attrs if k.startswith(prefix + ":")), None)
+                            if attr_key:
+                                needed[attr_key] = root_attrs[attr_key]
                         if raw_sf:
                             prefixes = _xml_prefixed_attrs(raw_sf)
-                            root_attrs = _parse_xml_attrs(sf_data.get("root_attrs") or "")
-                            needed = {}
                             for prefix in prefixes:
                                 ns_key = f"xmlns:{prefix}"
                                 if root_attrs.get(ns_key):
                                     needed[ns_key] = root_attrs[ns_key]
-                            if prefixes and root_attrs.get("xmlns:mc") and root_attrs.get("mc:Ignorable"):
+                            ignorable_prefixes = prefixes | root_prefixes
+                            if ignorable_prefixes and root_attrs.get("xmlns:mc") and root_attrs.get("mc:Ignorable"):
                                 # mc:Ignorable may only list prefixes that are
                                 # actually declared in the new root — Excel
                                 # refuses to open the file otherwise.
@@ -1288,7 +1533,6 @@ def _inject_sheet_format_pr(xlsx_path: str, data: dict) -> str | None:
                                 if keep:
                                     needed["xmlns:mc"] = root_attrs["xmlns:mc"]
                                     needed["mc:Ignorable"] = " ".join(keep)
-                            content = _inject_missing_root_attrs(content, needed)
                             if re.search(r"<sheetFormatPr\b", content):
                                 content = re.sub(
                                     r"<sheetFormatPr\b[^>]*/>|<sheetFormatPr\b[^>]*>.*?</sheetFormatPr>",
@@ -1304,6 +1548,8 @@ def _inject_sheet_format_pr(xlsx_path: str, data: dict) -> str | None:
                                     content,
                                     count=1,
                                 )
+                        if needed:
+                            content = _inject_missing_root_attrs(content, needed)
                         raw = content.encode("utf-8")
                     zout.writestr(item, raw)
         os.replace(tmp, str(xlsx_path))
@@ -1329,7 +1575,8 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
     import openpyxl
 
     path = uri_to_path(uri)
-    wb = openpyxl.load_workbook(str(path))
+    keep_vba = path.suffix.lower() in {".xlsm", ".xltm"}
+    wb = openpyxl.load_workbook(str(path), keep_vba=keep_vba)
     raw_theme = getattr(wb, "loaded_theme", None)
     theme_xml = None
     if raw_theme:
@@ -1654,9 +1901,12 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
 
     # Extract drawing/chart/image data for passthrough
     drawing_data = _extract_drawing_data(path, _sfm)
+    shape_inventory = _extract_shape_inventory(drawing_data)
     for sd in sheets:
         if sd["name"] in drawing_data:
             sd["drawing_data"] = drawing_data[sd["name"]]
+        if sd["name"] in shape_inventory:
+            sd["shapes"] = shape_inventory[sd["name"]]
 
     # Document properties (docProps/core.xml)
     doc_props = {}
@@ -1854,7 +2104,8 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
                 if cd["italic"]:            fk["italic"]    = True
                 if cd.get("size"):          fk["size"]      = cd["size"]
                 if cd.get("font"):          fk["name"]      = cd["font"]
-                if cd.get("uline"):         fk["underline"] = cd["uline"]
+                if cd.get("uline"):
+                    fk["underline"] = "single" if cd["uline"] is True else cd["uline"]
                 if cd.get("strike"):        fk["strike"]    = True
                 if cd.get("vAlign"):        fk["vertAlign"] = cd["vAlign"]
                 _apply_raw_font_kwargs(fk, cd)
@@ -2048,6 +2299,12 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
             if w:
                 warnings.append(w)
 
+        w = _restore_missing_package_parts(data.get("source"), tmp_out)
+        if w:
+            warnings.append(w)
+
+        warnings.extend(validate_xlsx(tmp_out))
+
         # Windows: a stale GC-held handle or AV scan can briefly lock the
         # target — retry the swap a few times before giving up.
         import gc as _gc
@@ -2069,3 +2326,4 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
                 pass
         raise
     return warnings
+

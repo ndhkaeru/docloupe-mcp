@@ -2,7 +2,7 @@
 Regression tests for the MCP tool layer (main.py):
 
 A1. Sheet-filtered load + save merges unloaded sheets back (no data loss).
-A2. Macro-enabled formats are rejected at load.
+A2. Macro-enabled OOXML workbooks can be edited while preserving VBA parts.
 A3. A failing save never corrupts the existing file (atomic write).
 B1. Structural row/column edits shift all coordinate-anchored metadata:
     merges, hyperlinks, comments, data validations, conditional formatting,
@@ -13,6 +13,7 @@ C.  Internal hyperlinks, docProps and workbook view survive a round-trip;
     private keys are stripped from read-tool output.
 """
 import json
+import re
 import sys
 import types
 import zipfile
@@ -58,6 +59,156 @@ def _make_rich_sheet(path: Path) -> None:
     wb.save(path)
 
 
+def test_font_color_and_strike_shortcuts_roundtrip(tmp_path):
+    src = tmp_path / "src.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "changed"
+    wb.save(src)
+
+    key = M.excel_load(str(src)).split("session_key='")[1].split("'")[0]
+    M.excel_set_font_color(key, "Sheet", 0, 0, "FF00AA00")
+    M.excel_set_strike(key, "Sheet", 0, 0, True)
+    M.excel_save(key)
+
+    wb2 = openpyxl.load_workbook(src)
+    cell = wb2.active["A1"]
+    assert cell.font.color.rgb == "FF00AA00"
+    assert cell.font.strike is True
+
+
+def test_validate_and_diff_package_tools(tmp_path):
+    src = tmp_path / "src.xlsx"
+    out = tmp_path / "out.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "x"
+    wb.save(src)
+    wb.save(out)
+
+    report = json.loads(M.excel_validate_workbook(str(src)))
+    assert report["valid"] is True
+    diff = json.loads(M.excel_diff_package(str(src), str(out)))
+    assert diff["changed"] is False
+
+
+def test_save_as_copy_does_not_overwrite_source(tmp_path):
+    src = tmp_path / "src.xlsx"
+    out = tmp_path / "copy.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "old"
+    wb.save(src)
+
+    key = M.excel_load(str(src)).split("session_key='")[1].split("'")[0]
+    M.excel_edit_cells(key, "Sheet", [{"row_index": 0, "edits": {0: "new"}}])
+    M.excel_save_as_copy(key, str(out))
+
+    assert openpyxl.load_workbook(src).active["A1"].value == "old"
+    assert openpyxl.load_workbook(out).active["A1"].value == "new"
+
+
+def test_shape_inventory_and_text_update_from_session_data(tmp_path):
+    drawing_xml = '''<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="TextBox 1"/></xdr:nvSpPr><xdr:txBody><a:p><a:r><a:t>Old</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>'''
+    key = str(tmp_path / "fake.xlsx")
+    M._sessions[key] = {
+        "source": key,
+        "sheets": [{
+            "name": "Sheet1",
+            "rows": [],
+            "drawing_data": {"drawing_file": "xl/drawings/drawing1.xml", "drawing_xml": drawing_xml, "drawing_rels": None, "files": {}},
+            "shapes": [{"index": 1, "id": "2", "name": "TextBox 1", "type": "shape", "text": "Old", "relationship_id": None}],
+        }],
+    }
+
+    shapes = json.loads(M.excel_get_shapes(key, "Sheet1"))
+    assert shapes["Sheet1"][0]["text"] == "Old"
+    M.excel_update_shape_text(key, "Sheet1", 1, "New & Better")
+    sheet = M._sessions[key]["sheets"][0]
+    assert sheet["shapes"][0]["text"] == "New & Better"
+    assert "New &amp; Better" in sheet["drawing_data"]["drawing_xml"]
+
+
+def test_shape_style_update_from_session_data(tmp_path):
+    drawing_xml = '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="TextBox 1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></xdr:spPr><xdr:txBody><a:p><a:r><a:rPr/><a:t>Old</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>'
+    key = str(tmp_path / "fake-style.xlsx")
+    M._sessions[key] = {
+        "source": key,
+        "sheets": [{
+            "name": "Sheet1",
+            "rows": [],
+            "drawing_data": {"drawing_file": "xl/drawings/drawing1.xml", "drawing_xml": drawing_xml, "drawing_rels": None, "files": {}},
+            "shapes": [{"index": 1, "id": "2", "name": "TextBox 1", "type": "shape", "text": "Old", "relationship_id": None}],
+        }],
+    }
+
+    M.excel_set_shape_style(key, "Sheet1", 1, fill_color="FFCCFFFF", outline_color="FFFF0000", outline_width_pt=2, text_color="FF0000FF")
+
+    sheet = M._sessions[key]["sheets"][0]
+    xml = sheet["drawing_data"]["drawing_xml"]
+    assert re.search(r'<a:srgbClr val="CCFFFF"\s*/>', xml)
+    assert re.search(r'<a:ln w="25400">', xml)
+    assert re.search(r'<a:srgbClr val="FF0000"\s*/>', xml)
+    assert re.search(r'<a:srgbClr val="0000FF"\s*/>', xml)
+    assert sheet["shapes"][0]["outline_width_pt"] == 2
+
+
+def test_shape_fill_does_not_consume_outline_xml(tmp_path):
+    drawing_xml = '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="Shape 1"/></xdr:nvSpPr><xdr:spPr><a:noFill/><a:ln><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></xdr:spPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>'
+    key = str(tmp_path / "fake-fill.xlsx")
+    M._sessions[key] = {"source": key, "sheets": [{"name": "Sheet1", "rows": [], "drawing_data": {"drawing_file": "xl/drawings/drawing1.xml", "drawing_xml": drawing_xml, "drawing_rels": None, "files": {}}, "shapes": [{"index": 1, "id": "2", "name": "Shape 1", "type": "shape", "text": None, "relationship_id": None}]}]}
+
+    M.excel_set_shape_style(key, "Sheet1", 1, fill_color="00FF00")
+
+    xml = M._sessions[key]["sheets"][0]["drawing_data"]["drawing_xml"]
+    assert re.search(r'<a:solidFill><a:srgbClr val="00FF00"\s*/></a:solidFill>', xml)
+    assert re.search(r'<a:ln><a:solidFill><a:srgbClr val="FF0000"\s*/></a:solidFill></a:ln>', xml)
+
+
+def test_shape_outline_width_preserves_existing_outline_color(tmp_path):
+    drawing_xml = '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="Shape 1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:ln><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></xdr:spPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>'
+    key = str(tmp_path / "fake-line.xlsx")
+    M._sessions[key] = {"source": key, "sheets": [{"name": "Sheet1", "rows": [], "drawing_data": {"drawing_file": "xl/drawings/drawing1.xml", "drawing_xml": drawing_xml, "drawing_rels": None, "files": {}}, "shapes": [{"index": 1, "id": "2", "name": "Shape 1", "type": "shape", "text": None, "relationship_id": None}]}]}
+
+    M.excel_set_shape_style(key, "Sheet1", 1, outline_width_pt=3)
+
+    xml = M._sessions[key]["sheets"][0]["drawing_data"]["drawing_xml"]
+    assert re.search(r'<a:ln w="38100"><a:solidFill><a:srgbClr val="FF0000"\s*/></a:solidFill></a:ln>', xml)
+
+
+def test_shape_clear_fill_and_outline_flags_work_through_tool(tmp_path):
+    drawing_xml = '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="Shape 1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></xdr:spPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>'
+    key = str(tmp_path / "fake-clear.xlsx")
+    M._sessions[key] = {"source": key, "sheets": [{"name": "Sheet1", "rows": [], "drawing_data": {"drawing_file": "xl/drawings/drawing1.xml", "drawing_xml": drawing_xml, "drawing_rels": None, "files": {}}, "shapes": [{"index": 1, "id": "2", "name": "Shape 1", "type": "shape", "text": None, "relationship_id": None}]}]}
+
+    M.excel_set_shape_style(key, "Sheet1", 1, clear_fill=True, clear_outline=True)
+
+    xml = M._sessions[key]["sheets"][0]["drawing_data"]["drawing_xml"]
+    assert '<a:noFill />' in xml or '<a:noFill/>' in xml
+    assert M._sessions[key]["sheets"][0]["shapes"][0]["fill_color"] is None
+    assert M._sessions[key]["sheets"][0]["shapes"][0]["outline_color"] is None
+
+
+def test_underline_true_saves_as_single_underline(tmp_path):
+    src = tmp_path / "underline.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "text"
+    wb.save(src)
+    key = M.excel_load(str(src)).split("session_key='")[1].split("'")[0]
+
+    M.excel_set_style(key, "Sheet", 0, 0, 0, 0, {"underline": True})
+    M.excel_save(key)
+
+    assert openpyxl.load_workbook(src).active["A1"].font.underline == "single"
+
+
+def test_save_refuses_macro_extension_mismatch(tmp_path):
+    src = tmp_path / "plain.xlsx"
+    wb = openpyxl.Workbook()
+    wb.save(src)
+    key = M.excel_load(str(src)).split("session_key='")[1].split("'")[0]
+
+    with pytest.raises(ValueError, match="Refusing to save non-macro"):
+        M.excel_save_as_copy(key, str(tmp_path / "wrong.xlsm"))
+
+
 # ── A1 ────────────────────────────────────────────────────────────────────────
 
 def test_filtered_load_save_preserves_other_sheets(tmp_path):
@@ -84,11 +235,58 @@ def test_filtered_load_save_preserves_other_sheets(tmp_path):
 
 # ── A2 ────────────────────────────────────────────────────────────────────────
 
-def test_macro_formats_rejected(tmp_path):
-    fake = tmp_path / "book.xlsm"
-    fake.write_bytes(b"PK")
-    with pytest.raises(ValueError, match="not supported"):
-        M.excel_load(str(fake))
+def _add_dummy_vba_project(path: Path) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            raw = zin.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                xml = raw.decode("utf-8")
+                xml = re.sub(
+                    r'<Override\b[^>]*\bPartName="/xl/workbook.xml"[^>]*/>',
+                    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>',
+                    xml,
+                    count=1,
+                )
+                if 'Extension="bin"' not in xml:
+                    xml = xml.replace("</Types>", '<Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>', 1)
+                raw = xml.encode("utf-8")
+            elif item.filename == "xl/_rels/workbook.xml.rels":
+                xml = raw.decode("utf-8")
+                if "vbaProject" not in xml:
+                    xml = xml.replace(
+                        "</Relationships>",
+                        '<Relationship Id="rId999" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/></Relationships>',
+                        1,
+                    )
+                raw = xml.encode("utf-8")
+            zout.writestr(item, raw)
+        zout.writestr("xl/vbaProject.bin", b"dummy-vba-project")
+    tmp.replace(path)
+
+
+def test_xlsm_load_save_copy_preserves_vba_part(tmp_path):
+    xlsm = tmp_path / "macro.xlsm"
+    out = tmp_path / "macro-out.xlsm"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "macro container"
+    wb.save(xlsm)
+    _add_dummy_vba_project(xlsm)
+
+    report = json.loads(M.excel_validate_workbook(str(xlsm)))
+    assert report["valid"] is True
+    assert report["features"]["vba_project"] == 1
+
+    key = M.excel_load(str(xlsm)).split("session_key='")[1].split("'")[0]
+    M.excel_edit_cells(key, "Sheet", [{"row_index": 0, "edits": {0: "kept macro"}}])
+    M.excel_save_as_copy(key, str(out))
+
+    out_report = json.loads(M.excel_validate_workbook(str(out)))
+    assert out_report["valid"] is True
+    assert out_report["features"]["vba_project"] == 1
+    with zipfile.ZipFile(out) as zf:
+        assert zf.read("xl/vbaProject.bin") == b"dummy-vba-project"
+        assert "macroEnabled" in zf.read("[Content_Types].xml").decode("utf-8")
 
 def test_convert_to_markdown_without_session(tmp_path, monkeypatch):
     src = tmp_path / "simple.xlsx"
