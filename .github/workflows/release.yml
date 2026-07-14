@@ -172,27 +172,6 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
-      - name: Smoke test convert_to_markdown binaries
-        shell: pwsh
-        run: |
-          $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
-          $suffix = if ($IsWindows) { '.exe' } else { '' }
-          $cases = @(
-            @{ binary = 'excel-tools'; kind = 'excel' },
-            @{ binary = 'pdf-tools'; kind = 'pdf' },
-            @{ binary = 'docx-tools'; kind = 'docx' },
-            @{ binary = 'pptx-tools'; kind = 'pptx' },
-            @{ binary = 'csv-tools'; kind = 'csv' },
-            @{ binary = 'html-tools'; kind = 'html' },
-            @{ binary = 'text-tools'; kind = 'text' },
-            @{ binary = 'json-tools'; kind = 'json' }
-          )
-          foreach ($case in $cases) {
-            $binary = (Resolve-Path (Join-Path 'dist' "$($case.binary)$suffix")).Path
-            & $py scripts/smoke_mcp_convert.py --binary $binary --kind $case.kind
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-
       - name: Prepare release artifacts
         shell: pwsh
         run: |

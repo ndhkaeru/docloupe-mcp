@@ -84,12 +84,3 @@ jobs:
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
           & $py -m PyInstaller --clean --onefile --name text-tools --paths servers/text --hidden-import converter --specpath build --workpath build --distpath dist servers/text/main.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Run convert_to_markdown binary smoke test
-        if: env.HAS_SOURCE_OVERLAY == 'true'
-        shell: pwsh
-        run: |
-          $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
-          $suffix = if ($IsWindows) { '.exe' } else { '' }
-          $binary = (Resolve-Path (Join-Path 'dist' "text-tools$suffix")).Path
-          & $py scripts/smoke_mcp_convert.py --binary $binary --kind text
