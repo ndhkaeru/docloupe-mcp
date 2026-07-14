@@ -31,6 +31,37 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Checkout source overlay
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOURCE_REPO }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          path: source-overlay
+
+      - name: Apply source overlay
+        shell: pwsh
+        run: Copy-Item -Recurse -Force source-overlay/servers/* servers/
+
+      - name: Validate source overlay
+        shell: pwsh
+        run: |
+          $required = @(
+            'servers/excel/excel_converter.py',
+            'servers/pdf/converter.py',
+            'servers/docx/converter.py',
+            'servers/docx/markdownify_helper.py',
+            'servers/docx/converter_utils',
+            'servers/pptx/converter.py',
+            'servers/pptx/markdownify_helper.py',
+            'servers/csv/converter.py',
+            'servers/html/converter.py',
+            'servers/html/markdownify_helper.py',
+            'servers/text/converter.py',
+            'servers/json/converter.py'
+          )
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath $_) })
+          if ($missing.Count) { throw "Source overlay is incomplete: $($missing -join ', ')" }
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -69,6 +100,37 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout source overlay
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOURCE_REPO }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          path: source-overlay
+
+      - name: Apply source overlay
+        shell: pwsh
+        run: Copy-Item -Recurse -Force source-overlay/servers/* servers/
+
+      - name: Validate source overlay
+        shell: pwsh
+        run: |
+          $required = @(
+            'servers/excel/excel_converter.py',
+            'servers/pdf/converter.py',
+            'servers/docx/converter.py',
+            'servers/docx/markdownify_helper.py',
+            'servers/docx/converter_utils',
+            'servers/pptx/converter.py',
+            'servers/pptx/markdownify_helper.py',
+            'servers/csv/converter.py',
+            'servers/html/converter.py',
+            'servers/html/markdownify_helper.py',
+            'servers/text/converter.py',
+            'servers/json/converter.py'
+          )
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath $_) })
+          if ($missing.Count) { throw "Source overlay is incomplete: $($missing -join ', ')" }
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -87,23 +149,48 @@ jobs:
         run: |
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
           $servers = @(
-            @{ name = "excel-tools"; entry = "servers/excel/main.py"; paths = "servers/excel"; excludes = @("numpy", "lxml") },
-            @{ name = "pdf-tools";   entry = "servers/pdf/main.py";   paths = "servers/pdf" },
-            @{ name = "docx-tools";  entry = "servers/docx/main.py";  paths = "servers/docx" },
-            @{ name = "pptx-tools";  entry = "servers/pptx/main.py";  paths = "servers/pptx" },
-            @{ name = "csv-tools";   entry = "servers/csv/main.py";   paths = "servers/csv" },
-            @{ name = "html-tools";  entry = "servers/html/main.py";  paths = "servers/html" },
+            @{ name = "excel-tools"; entry = "servers/excel/main.py"; paths = "servers/excel"; hidden = @("excel_converter"); excludes = @("numpy", "lxml") },
+            @{ name = "pdf-tools";   entry = "servers/pdf/main.py";   paths = "servers/pdf"; hidden = @("converter") },
+            @{ name = "docx-tools";  entry = "servers/docx/main.py";  paths = "servers/docx"; hidden = @("converter") },
+            @{ name = "pptx-tools";  entry = "servers/pptx/main.py";  paths = "servers/pptx"; hidden = @("converter") },
+            @{ name = "csv-tools";   entry = "servers/csv/main.py";   paths = "servers/csv"; hidden = @("converter") },
+            @{ name = "html-tools";  entry = "servers/html/main.py";  paths = "servers/html"; hidden = @("converter") },
             @{ name = "md-tools";    entry = "servers/md/main.py";    paths = "servers/md" },
-            @{ name = "text-tools";  entry = "servers/text/main.py";  paths = "servers/text" },
-            @{ name = "json-tools";  entry = "servers/json/main.py";  paths = "servers/json" }
+            @{ name = "text-tools";  entry = "servers/text/main.py";  paths = "servers/text"; hidden = @("converter") },
+            @{ name = "json-tools";  entry = "servers/json/main.py";  paths = "servers/json"; hidden = @("converter") }
           )
           foreach ($server in $servers) {
             $args = @("-m", "PyInstaller", "--clean", "--onefile", "--name", $server.name, "--paths", $server.paths, "--specpath", "build", "--workpath", "build", "--distpath", "dist")
+            if ($server.ContainsKey("hidden")) {
+              foreach ($hidden in $server.hidden) { $args += @("--hidden-import", $hidden) }
+            }
             if ($server.ContainsKey("excludes")) {
               foreach ($exclude in $server.excludes) { $args += @("--exclude-module", $exclude) }
             }
             $args += $server.entry
             & $py @args
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Smoke test convert_to_markdown binaries
+        shell: pwsh
+        run: |
+          $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
+          $suffix = if ($IsWindows) { '.exe' } else { '' }
+          $cases = @(
+            @{ binary = 'excel-tools'; kind = 'excel' },
+            @{ binary = 'pdf-tools'; kind = 'pdf' },
+            @{ binary = 'docx-tools'; kind = 'docx' },
+            @{ binary = 'pptx-tools'; kind = 'pptx' },
+            @{ binary = 'csv-tools'; kind = 'csv' },
+            @{ binary = 'html-tools'; kind = 'html' },
+            @{ binary = 'text-tools'; kind = 'text' },
+            @{ binary = 'json-tools'; kind = 'json' }
+          )
+          foreach ($case in $cases) {
+            $binary = (Resolve-Path (Join-Path 'dist' "$($case.binary)$suffix")).Path
+            & $py scripts/smoke_mcp_convert.py --binary $binary --kind $case.kind
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
       - name: Prepare release artifacts

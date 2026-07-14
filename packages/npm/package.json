@@ -1,6 +1,6 @@
 {
   "name": "@ndhkaeru/docloupe-mcp",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Run DocLoupe MCP stdio servers for document workflows via npm/npx.",
   "license": "Apache-2.0",
   "type": "commonjs",
