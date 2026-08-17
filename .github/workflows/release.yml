@@ -82,6 +82,9 @@ jobs:
       - name: Validate release metadata
         run: node scripts/validate-release-metadata.mjs "${{ env.RELEASE_TAG }}"
 
+      - name: Validate release flow
+        run: node scripts/validate-release-flow.mjs
+
       - name: Install dependencies
         shell: pwsh
         run: |
@@ -302,3 +305,13 @@ jobs:
           files: artifacts/**/*
           draft: false
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+
+  publish:
+    name: Publish npm package
+    needs: release
+    uses: ./.github/workflows/npm.yml
+    with:
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      publish_npm: ${{ !contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-') }}
+      publish_registry: false
+    secrets: inherit

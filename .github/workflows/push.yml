@@ -66,6 +66,9 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Validate release flow
+        run: node scripts/validate-release-flow.mjs
+
       - name: Install dependencies
         shell: pwsh
         run: |

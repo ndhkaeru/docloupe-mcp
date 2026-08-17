@@ -1,8 +1,25 @@
 name: Publish npm package
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to package, for example v1.2.3
+        required: true
+        type: string
+      publish_npm:
+        description: Publish package to npm
+        required: false
+        default: true
+        type: boolean
+      publish_registry:
+        description: Also publish server.json to the MCP Registry
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      NPM_TOKEN:
+        required: false
   workflow_dispatch:
     inputs:
       tag:
@@ -25,7 +42,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: npm-${{ github.event.release.tag_name || inputs.tag }}
+  group: npm-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -34,10 +51,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      RELEASE_TAG: ${{ inputs.tag }}
       HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
-      PUBLISH_NPM: ${{ (github.event_name == 'release' && !github.event.release.prerelease) || inputs.publish_npm }}
-      PUBLISH_REGISTRY: ${{ inputs.publish_registry || false }}
+      PUBLISH_NPM: ${{ inputs.publish_npm }}
+      PUBLISH_REGISTRY: ${{ inputs.publish_registry }}
 
     steps:
       - name: Checkout release tag
@@ -53,6 +70,9 @@ jobs:
 
       - name: Validate release metadata
         run: node scripts/validate-release-metadata.mjs "${RELEASE_TAG}"
+
+      - name: Validate release flow
+        run: node scripts/validate-release-flow.mjs
 
       - name: Check JavaScript
         working-directory: packages/npm
@@ -114,9 +134,58 @@ jobs:
         if: env.PUBLISH_NPM == 'true' && steps.npm_status.outputs.exists == 'true'
         run: echo '@ndhkaeru/docloupe-mcp@${{ env.RELEASE_TAG }} is already published; skipping npm publish.'
 
-      - name: Skip npm publish without token
+      - name: Fail without npm token
         if: env.PUBLISH_NPM == 'true' && steps.npm_status.outputs.exists != 'true' && env.HAS_NPM_TOKEN != 'true'
-        run: echo 'NPM_TOKEN not configured; package was validated but not published.'
+        run: |
+          echo 'NPM_TOKEN is not configured; cannot publish @ndhkaeru/docloupe-mcp.' >&2
+          exit 1
+
+      - name: Verify public npm package
+        if: env.PUBLISH_NPM == 'true'
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#v}"
+          for attempt in {1..30}; do
+            published=$(npm view "@ndhkaeru/docloupe-mcp@${version}" version 2>/dev/null || true)
+            if [ "$published" = "$version" ]; then
+              temp_dir=$(mktemp -d)
+              trap 'rm -rf "$temp_dir"' EXIT
+              tarball=$(cd "$temp_dir" && npm pack "@ndhkaeru/docloupe-mcp@${version}" --silent)
+              tar -xzf "$temp_dir/$tarball" -C "$temp_dir"
+              PACKAGE_VERSION="$version" PACKAGE_DIR="$temp_dir/package" node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const packageDir = process.env.PACKAGE_DIR;
+          const expectedVersion = process.env.PACKAGE_VERSION;
+          const metadata = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'));
+          const expectedBins = [
+            'docloupe-mcp',
+            'docloupe-excel-tools',
+            'docloupe-md-tools',
+            'docloupe-pdf-tools',
+            'docloupe-docx-tools',
+            'docloupe-pptx-tools',
+            'docloupe-csv-tools',
+            'docloupe-html-tools',
+            'docloupe-text-tools',
+            'docloupe-json-tools',
+          ];
+          if (metadata.version !== expectedVersion) {
+            throw new Error(`public package version ${metadata.version} != ${expectedVersion}`);
+          }
+          for (const bin of expectedBins) {
+            const relativePath = metadata.bin?.[bin];
+            if (!relativePath || !fs.existsSync(path.join(packageDir, relativePath))) {
+              throw new Error(`public package is missing executable ${bin}`);
+            }
+          }
+          NODE
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "npm package @ndhkaeru/docloupe-mcp@${version} did not become publicly readable." >&2
+          exit 1
 
       - name: Skip npm publish for prerelease
         if: env.PUBLISH_NPM != 'true'
