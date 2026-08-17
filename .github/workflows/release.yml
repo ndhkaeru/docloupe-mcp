@@ -7,13 +7,18 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to publish, for example v1.2.3'
+        description: 'Existing release tag to publish, for example v1.2.3'
         required: true
         type: string
 
 permissions:
   contents: write
   id-token: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  SOURCE_OVERLAY_REF: 5108c871e313912129c6f89353a424f8aacad290
+  DOCLOUPE_SOURCE_SHA: 5108c871e313912129c6f89353a424f8aacad290
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -26,9 +31,10 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
       - name: Checkout source overlay
@@ -36,6 +42,7 @@ jobs:
         with:
           repository: ${{ secrets.SOURCE_REPO }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_OVERLAY_REF }}
           path: source-overlay
 
       - name: Apply source overlay
@@ -63,25 +70,28 @@ jobs:
           if ($missing.Count) { throw "Source overlay is incomplete: $($missing -join ', ')" }
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
+
+      - name: Validate release metadata
+        run: node scripts/validate-release-metadata.mjs "${{ env.RELEASE_TAG }}"
 
       - name: Install dependencies
         shell: pwsh
         run: |
           python -m venv .venv-build
-          .\.venv-build\Scripts\python.exe -m pip install -U pip
-          .\.venv-build\Scripts\python.exe -m pip install pytest pyinstaller "mcp[cli]==1.28.1" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
+          ./.venv-build/Scripts/python.exe -m pip install "pip==26.1.2" "setuptools==83.0.0"
+          ./.venv-build/Scripts/python.exe -m pip install -r requirements-build.txt
 
       - name: Run tests
         shell: pwsh
-        run: .\.venv-build\Scripts\python.exe -m pytest -q
+        run: ./.venv-build/Scripts/python.exe -m pytest -q
 
       - name: Check npm launcher
         working-directory: packages/npm
@@ -106,14 +116,18 @@ jobs:
             platform: macos-arm64
 
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
 
       - name: Checkout source overlay
         uses: actions/checkout@v4
         with:
           repository: ${{ secrets.SOURCE_REPO }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_OVERLAY_REF }}
           path: source-overlay
 
       - name: Apply source overlay
@@ -141,7 +155,7 @@ jobs:
           if ($missing.Count) { throw "Source overlay is incomplete: $($missing -join ', ')" }
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -150,8 +164,8 @@ jobs:
         run: |
           python -m venv .venv-build
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
-          & $py -m pip install -U pip
-          & $py -m pip install pytest pyinstaller "mcp[cli]==1.28.1" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
+          & $py -m pip install "pip==26.1.2" "setuptools==83.0.0"
+          & $py -m pip install -r requirements-build.txt
 
       - name: Build all servers
         shell: pwsh
@@ -159,14 +173,14 @@ jobs:
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
           $servers = @(
             @{ name = "excel-tools"; entry = "servers/excel/main.py"; paths = @("servers/excel", "servers"); hidden = @("excel_converter"); excludes = @("numpy", "lxml") },
-            @{ name = "pdf-tools";   entry = "servers/pdf/main.py";   paths = "servers/pdf"; hidden = @("converter") },
-            @{ name = "docx-tools";  entry = "servers/docx/main.py";  paths = "servers/docx"; hidden = @("converter") },
-            @{ name = "pptx-tools";  entry = "servers/pptx/main.py";  paths = "servers/pptx"; hidden = @("converter") },
-            @{ name = "csv-tools";   entry = "servers/csv/main.py";   paths = "servers/csv"; hidden = @("converter") },
-            @{ name = "html-tools";  entry = "servers/html/main.py";  paths = "servers/html"; hidden = @("converter") },
+            @{ name = "pdf-tools";   entry = "servers/pdf/main.py";   paths = @("servers/pdf"); hidden = @("converter") },
+            @{ name = "docx-tools";  entry = "servers/docx/main.py";  paths = @("servers/docx"); hidden = @("converter") },
+            @{ name = "pptx-tools";  entry = "servers/pptx/main.py";  paths = @("servers/pptx"); hidden = @("converter") },
+            @{ name = "csv-tools";   entry = "servers/csv/main.py";   paths = @("servers/csv"); hidden = @("converter") },
+            @{ name = "html-tools";  entry = "servers/html/main.py";  paths = @("servers/html"); hidden = @("converter") },
             @{ name = "md-tools";    entry = "servers/md/main.py";    paths = @("servers/md", "servers") },
-            @{ name = "text-tools";  entry = "servers/text/main.py";  paths = "servers/text"; hidden = @("converter") },
-            @{ name = "json-tools";  entry = "servers/json/main.py";  paths = "servers/json"; hidden = @("converter") }
+            @{ name = "text-tools";  entry = "servers/text/main.py";  paths = @("servers/text"); hidden = @("converter") },
+            @{ name = "json-tools";  entry = "servers/json/main.py";  paths = @("servers/json"); hidden = @("converter") }
           )
           foreach ($server in $servers) {
             $args = @("-m", "PyInstaller", "--clean", "--onefile", "--name", $server.name, "--specpath", "build", "--workpath", "build", "--distpath", "dist")
@@ -177,6 +191,26 @@ jobs:
             if ($server.ContainsKey("excludes")) {
               foreach ($exclude in $server.excludes) { $args += @("--exclude-module", $exclude) }
             }
+            if ($server.name -eq "excel-tools") {
+              $metadataPath = Join-Path (Get-Location) "build/excel-build-metadata.json"
+              $serverVersion = (Get-Content server.json -Raw | ConvertFrom-Json).version
+              $commitSha = (& git rev-parse HEAD | Select-Object -First 1)
+              $statusOutput = @(& git status --porcelain)
+              $libraryVersions = & $py -c "import importlib.metadata as m,json; print(json.dumps({'openpyxl':m.version('openpyxl'),'mcp':m.version('mcp')}))"
+              if ($LASTEXITCODE -ne 0) { throw "Unable to read embedded library versions." }
+              $metadata = [ordered]@{
+                schema_version = 1
+                server_version = $serverVersion
+                commit_sha = $commitSha
+                source_overlay_sha = $env:DOCLOUPE_SOURCE_SHA
+                working_tree_dirty = [bool]($statusOutput -join "")
+                library_versions = ($libraryVersions | ConvertFrom-Json)
+              }
+              New-Item -ItemType Directory -Force (Split-Path $metadataPath) | Out-Null
+              $metadata | ConvertTo-Json -Depth 4 | Set-Content -Path $metadataPath -Encoding utf8NoBOM
+              $args += @("--add-data", "$metadataPath$([IO.Path]::PathSeparator).")
+              $args += @("--copy-metadata", "openpyxl", "--copy-metadata", "mcp")
+            }
             $args += $server.entry
             & $py @args
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -186,7 +220,6 @@ jobs:
         shell: pwsh
         run: |
           $platform = '${{ matrix.platform }}'
-          $tag = '${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}'
           $suffix = if ($platform.StartsWith('windows-')) { '.exe' } else { '' }
           $out = Join-Path 'artifacts' $platform
           New-Item -ItemType Directory -Force $out | Out-Null
@@ -198,7 +231,7 @@ jobs:
           }
           Get-ChildItem $out | Where-Object { -not $_.Name.EndsWith('sha256sums.txt') } | Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)" } |
-            Set-Content (Join-Path $out "docloupe-mcp-$tag-$platform-sha256sums.txt")
+            Set-Content (Join-Path $out "docloupe-mcp-$env:RELEASE_TAG-$platform-sha256sums.txt")
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
@@ -211,16 +244,16 @@ jobs:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.tag != '' }}
 
     steps:
-      - name: Checkout full history
+      - name: Checkout release tag
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -229,12 +262,12 @@ jobs:
         id: changelog
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          TAG="${RELEASE_TAG}"
           PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${TAG}$" | head -1 || true)
           if [ -z "$PREV_TAG" ]; then
-            COMMITS=$(git log --pretty=format:"- %s (%h)" HEAD | head -80)
+            COMMITS=$(git log --pretty=format:"- %s (%h)" "$TAG" | head -80)
           else
-            COMMITS=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..HEAD" | head -80)
+            COMMITS=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${TAG}" | head -80)
           fi
           {
             echo "notes<<EOF"
@@ -245,10 +278,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
           body: |
-            # DocLoupe MCP ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+            # DocLoupe MCP ${{ env.RELEASE_TAG }}
 
             Local-first MCP servers for reading, converting, and editing document formats.
 
@@ -265,87 +298,7 @@ jobs:
             - `macos-x64`
             - `macos-arm64`
 
-            Each platform has `docloupe-mcp-<server>-<platform>` binaries and a matching `docloupe-mcp-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}-<platform>-sha256sums.txt` checksum file.
+            Each platform has `docloupe-mcp-<server>-<platform>` binaries and a matching `docloupe-mcp-${{ env.RELEASE_TAG }}-<platform>-sha256sums.txt` checksum file.
           files: artifacts/**/*
           draft: false
-          prerelease: ${{ contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-') }}
-
-  npm:
-    name: Publish npm package
-    runs-on: ubuntu-latest
-    needs: release
-    timeout-minutes: 30
-    env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Validate package metadata sync
-        run: |
-          node - <<'NODE'
-          const pkg = require('./packages/npm/package.json');
-          const server = require('./server.json');
-          const mismatches = [];
-          if (server.version !== pkg.version) mismatches.push(`server.version=${server.version} != package.version=${pkg.version}`);
-          if (server.packages?.[0]?.identifier !== pkg.name) mismatches.push(`server package identifier=${server.packages?.[0]?.identifier} != package.name=${pkg.name}`);
-          if (server.packages?.[0]?.version !== pkg.version) mismatches.push(`server package version=${server.packages?.[0]?.version} != package.version=${pkg.version}`);
-          if (pkg.mcpName !== server.name) mismatches.push(`package mcpName=${pkg.mcpName} != server.name=${server.name}`);
-          if (mismatches.length) {
-            console.error('server.json is out of sync with packages/npm/package.json:');
-            for (const mismatch of mismatches) console.error(`  ${mismatch}`);
-            process.exit(1);
-          }
-          NODE
-
-      - name: Check JavaScript
-        working-directory: packages/npm
-        run: npm run check
-
-
-      - name: Dry-run npm pack
-        working-directory: packages/npm
-        run: npm pack --dry-run
-
-      - name: Check npm package availability
-        id: npm_status
-        shell: bash
-        run: |
-          if npm view @ndhkaeru/docloupe-mcp@${RELEASE_TAG#v} version >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish npm package
-        if: steps.npm_status.outputs.exists != 'true' && env.HAS_NPM_TOKEN == 'true'
-        working-directory: packages/npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set +e
-          output=$(npm publish --access public 2>&1)
-          status=$?
-          set -e
-          echo "$output"
-          if [ "$status" -eq 0 ]; then exit 0; fi
-          if grep -q 'Cannot publish over previously published version' <<<"$output"; then exit 0; fi
-          exit "$status"
-
-      - name: Skip existing npm package
-        if: steps.npm_status.outputs.exists == 'true'
-        run: echo '@ndhkaeru/docloupe-mcp@${{ env.RELEASE_TAG }} is already published; skipping npm publish.'
-
-      - name: Fail without npm token
-        if: steps.npm_status.outputs.exists != 'true' && env.HAS_NPM_TOKEN != 'true'
-        run: |
-          echo 'NPM_TOKEN is not configured; cannot publish @ndhkaeru/docloupe-mcp.' >&2
-          exit 1
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}

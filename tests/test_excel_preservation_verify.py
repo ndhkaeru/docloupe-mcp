@@ -826,7 +826,8 @@ def test_report_previews_large_values_without_unbounded_dump(tmp_path):
     assert value_change["before"]["sha256"]
 
 
-def test_public_verifier_report_includes_file_health_runtime_and_fixture_id(tmp_path):
+def test_public_verifier_report_includes_file_health_runtime_and_fixture_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCLOUPE_SOURCE_SHA", "source-overlay-sha")
     source = tmp_path / "source.xlsx"
     copied = tmp_path / "copied.xlsx"
     workbook = openpyxl.Workbook()
@@ -849,8 +850,10 @@ def test_public_verifier_report_includes_file_health_runtime_and_fixture_id(tmp_
     assert report["files"]["after"]["loadable"] is True
     assert report["files"]["before"]["sha256"] == report["before_sha256"]
     assert report["runtime"]["server"] == "excel-tools"
-    assert report["runtime"]["server_version"] == "1.0.3"
+    expected_version = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))["version"]
+    assert report["runtime"]["server_version"] == expected_version
     assert report["runtime"]["commit_sha"]
+    assert report["runtime"]["source_overlay_sha"] == "source-overlay-sha"
     assert report["runtime"]["library_versions"]["openpyxl"] == "3.1.5"
     assert report["runtime"]["library_versions"]["mcp"] == "1.28.1"
     assert report["runtime"]["python_version"]

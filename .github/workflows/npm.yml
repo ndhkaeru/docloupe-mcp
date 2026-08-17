@@ -36,35 +36,23 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
       HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
-      PUBLISH_NPM: ${{ github.event_name == 'release' || inputs.publish_npm }}
+      PUBLISH_NPM: ${{ (github.event_name == 'release' && !github.event.release.prerelease) || inputs.publish_npm }}
       PUBLISH_REGISTRY: ${{ inputs.publish_registry || false }}
 
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Validate package metadata sync
-        run: |
-          node - <<'NODE'
-          const pkg = require('./packages/npm/package.json');
-          const server = require('./server.json');
-          const mismatches = [];
-          if (server.version !== pkg.version) mismatches.push(`server.version=${server.version} != package.version=${pkg.version}`);
-          if (server.packages?.[0]?.identifier !== pkg.name) mismatches.push(`server package identifier=${server.packages?.[0]?.identifier} != package.name=${pkg.name}`);
-          if (server.packages?.[0]?.version !== pkg.version) mismatches.push(`server package version=${server.packages?.[0]?.version} != package.version=${pkg.version}`);
-          if (pkg.mcpName !== server.name) mismatches.push(`package mcpName=${pkg.mcpName} != server.name=${server.name}`);
-          if (mismatches.length) {
-            console.error('server.json is out of sync with packages/npm/package.json:');
-            for (const mismatch of mismatches) console.error(`  ${mismatch}`);
-            process.exit(1);
-          }
-          NODE
+      - name: Validate release metadata
+        run: node scripts/validate-release-metadata.mjs "${RELEASE_TAG}"
 
       - name: Check JavaScript
         working-directory: packages/npm
@@ -91,7 +79,6 @@ jobs:
           done
           echo "Timed out waiting for all release assets for ${RELEASE_TAG}" >&2
           exit 1
-
 
       - name: Dry-run npm pack
         working-directory: packages/npm
@@ -130,6 +117,10 @@ jobs:
       - name: Skip npm publish without token
         if: env.PUBLISH_NPM == 'true' && steps.npm_status.outputs.exists != 'true' && env.HAS_NPM_TOKEN != 'true'
         run: echo 'NPM_TOKEN not configured; package was validated but not published.'
+
+      - name: Skip npm publish for prerelease
+        if: env.PUBLISH_NPM != 'true'
+        run: echo 'Package validation completed; npm publish was skipped.'
 
       - name: Install MCP publisher
         if: env.PUBLISH_REGISTRY == 'true'

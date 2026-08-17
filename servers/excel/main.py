@@ -3092,6 +3092,9 @@ def _verification_runtime_metadata() -> dict:
                 break
 
     commit_sha = os.environ.get("DOCLOUPE_COMMIT_SHA") or build_metadata.get("commit_sha")
+    source_overlay_sha = (
+        os.environ.get("DOCLOUPE_SOURCE_SHA") or build_metadata.get("source_overlay_sha")
+    )
     working_tree_dirty = build_metadata.get("working_tree_dirty")
     try:
         if not commit_sha:
@@ -3131,6 +3134,7 @@ def _verification_runtime_metadata() -> dict:
         "server": "excel-tools",
         "server_version": server_version,
         "commit_sha": commit_sha,
+        "source_overlay_sha": source_overlay_sha,
         "working_tree_dirty": working_tree_dirty,
         "python_version": platform.python_version(),
         "platform": platform.platform(),

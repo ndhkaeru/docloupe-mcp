@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+env:
+  SOURCE_OVERLAY_REF: 5108c871e313912129c6f89353a424f8aacad290
+  DOCLOUPE_SOURCE_SHA: 5108c871e313912129c6f89353a424f8aacad290
+
 concurrency:
   group: push-${{ github.ref }}
   cancel-in-progress: true
@@ -44,6 +48,7 @@ jobs:
         with:
           repository: ${{ secrets.SOURCE_REPO }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_OVERLAY_REF }}
           path: source-overlay
 
       - name: Apply source overlay
@@ -52,12 +57,12 @@ jobs:
         run: Copy-Item -Recurse -Force source-overlay/servers/* servers/
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
 
@@ -66,8 +71,8 @@ jobs:
         run: |
           python -m venv .venv-build
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
-          & $py -m pip install -U pip
-          & $py -m pip install pytest pyinstaller "mcp[cli]==1.28.1" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
+          & $py -m pip install "pip==26.1.2" "setuptools==83.0.0"
+          & $py -m pip install -r requirements-build.txt
 
       - name: Compile server entrypoints
         shell: pwsh

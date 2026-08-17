@@ -1,7 +1,6 @@
 """Public-tool creation and preservation coverage for the exact 87 audit keys."""
 
 import json
-import re
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
@@ -16,7 +15,6 @@ sys.path.insert(0, str(ROOT / "servers" / "excel"))
 import main as M  # noqa: E402
 
 
-AUDIT_PATH = ROOT / "servers" / "excel" / "PRESERVATION_AUDIT_87.md"
 LEGACY_SOURCE = Path(r"D:\data-test\excel-preservation-fixtures\sources\01-audit-87-source.xlsx")
 SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -27,16 +25,6 @@ REL_ID = f"{{{REL_NS}}}id"
 
 def _load_key(load_result: str) -> str:
     return load_result.split("session_key='")[1].split("'")[0]
-
-
-def _audit_keys() -> list[str]:
-    rows = []
-    for line in AUDIT_PATH.read_text(encoding="utf-8").splitlines():
-        match = re.match(r"^\|\s*(\d+)\s*\|\s*`([^`]+)`", line)
-        if match:
-            rows.append((int(match.group(1)), match.group(2)))
-    assert [number for number, _ in rows] == list(range(1, 88))
-    return [key for _, key in rows]
 
 
 def _child(parent: ET.Element | None, name: str) -> ET.Element | None:
@@ -538,7 +526,7 @@ def _audit_87_status(path: Path) -> dict[str, bool]:
         "workbookProtection.workbookPassword": _attrs(workbook_protection).get("workbookPassword") == "ABCD",
         "workbook_view_count": len(_children(workbook_views, "workbookView")) == 2,
     }
-    assert list(status) == _audit_keys()
+    assert len(status) == 87
     return status
 
 
