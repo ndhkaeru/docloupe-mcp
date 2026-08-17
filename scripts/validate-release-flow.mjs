@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const npmWorkflowPath = join(repositoryRoot, '.github', 'workflows', 'npm.yml');
 const releaseWorkflowPath = join(repositoryRoot, '.github', 'workflows', 'release.yml');
-const npmWorkflow = readFileSync(npmWorkflowPath, 'utf8');
-const releaseWorkflow = readFileSync(releaseWorkflowPath, 'utf8');
+const npmWorkflow = readFileSync(npmWorkflowPath, 'utf8').replace(/\r\n?/g, '\n');
+const releaseWorkflow = readFileSync(releaseWorkflowPath, 'utf8').replace(/\r\n?/g, '\n');
 const failures = [];
 
 function requireMatch(label, content, pattern) {
