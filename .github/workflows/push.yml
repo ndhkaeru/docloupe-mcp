@@ -56,13 +56,18 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install dependencies
         shell: pwsh
         run: |
           python -m venv .venv-build
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
           & $py -m pip install -U pip
-          & $py -m pip install pytest pyinstaller "mcp[cli]" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
+          & $py -m pip install pytest pyinstaller "mcp[cli]==1.28.1" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
 
       - name: Compile server entrypoints
         shell: pwsh
@@ -76,6 +81,10 @@ jobs:
         run: |
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
           & $py -m pytest -q
+
+      - name: Check npm launcher
+        working-directory: packages/npm
+        run: npm test
 
       - name: Build smoke test (text-tools)
         if: env.HAS_SOURCE_OVERLAY == 'true'

@@ -5,15 +5,25 @@ import unicodedata
 import csv
 import io
 import json
+import os
 import shutil
-import subprocess
+import tempfile
+import threading
 from html import escape
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+_SERVER_DIRECTORY = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_SERVER_DIRECTORY))
+
 from mcp.server.fastmcp import FastMCP
+from process_lifecycle import (
+    ManagedProcessCancelled,
+    run_cancellable_in_thread,
+    run_managed_process,
+)
 
 MAX_MARKDOWN_BYTES = 10 * 1024 * 1024
 
@@ -1337,29 +1347,171 @@ def md_validate_diagram(path: str, diagram_index: int = 0) -> dict[str, Any]:
     return {"path": diagram["path"], "ok": None, "skipped": True, "reason": "CLI validation is available but not run inline by this server", "diagram": diagram["diagram"]}
 
 
-@mcp.tool()
-def md_render_diagram(path: str, output_path: str, diagram_index: int = 0, replace_with_image: bool = False) -> dict[str, Any]:
-    """Render a Mermaid diagram with mmdc when available; returns skipped if dependencies are missing."""
+def _md_render_diagram_impl(
+    path: str,
+    output_path: str,
+    diagram_index: int,
+    replace_with_image: bool,
+    timeout_seconds: float,
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
     diagram = md_read_diagram(path, diagram_index)
-    lang = diagram["diagram"]["language"]
-    if lang != "mermaid" or not shutil.which("mmdc"):
-        return {"path": diagram["path"], "ok": None, "skipped": True, "reason": "mmdc CLI is required for Mermaid rendering", "output_path": output_path}
-    source_path = Path(output_path).with_suffix(".mmd")
-    source_path.write_text(diagram["source"], encoding="utf-8")
-    result = subprocess.run(["mmdc", "-i", str(source_path), "-o", str(Path(output_path).resolve())], capture_output=True, text=True, timeout=60)
-    if result.returncode != 0:
-        return {"path": diagram["path"], "ok": False, "stderr": result.stderr, "output_path": output_path}
+    language = diagram["diagram"]["language"]
+    cli = shutil.which("mmdc")
+    if language != "mermaid" or not cli:
+        return {
+            "path": diagram["path"],
+            "ok": None,
+            "skipped": True,
+            "reason": "mmdc CLI is required for Mermaid rendering",
+            "output_path": output_path,
+        }
+
+    output = Path(output_path).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command_label = (cli, "-i", "<source>", "-o", str(output))
+    if cancel_event is not None and cancel_event.is_set():
+        raise ManagedProcessCancelled(command_label, process_tree_stopped=True)
+
+    with tempfile.TemporaryDirectory(
+        prefix=".docloupe-mermaid-",
+        dir=output.parent,
+    ) as workspace_name:
+        workspace = Path(workspace_name)
+        source_path = workspace / "diagram.mmd"
+        staged_output = workspace / output.name
+        source_path.write_text(diagram["source"], encoding="utf-8")
+        command = [cli, "-i", str(source_path), "-o", str(staged_output)]
+        result = run_managed_process(
+            command,
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            raise ManagedProcessCancelled(
+                command,
+                process_tree_stopped=result.process_tree_stopped,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+        if result.returncode != 0:
+            return {
+                "path": diagram["path"],
+                "ok": False,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+                "process_tree_stopped": result.process_tree_stopped,
+                "output_path": str(output),
+            }
+        if not staged_output.is_file():
+            return {
+                "path": diagram["path"],
+                "ok": False,
+                "stderr": "mmdc exited successfully but produced no output file",
+                "exit_code": result.returncode,
+                "process_tree_stopped": result.process_tree_stopped,
+                "output_path": str(output),
+            }
+        if cancel_event is not None and cancel_event.is_set():
+            raise ManagedProcessCancelled(command, process_tree_stopped=True)
+        os.replace(staged_output, output)
+
     if replace_with_image:
         resolved_path, content, encoding, _, _ = _load_markdown_file(path)
-        block = _find_fenced_blocks(content, {"mermaid", "plantuml", "puml", "dot", "graphviz"})[diagram_index]
-        image_markdown = f"![diagram]({Path(output_path).name})\n"
-        updated = _replace_line_range(content, block["start_line"], block["end_line"], image_markdown)
+        block = _find_fenced_blocks(
+            content,
+            {"mermaid", "plantuml", "puml", "dot", "graphviz"},
+        )[diagram_index]
+        image_markdown = f"![diagram]({output.name})\n"
+        updated = _replace_line_range(
+            content,
+            block["start_line"],
+            block["end_line"],
+            image_markdown,
+        )
         _write_markdown_file(resolved_path, updated, encoding)
-    return {"path": diagram["path"], "ok": True, "output_path": str(Path(output_path).resolve())}
+    return {
+        "path": diagram["path"],
+        "ok": True,
+        "process_tree_stopped": True,
+        "output_path": str(output),
+    }
+
+
+def md_render_diagram(
+    path: str,
+    output_path: str,
+    diagram_index: int = 0,
+    replace_with_image: bool = False,
+    timeout_seconds: float = 60.0,
+) -> dict[str, Any]:
+    """Render Mermaid through a bounded mmdc/Chromium process tree."""
+    return _md_render_diagram_impl(
+        path,
+        output_path,
+        diagram_index,
+        replace_with_image,
+        timeout_seconds,
+        None,
+    )
+
+
+@mcp.tool(name="md_render_diagram")
+async def _md_render_diagram_tool(
+    path: str,
+    output_path: str,
+    diagram_index: int = 0,
+    replace_with_image: bool = False,
+    timeout_seconds: float = 60.0,
+) -> dict[str, Any]:
+    """Render Mermaid; cancellation stops mmdc and browser descendants."""
+    return await run_cancellable_in_thread(
+        lambda cancel_event: _md_render_diagram_impl(
+            path,
+            output_path,
+            diagram_index,
+            replace_with_image,
+            timeout_seconds,
+            cancel_event,
+        )
+    )
+
+
+async def _run_frozen_stdio_server() -> None:
+    import anyio
+    from io import TextIOWrapper
+    from mcp.server.stdio import stdio_server
+
+    stdin_text = TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
+    stdout_text = TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    try:
+        async with stdio_server(
+            stdin=anyio.wrap_file(stdin_text),
+            stdout=anyio.wrap_file(stdout_text),
+        ) as (read_stream, write_stream):
+            await mcp._mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp._mcp_server.create_initialization_options(),
+            )
+    finally:
+        for stream in (stdin_text, stdout_text):
+            try:
+                stream.detach()
+            except (OSError, ValueError):
+                pass
 
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    if getattr(sys, "frozen", False):
+        import anyio
+        anyio.run(_run_frozen_stdio_server)
+    else:
+        mcp.run(transport="stdio")
 
 
 

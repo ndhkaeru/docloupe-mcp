@@ -11,6 +11,7 @@ T.  The five kept tools work; the four removed tools are gone.
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -267,3 +268,76 @@ def test_tangle_split_merge_and_diagram_skip(tmp_path):
     assert M.md_merge([item["path"] for item in split["files"]], str(merged_path), heading_offset=1)["merged_count"] == 2
     diagram_path = _write(tmp_path, "# D\n\n```mermaid\ngraph TD; A-->B\n```\n", name="diagram.md")
     assert "skipped" in M.md_validate_diagram(diagram_path)
+
+
+def test_mermaid_render_uses_staging_and_removes_workspace(tmp_path, monkeypatch):
+    markdown_path = _write(
+        tmp_path,
+        "# Diagram\n\n```mermaid\ngraph TD; A-->B\n```\n",
+        name="diagram.md",
+    )
+    output_path = tmp_path / "diagram.svg"
+    workspaces = []
+
+    monkeypatch.setattr(M.shutil, "which", lambda _name: "fake-mmdc")
+
+    def fake_run(command, **kwargs):
+        assert kwargs["timeout_seconds"] == 5.0
+        source_path = Path(command[command.index("-i") + 1])
+        staged_output = Path(command[command.index("-o") + 1])
+        assert source_path.read_text(encoding="utf-8") == "graph TD; A-->B"
+        workspaces.append(source_path.parent)
+        staged_output.write_text("<svg>ok</svg>", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="",
+            process_tree_stopped=True,
+        )
+
+    monkeypatch.setattr(M, "run_managed_process", fake_run)
+    result = M.md_render_diagram(
+        markdown_path,
+        str(output_path),
+        timeout_seconds=5.0,
+    )
+
+    assert result["ok"] is True
+    assert result["process_tree_stopped"] is True
+    assert output_path.read_text(encoding="utf-8") == "<svg>ok</svg>"
+    assert workspaces and all(not workspace.exists() for workspace in workspaces)
+    assert not (tmp_path / "diagram.mmd").exists()
+    assert not list(tmp_path.glob(".docloupe-mermaid-*"))
+
+
+def test_mermaid_render_failure_keeps_existing_output(tmp_path, monkeypatch):
+    markdown_path = _write(
+        tmp_path,
+        "# Diagram\n\n```mermaid\ngraph TD; A-->B\n```\n",
+        name="diagram.md",
+    )
+    output_path = tmp_path / "diagram.svg"
+    output_path.write_text("existing", encoding="utf-8")
+    workspaces = []
+
+    monkeypatch.setattr(M.shutil, "which", lambda _name: "fake-mmdc")
+
+    def fake_run(command, **_kwargs):
+        staged_output = Path(command[command.index("-o") + 1])
+        workspaces.append(staged_output.parent)
+        staged_output.write_text("partial", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=12,
+            stdout="",
+            stderr="render failed",
+            process_tree_stopped=True,
+        )
+
+    monkeypatch.setattr(M, "run_managed_process", fake_run)
+    result = M.md_render_diagram(markdown_path, str(output_path))
+
+    assert result["ok"] is False
+    assert result["exit_code"] == 12
+    assert output_path.read_text(encoding="utf-8") == "existing"
+    assert workspaces and all(not workspace.exists() for workspace in workspaces)
+    assert not list(tmp_path.glob(".docloupe-mermaid-*"))

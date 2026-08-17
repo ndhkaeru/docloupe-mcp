@@ -68,7 +68,7 @@ jobs:
 
       - name: Check JavaScript
         working-directory: packages/npm
-        run: npm run check
+        run: npm test
 
       - name: Wait for release assets
         env:

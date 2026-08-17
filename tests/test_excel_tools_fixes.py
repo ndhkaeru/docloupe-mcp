@@ -12,6 +12,7 @@ B3. Overlapping merges are rejected; editing a slave cell is rejected.
 C.  Internal hyperlinks, docProps and workbook view survive a round-trip;
     private keys are stripped from read-tool output.
 """
+import io
 import json
 import re
 import sys
@@ -32,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "servers" / "excel"))
 
 import main as M  # noqa: E402
-from core import reconstruct_excel, serialize_excel  # noqa: E402
+from core import _close_openpyxl_workbook, reconstruct_excel, serialize_excel  # noqa: E402
 
 
 def _make_rich_sheet(path: Path) -> None:
@@ -405,6 +406,59 @@ def test_excel_table_defined_name_preview_and_markdown_range(tmp_path):
     assert preview["sheets"][0]["rows"] == [["Name"], ["Ada"]]
 
 
+def test_close_openpyxl_workbook_closes_vba_archive():
+    vba_archive = zipfile.ZipFile(io.BytesIO(), "w")
+
+    class WorkbookStub:
+        def __init__(self):
+            self.vba_archive = vba_archive
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    workbook = WorkbookStub()
+    _close_openpyxl_workbook(workbook)
+
+    assert workbook.closed is True
+    assert vba_archive.fp is None
+
+
+def test_excel_get_info_xlsm_does_not_copy_vba_archive(tmp_path, monkeypatch):
+    src = tmp_path / "metadata.xlsm"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Name", "Score"])
+    ws.append(["Ada", 10])
+    ws.freeze_panes = "A2"
+    wb.save(src)
+    wb.close()
+
+    load_calls = []
+    original_load_workbook = openpyxl.load_workbook
+
+    def tracking_load_workbook(*args, **kwargs):
+        load_calls.append(dict(kwargs))
+        return original_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", tracking_load_workbook)
+
+    info = json.loads(M.excel_get_info(str(src)))
+
+    assert load_calls[0]["keep_vba"] is False
+    assert info["sheets"] == [{
+        "name": "Data",
+        "max_row": 2,
+        "max_column": 2,
+        "state": "visible",
+        "hidden": False,
+        "freeze_panes": "A2",
+        "merged_ranges": 0,
+        "table_count": 0,
+    }]
+
+
 # ── A3 ────────────────────────────────────────────────────────────────────────
 
 def test_failed_save_leaves_original_intact(tmp_path):
@@ -452,6 +506,31 @@ def test_insert_rows_shifts_anchored_metadata(tmp_path):
     assert "A10:B11" in {str(r) for r in ws.merged_cells.ranges}
     assert str(ws.auto_filter.ref) == "A3:F12"
     assert ws.freeze_panes == "A7"
+
+
+def test_insert_rows_sparse_cell_payload_saves_without_style_key_errors(tmp_path):
+    output_path = tmp_path / "sparse-row.xlsx"
+    created = json.loads(M.excel_create_workbook(
+        sheet_names=["Data"],
+        target_path=str(output_path),
+    ))
+    key = created["session_key"]
+    sparse_row = {
+        "h": None,
+        "hidden": False,
+        "outline": 0,
+        "cells": [{"v": "Inserted", "present": True, "merge": {}}],
+    }
+
+    M.excel_insert_rows(key, "Data", [{"after_index": -1, "rows_json": [sparse_row]}])
+    M.excel_save(key)
+    M.excel_close(key)
+
+    workbook = openpyxl.load_workbook(output_path)
+    try:
+        assert workbook["Data"]["A1"].value == "Inserted"
+    finally:
+        workbook.close()
 
 
 # ── B1: row delete ────────────────────────────────────────────────────────────
@@ -621,3 +700,107 @@ def test_read_tools_strip_private_keys(tmp_path):
 
     assert no_private(rows)
     assert no_private(cell)
+
+
+def _capture_session(tmp_path: Path) -> str:
+    session_key = str((tmp_path / "capture-source.xlsx").resolve())
+    M._sessions[session_key] = {
+        "source": session_key,
+        "sheets": [{"name": "Data", "rows": []}],
+    }
+    return session_key
+
+
+def _fake_png(width: int = 3, height: int = 2) -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\x0dIHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+    )
+
+
+def test_excel_capture_uses_managed_process_and_atomic_output(tmp_path, monkeypatch):
+    session_key = _capture_session(tmp_path)
+    output = tmp_path / "capture.png"
+    output.write_bytes(b"old-output")
+    workspaces = []
+
+    monkeypatch.setattr(M, "_find_soffice", lambda _hint=None: "fake-soffice")
+    monkeypatch.setattr(
+        M,
+        "reconstruct_excel",
+        lambda _data, target: Path(target).write_bytes(b"xlsx"),
+    )
+
+    def fake_run(command, **kwargs):
+        assert kwargs["timeout_seconds"] == 4.0
+        assert kwargs["cancel_event"] is None
+        workspace = Path(command[command.index("--outdir") + 1])
+        workspaces.append(workspace)
+        (workspace / "capture.png").write_bytes(_fake_png())
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout="converted",
+            stderr="",
+            process_tree_stopped=True,
+        )
+
+    monkeypatch.setattr(M, "run_managed_process", fake_run)
+    try:
+        result = M.excel_capture(
+            session_key,
+            "Data",
+            str(output),
+            soffice_path="fake-soffice",
+            timeout_seconds=4.0,
+        )
+    finally:
+        M._sessions.pop(session_key, None)
+
+    assert "3×2px" in result
+    assert output.read_bytes() == _fake_png()
+    assert workspaces and all(not workspace.exists() for workspace in workspaces)
+    assert not list(tmp_path.glob(".capture.png.docloupe-*.tmp"))
+
+
+def test_excel_capture_failure_keeps_existing_output_and_cleans_workspace(tmp_path, monkeypatch):
+    session_key = _capture_session(tmp_path)
+    output = tmp_path / "capture.png"
+    output.write_bytes(b"existing-output")
+    workspaces = []
+
+    monkeypatch.setattr(M, "_find_soffice", lambda _hint=None: "fake-soffice")
+    monkeypatch.setattr(
+        M,
+        "reconstruct_excel",
+        lambda _data, target: Path(target).write_bytes(b"xlsx"),
+    )
+
+    def fake_run(command, **_kwargs):
+        workspace = Path(command[command.index("--outdir") + 1])
+        workspaces.append(workspace)
+        (workspace / "partial.png").write_bytes(_fake_png())
+        return types.SimpleNamespace(
+            returncode=9,
+            stdout="",
+            stderr="conversion failed",
+            process_tree_stopped=True,
+        )
+
+    monkeypatch.setattr(M, "run_managed_process", fake_run)
+    try:
+        with pytest.raises(RuntimeError, match="exit_code=9"):
+            M.excel_capture(
+                session_key,
+                "Data",
+                str(output),
+                soffice_path="fake-soffice",
+                timeout_seconds=4.0,
+            )
+    finally:
+        M._sessions.pop(session_key, None)
+
+    assert output.read_bytes() == b"existing-output"
+    assert workspaces and all(not workspace.exists() for workspace in workspaces)
+    assert not list(tmp_path.glob(".capture.png.docloupe-*.tmp"))

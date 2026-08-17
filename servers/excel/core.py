@@ -6,7 +6,15 @@ Serialize: Excel → dict with per-cell fill, font, merge, alignment, numfmt,
 Reconstruct: dict → Excel (.xlsx) preserving all of the above.
 """
 
+import base64
+import copy
+import hashlib
 import json
+import re
+import shutil
+import zipfile
+from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape, quoteattr
 import os
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -26,6 +34,20 @@ def uri_to_path(uri: str) -> Path:
             path = path[1:]
         return Path(path)
     return Path(uri)
+
+
+def _close_openpyxl_workbook(workbook) -> None:
+    """Close every archive owned by an openpyxl workbook."""
+    vba_archive = getattr(workbook, "vba_archive", None)
+    if vba_archive is not None:
+        try:
+            vba_archive.close()
+        except Exception:
+            pass
+    try:
+        workbook.close()
+    except Exception:
+        pass
 
 
 # ── Color helpers ─────────────────────────────────────────────────────────────
@@ -387,6 +409,35 @@ def _extract_sheet_view_attrs(xlsx_path, sheet_file_map: dict) -> dict:
     return result
 
 
+def _extract_row_attrs(xlsx_path, sheet_file_map: dict) -> dict:
+    """Extract exact non-coordinate row attributes per worksheet."""
+    result = {}
+    try:
+        with zipfile.ZipFile(str(xlsx_path), "r") as archive:
+            for sheet_name, sheet_file in sheet_file_map.items():
+                if sheet_file not in archive.namelist():
+                    continue
+                root = ET.fromstring(archive.read(sheet_file))
+                sheet_data = root.find(_qname("sheetData"))
+                rows = {}
+                for row in (list(sheet_data) if sheet_data is not None else []):
+                    row_number = row.get("r")
+                    if not row_number:
+                        continue
+                    attrs = {
+                        _local_name(key): value
+                        for key, value in row.attrib.items()
+                        if _local_name(key) != "r"
+                    }
+                    if attrs:
+                        rows[row_number] = attrs
+                if rows:
+                    result[sheet_name] = rows
+    except Exception:
+        pass
+    return result
+
+
 def _extract_sheet_format_data(xlsx_path, sheet_file_map: dict) -> dict:
     """Extract raw worksheet root attrs, sheetFormatPr XML, and cols XML per sheet."""
     import zipfile, re
@@ -535,7 +586,7 @@ def _xlsx_sheet_file_map(wb_xml: str, rels_xml: str) -> dict:
     import re
     from html import unescape
     rel_map = {}
-    for m in re.finditer(r'<Relationship\b([^>]+)/>', rels_xml):
+    for m in re.finditer(r'<(?:\w+:)?Relationship\b([^>]+)/>', rels_xml):
         attrs = m.group(1)
         id_m  = re.search(r'\bId="([^"]+)"', attrs)
         tgt_m = re.search(r'\bTarget="([^"]+)"', attrs)
@@ -678,18 +729,12 @@ def validate_xlsx(path: str) -> list[str]:
 
 
 def diff_xlsx_package(before: str, after: str) -> dict:
-    """Compare ZIP package manifests for diagnostics after a save."""
-    before_parts = _xlsx_parts(before)
-    after_parts = _xlsx_parts(after)
-    removed = sorted(before_parts - after_parts)
-    added = sorted(after_parts - before_parts)
-    return {
-        "before_part_count": len(before_parts),
-        "after_part_count": len(after_parts),
-        "added": added,
-        "removed": removed,
-        "changed": bool(added or removed),
-    }
+    """Compare ZIP package manifests and semantic part content hashes after a save."""
+    from preservation import package_content_diff
+
+    return package_content_diff(before, after)
+
+
 
 
 def _restore_missing_package_parts(source_path: str | None, xlsx_path: str) -> str | None:
@@ -811,6 +856,105 @@ def _restore_missing_package_parts(source_path: str | None, xlsx_path: str) -> s
     return None
 
 
+def _build_chart_creation(ws, creation: dict):
+    from openpyxl.chart import BarChart, LineChart, Reference
+    from openpyxl.utils.cell import range_boundaries
+
+    chart_type = str(creation.get("chart_type") or "").strip().lower()
+    if chart_type in {"bar", "column"}:
+        chart = BarChart()
+        chart.type = "bar" if chart_type == "bar" else "col"
+    elif chart_type == "line":
+        chart = LineChart()
+    else:
+        raise ValueError(f"Unsupported chart_type: {chart_type!r}")
+
+    source_range = str(creation.get("source_range") or "").strip()
+    try:
+        min_col, min_row, max_col, max_row = range_boundaries(source_range)
+    except Exception as exc:
+        raise ValueError(f"Invalid chart source_range: {source_range!r}") from exc
+    if max_col - min_col < 1 or max_row - min_row < 1:
+        raise ValueError("Chart source_range must contain headers and at least two columns.")
+
+    chart.add_data(
+        Reference(ws, min_col=min_col + 1, max_col=max_col, min_row=min_row, max_row=max_row),
+        titles_from_data=True,
+    )
+    chart.set_categories(Reference(ws, min_col=min_col, min_row=min_row + 1, max_row=max_row))
+    if creation.get("title") is not None:
+        chart.title = str(creation["title"])
+    if creation.get("width") is not None:
+        chart.width = float(creation["width"])
+    if creation.get("height") is not None:
+        chart.height = float(creation["height"])
+    ws.add_chart(chart, str(creation.get("anchor") or "A1"))
+    return chart
+
+
+def _validate_image_creation_payload(encoded: str) -> tuple[bytes, str]:
+    from io import BytesIO
+
+    from PIL import Image as PillowImage
+
+    if not isinstance(encoded, str) or not encoded:
+        raise ValueError("Image creation requires non-empty base64 data.")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ValueError("Image creation contains invalid base64 data.") from exc
+
+    try:
+        with PillowImage.open(BytesIO(raw)) as probe:
+            image_format = (probe.format or "").lower()
+            probe.verify()
+    except Exception as exc:
+        raise ValueError("Image creation contains unsupported or invalid image bytes.") from exc
+    if image_format not in {"png", "jpeg", "jpg", "gif", "bmp", "tiff"}:
+        raise ValueError(f"Unsupported image format: {image_format or 'unknown'}")
+    return raw, image_format
+
+
+def _build_image_creation(ws, creation: dict) -> dict:
+    from io import BytesIO
+
+    from openpyxl.drawing.image import Image as OpenpyxlImage
+
+    raw, image_format = _validate_image_creation_payload(creation.get("base64"))
+
+    image = OpenpyxlImage(BytesIO(raw))
+    if creation.get("width") is not None:
+        image.width = float(creation["width"])
+    if creation.get("height") is not None:
+        image.height = float(creation["height"])
+    ws.add_image(image, str(creation.get("anchor") or "A1"))
+    return {**creation, "_raw_bytes": raw, "_image_format": image_format}
+
+
+def _stage_drawing_creations(wb, data: dict) -> dict:
+    plan: dict[str, dict[str, list[dict]]] = {}
+    for sheet_data in data.get("sheets") or []:
+        creations = sheet_data.get("drawing_creations") or []
+        if not creations:
+            continue
+        sheet_name = sheet_data["name"]
+        ws = wb[sheet_name]
+        sheet_plan = {"charts": [], "images": [], "shapes": []}
+        for creation in creations:
+            creation_type = creation.get("type")
+            if creation_type == "chart":
+                _build_chart_creation(ws, creation)
+                sheet_plan["charts"].append(copy.deepcopy(creation))
+            elif creation_type == "image":
+                sheet_plan["images"].append(_build_image_creation(ws, copy.deepcopy(creation)))
+            elif creation_type == "shape":
+                sheet_plan["shapes"].append(copy.deepcopy(creation))
+            else:
+                raise ValueError(f"Unsupported drawing creation type: {creation_type!r}")
+        plan[sheet_name] = sheet_plan
+    return plan
+
+
 def _extract_drawing_data(xlsx_path, sheet_file_map: dict) -> dict:
     """
     Extract drawing/chart/image files per sheet name.
@@ -878,6 +1022,98 @@ def _shape_texts_from_drawing_xml(xml: str) -> list[str]:
     return texts
 
 
+def _drawingml_attrs(fragment: str) -> dict[str, str]:
+    from html import unescape
+
+    return {
+        name.split(":")[-1]: unescape(value)
+        for name, _quote, value in re.findall(
+            r"([A-Za-z_][\w:.-]*)\s*=\s*(['\"])(.*?)\2",
+            fragment,
+            flags=re.DOTALL,
+        )
+    }
+
+
+def _shape_run_font_from_xml(run_xml: str) -> dict:
+    rpr_match = re.search(
+        r"<a:rPr\b([^>]*)>(.*?)</a:rPr>|<a:rPr\b([^>]*)/>",
+        run_xml,
+        flags=re.DOTALL,
+    )
+    if not rpr_match:
+        return {}
+    attrs = _drawingml_attrs(rpr_match.group(1) or rpr_match.group(3) or "")
+    body = rpr_match.group(2) or ""
+    font = {}
+    for source, target in (("b", "bold"), ("i", "italic")):
+        if source in attrs:
+            font[target] = attrs[source].lower() in {"1", "true", "on"}
+    if "strike" in attrs:
+        font["strike"] = attrs["strike"] not in {"noStrike", "none"}
+    if "u" in attrs and attrs["u"] not in {"none", "0", "false"}:
+        font["underline"] = {
+            "sng": "single",
+            "dbl": "double",
+        }.get(attrs["u"], attrs["u"])
+    if "sz" in attrs:
+        try:
+            font["size"] = int(attrs["sz"]) / 100
+        except (TypeError, ValueError):
+            pass
+    color_match = re.search(r"<a:srgbClr\b[^>]*\bval=\"([0-9A-Fa-f]{6,8})\"", body)
+    if color_match:
+        rgb = color_match.group(1).upper()
+        font["color"] = {"type": "rgb", "rgb": rgb if len(rgb) == 8 else "FF" + rgb}
+    latin_match = re.search(r"<a:latin\b[^>]*\btypeface=\"([^\"]*)\"", body)
+    if latin_match:
+        from html import unescape
+        font["name"] = unescape(latin_match.group(1))
+    return font
+
+
+def _shape_rich_text_from_drawing_xml(xml: str) -> dict | None:
+    from html import unescape
+
+    paragraphs = re.findall(r"<a:p\b[^>]*>(.*?)</a:p>", xml, flags=re.DOTALL)
+    if not paragraphs:
+        return None
+    runs = []
+    offset = 0
+
+    def append(text: str, font: dict | None = None) -> None:
+        nonlocal offset
+        if not text:
+            return
+        run = {"text": text, "start": offset, "end": offset + len(text)}
+        if font:
+            run["font"] = font
+        runs.append(run)
+        offset = run["end"]
+
+    for paragraph_index, paragraph in enumerate(paragraphs):
+        if paragraph_index:
+            append("\n")
+        tokens = re.findall(
+            r"<a:r\b[^>]*>.*?</a:r>|<a:fld\b[^>]*>.*?</a:fld>|<a:br\b[^>]*/>",
+            paragraph,
+            flags=re.DOTALL,
+        )
+        if not tokens:
+            tokens = re.findall(r"<a:t(?:\s[^>]*)?>.*?</a:t>", paragraph, flags=re.DOTALL)
+        for token in tokens:
+            if re.match(r"<a:br\b", token):
+                append("\n")
+                continue
+            text_match = re.search(r"<a:t(?:\s[^>]*)?>(.*?)</a:t>", token, flags=re.DOTALL)
+            if not text_match:
+                continue
+            text = unescape(re.sub(r"<[^>]+>", "", text_match.group(1)))
+            append(text, _shape_run_font_from_xml(token))
+    text = "".join(run["text"] for run in runs)
+    return {"text": text, "runs": runs}
+
+
 def _extract_shape_inventory(drawing_data: dict) -> dict:
     """Build lightweight shape metadata from preserved DrawingML XML."""
     import re
@@ -899,12 +1135,14 @@ def _extract_shape_inventory(drawing_data: dict) -> dict:
                 kind = "chart"
             elif re.search(r"<(?:xdr:)?sp\b", anchor_xml):
                 kind = "shape"
+            rich_text = _shape_rich_text_from_drawing_xml(anchor_xml) if kind == "shape" else None
             shapes.append({
                 "index": idx,
                 "id": id_m.group(1) if id_m else None,
                 "name": unescape(name_m.group(1)) if name_m else None,
                 "type": kind,
-                "text": "".join(_shape_texts_from_drawing_xml(anchor_xml)) or None,
+                "text": (rich_text or {}).get("text") or "".join(_shape_texts_from_drawing_xml(anchor_xml)) or None,
+                "rich_text": rich_text,
                 "relationship_id": next((g for g in (rel_m.groups() if rel_m else ()) if g), None),
             })
         if shapes:
@@ -1052,6 +1290,522 @@ def _inject_drawing_data(xlsx_path: str, drawing_data: dict,
         return f"drawings/charts/images passthrough failed: {e}"
     return None
 
+def _drawing_anchor_fragments(xml: str) -> list[str]:
+    pattern = re.compile(
+        r"<(twoCellAnchor|oneCellAnchor|absoluteAnchor)\b.*?</\1>",
+        re.DOTALL,
+    )
+    return [match.group(0) for match in pattern.finditer(xml or "")]
+
+
+def _drawing_relationship_records(xml: str | None) -> dict[str, dict]:
+    if not xml:
+        return {}
+    root = ET.fromstring(xml)
+    return {
+        child.attrib["Id"]: dict(child.attrib)
+        for child in root
+        if child.tag.rsplit("}", 1)[-1] == "Relationship" and child.attrib.get("Id")
+    }
+
+
+def _drawing_target_part(drawing_part: str, target: str) -> str:
+    import posixpath
+
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(posixpath.dirname(drawing_part), target))
+
+
+def _allocate_package_part(preferred: str, used_parts: set[str]) -> str:
+    import posixpath
+
+    preferred = preferred.lstrip("/")
+    if preferred not in used_parts:
+        used_parts.add(preferred)
+        return preferred
+    folder, filename = posixpath.split(preferred)
+    match = re.match(r"^(.*?)(\d+)(\.[^.]+)$", filename)
+    if match:
+        stem, _, suffix = match.groups()
+    else:
+        stem, suffix = posixpath.splitext(filename)
+    number = 1
+    while True:
+        candidate = posixpath.join(folder, f"{stem}{number}{suffix}")
+        if candidate not in used_parts:
+            used_parts.add(candidate)
+            return candidate
+        number += 1
+
+
+def _next_relationship_id(used_ids: set[str]) -> str:
+    numbers = [int(match.group(1)) for value in used_ids if (match := re.fullmatch(r"rId(\d+)", value))]
+    number = max(numbers, default=0) + 1
+    while f"rId{number}" in used_ids:
+        number += 1
+    result = f"rId{number}"
+    used_ids.add(result)
+    return result
+
+
+def _append_before_xml_close(xml: str, local_name: str, additions: str) -> str:
+    match = re.search(rf"</(?:[A-Za-z_][\w.-]*:)?{re.escape(local_name)}\s*>", xml)
+    if not match:
+        raise ValueError(f"Invalid XML: missing closing {local_name} element.")
+    return xml[:match.start()] + additions + xml[match.start():]
+
+
+def _set_tag_attribute(tag: str, name: str, value) -> str:
+    pattern = re.compile(rf"(?<![\w:]){re.escape(name)}\s*=\s*([\"']).*?\1")
+    replacement = f"{name}={quoteattr(str(value))}"
+    if pattern.search(tag):
+        return pattern.sub(replacement, tag, count=1)
+    position = -2 if tag.endswith("/>") else -1
+    return tag[:position] + " " + replacement + tag[position:]
+
+
+def _patch_drawing_object(anchor_xml: str, object_id: int, name: str | None) -> str:
+    pattern = re.compile(r"<(?:[A-Za-z_][\w.-]*:)?cNvPr\b[^>]*>")
+
+    def replace(match):
+        tag = _set_tag_attribute(match.group(0), "id", object_id)
+        return _set_tag_attribute(tag, "name", name) if name is not None else tag
+
+    patched, count = pattern.subn(replace, anchor_xml, count=1)
+    if count != 1:
+        raise ValueError("Generated drawing anchor has no cNvPr element.")
+    anchor_pattern = re.compile(r"^<(?:[A-Za-z_][\w.-]*:)?(?:twoCellAnchor|oneCellAnchor|absoluteAnchor)\b[^>]*>")
+
+    def bind_namespaces(match):
+        tag = match.group(0)
+        namespaces = {
+            "xmlns": "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
+            "xmlns:a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+            "xmlns:c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+            "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        }
+        for attribute, uri in namespaces.items():
+            if not re.search(rf"(?<![\w:]){re.escape(attribute)}\s*=", tag):
+                tag = _set_tag_attribute(tag, attribute, uri)
+        return tag
+
+    return anchor_pattern.sub(bind_namespaces, patched, count=1)
+
+
+def _replace_drawing_relationship_id(anchor_xml: str, old_id: str, new_id: str) -> str:
+    for attribute in ("id", "embed", "link"):
+        pattern = re.compile(
+            rf"(\br:{attribute}\s*=\s*)([\"']){re.escape(old_id)}\2"
+        )
+        anchor_xml = pattern.sub(lambda match: match.group(1) + quoteattr(new_id), anchor_xml)
+    return anchor_xml
+
+
+def _drawing_rgb(value) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("rgb") if value.get("type", "rgb") == "rgb" else None
+    if value is None:
+        return None
+    text = str(value).strip().lstrip("#")
+    if len(text) == 8:
+        text = text[-6:]
+    return text.upper() if re.fullmatch(r"[0-9A-Fa-f]{6}", text) else None
+
+
+def _shape_run_xml(run: dict, default_color: str | None) -> str:
+    text = str(run.get("text") or "")
+    font = run.get("font") or run.get("style") or {}
+    attrs = []
+    if font.get("bold") is not None:
+        attrs.append(f'b="{1 if font["bold"] else 0}"')
+    if font.get("italic") is not None:
+        attrs.append(f'i="{1 if font["italic"] else 0}"')
+    if "strike" in font:
+        attrs.append(f'strike="{"sngStrike" if font["strike"] else "noStrike"}"')
+    if "underline" in font:
+        underline = font.get("underline")
+        underline_value = {
+            "single": "sng",
+            "double": "dbl",
+            None: "none",
+            False: "none",
+        }.get(underline, underline)
+        attrs.append(f'u="{escape(str(underline_value))}"')
+    if font.get("size") is not None:
+        attrs.append(f'sz="{max(1, int(round(float(font["size"]) * 100)))}"')
+    properties = []
+    color = _drawing_rgb(font.get("color")) or default_color
+    if color:
+        properties.append(f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>')
+    if font.get("name"):
+        properties.append(f'<a:latin typeface={quoteattr(str(font["name"]))}/>')
+    rpr = f'<a:rPr {" ".join(attrs)}>{"".join(properties)}</a:rPr>' if attrs or properties else "<a:rPr/>"
+    preserve = ' xml:space="preserve"' if text[:1].isspace() or text[-1:].isspace() else ""
+    return f"<a:r>{rpr}<a:t{preserve}>{escape(text)}</a:t></a:r>"
+
+
+def build_shape_rich_text_xml(rich_text: dict, default_color: str | None = None) -> str:
+    result = []
+    runs = rich_text.get("runs") or []
+    if not runs and rich_text.get("text") is not None:
+        runs = [{"text": str(rich_text.get("text") or "")}]
+    for run in runs:
+        parts = str(run.get("text") or "").split("\n")
+        for index, part in enumerate(parts):
+            if part:
+                result.append(_shape_run_xml({**run, "text": part}, default_color))
+            if index < len(parts) - 1:
+                result.append("<a:br/>")
+    return "".join(result)
+
+
+def _shape_anchor_xml(creation: dict, object_id: int) -> str:
+    from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
+    from openpyxl.utils.units import cm_to_EMU
+
+    anchor = str(creation.get("anchor") or "A1").strip().upper()
+    try:
+        column_letter, row_number = coordinate_from_string(anchor)
+        column_number = column_index_from_string(column_letter)
+    except Exception as exc:
+        raise ValueError(f"Invalid shape anchor: {anchor!r}") from exc
+    width = float(creation.get("width") if creation.get("width") is not None else 3.0)
+    height = float(creation.get("height") if creation.get("height") is not None else 1.5)
+    if width <= 0 or height <= 0:
+        raise ValueError("Shape width and height must be positive.")
+    cx, cy = int(cm_to_EMU(width)), int(cm_to_EMU(height))
+    name = creation.get("name") or f"Shape {object_id}"
+    geometry = str(creation.get("shape_type") or "rect").strip() or "rect"
+    if geometry == "rectangle":
+        geometry = "rect"
+
+    style = creation.get("style") or {}
+    fill = _drawing_rgb(style.get("fill_color"))
+    outline = _drawing_rgb(style.get("outline_color"))
+    text_color = _drawing_rgb(style.get("text_color"))
+    fill_xml = f'<a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>' if fill else "<a:noFill/>"
+    line_xml = (
+        f'<a:ln><a:solidFill><a:srgbClr val="{outline}"/></a:solidFill></a:ln>'
+        if outline else "<a:ln><a:noFill/></a:ln>"
+    )
+
+    rich_text = copy.deepcopy(creation.get("rich_text") or {})
+    if not rich_text.get("runs") and creation.get("text") is not None:
+        rich_text["runs"] = [{"text": str(creation.get("text") or "")}]
+    paragraph = build_shape_rich_text_xml(rich_text, text_color)
+    paragraph += "<a:endParaRPr/>"
+
+    return (
+        '<xdr:oneCellAnchor xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        f"<xdr:from><xdr:col>{column_number - 1}</xdr:col><xdr:colOff>0</xdr:colOff>"
+        f"<xdr:row>{row_number - 1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
+        f'<xdr:ext cx="{cx}" cy="{cy}"/>'
+        "<xdr:sp><xdr:nvSpPr>"
+        f'<xdr:cNvPr id="{object_id}" name={quoteattr(str(name))}/><xdr:cNvSpPr txBox="1"/>'
+        "</xdr:nvSpPr><xdr:spPr>"
+        f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+        f'{fill_xml}<a:prstGeom prst={quoteattr(geometry)}><a:avLst/></a:prstGeom>{line_xml}'
+        f"</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p>{paragraph}</a:p></xdr:txBody>"
+        "</xdr:sp><xdr:clientData/></xdr:oneCellAnchor>"
+    )
+
+
+def _patch_sheet_drawing_reference(xml: str, relationship_id: str) -> str:
+    xml = re.sub(r"<(?:[A-Za-z_][\w.-]*:)?drawing\b[^>]*/>", "", xml)
+    root_match = re.search(r"<(?:[A-Za-z_][\w.-]*:)?worksheet\b", xml)
+    prefix_match = re.match(r"<([A-Za-z_][\w.-]*:)?worksheet", root_match.group(0)) if root_match else None
+    prefix = prefix_match.group(1) if prefix_match and prefix_match.group(1) else ""
+    drawing = (
+        f'<{prefix}drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        f'r:id="{relationship_id}"/>'
+    )
+    following = re.search(
+        r"<(?:[A-Za-z_][\w.-]*:)?(?:legacyDrawing|legacyDrawingHF|picture|oleObjects|controls|webPublishItems|tableParts|extLst)\b",
+        xml,
+    )
+    position = following.start() if following else xml.rfind(f"</{prefix}worksheet>")
+    if position < 0:
+        raise ValueError("Invalid worksheet XML: missing closing worksheet element.")
+    return xml[:position] + drawing + xml[position:]
+
+
+def _patch_sheet_drawing_relationship(xml: str | None, relationship_id: str, drawing_part: str) -> str:
+    namespace = "http://schemas.openxmlformats.org/package/2006/relationships"
+    if not xml:
+        xml = f'<Relationships xmlns="{namespace}"></Relationships>'
+
+    def remove_drawing(match):
+        type_match = re.search(r"\bType\s*=\s*([\"'])(.*?)\1", match.group(0))
+        return "" if type_match and type_match.group(2).rstrip("/").endswith("/drawing") else match.group(0)
+
+    xml = re.sub(r"<(?:[A-Za-z_][\w.-]*:)?Relationship\b[^>]*/>", remove_drawing, xml)
+    entry = (
+        f'<Relationship xmlns="{namespace}" Id="{relationship_id}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" '
+        f'Target="../drawings/{drawing_part.rsplit("/", 1)[-1]}"/>'
+    )
+    return _append_before_xml_close(xml, "Relationships", entry)
+
+
+def _patch_drawing_content_types(xml: str, removed_parts: set[str], final_parts: set[str]) -> str:
+    namespace = "http://schemas.openxmlformats.org/package/2006/content-types"
+
+    def remove_override(match):
+        part_match = re.search(r"\bPartName\s*=\s*([\"'])(.*?)\1", match.group(0))
+        part = part_match.group(2).lstrip("/") if part_match else None
+        return "" if part in removed_parts else match.group(0)
+
+    xml = re.sub(r"<(?:[A-Za-z_][\w.-]*:)?Override\b[^>]*/>", remove_override, xml)
+    existing_overrides = {
+        match.group(2).lstrip("/")
+        for match in re.finditer(r"\bPartName\s*=\s*([\"'])(.*?)\1", xml)
+    }
+    existing_defaults = {
+        match.group(2).lower()
+        for match in re.finditer(r"\bExtension\s*=\s*([\"'])(.*?)\1", xml)
+    }
+    additions = []
+    media_types = {
+        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
+        "bmp": "image/bmp", "tif": "image/tiff", "tiff": "image/tiff", "svg": "image/svg+xml",
+        "emf": "image/x-emf", "wmf": "image/x-wmf",
+    }
+    for part in sorted(final_parts):
+        if part.startswith("xl/drawings/") and part.endswith(".xml") and "/_rels/" not in part:
+            content_type = "application/vnd.openxmlformats-officedocument.drawing+xml"
+        elif part.startswith("xl/charts/") and part.endswith(".xml"):
+            content_type = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+        else:
+            extension = part.rsplit(".", 1)[-1].lower() if "." in part else ""
+            content_type = media_types.get(extension)
+            if content_type and extension not in existing_defaults:
+                additions.append(
+                    f'<Default xmlns="{namespace}" Extension="{extension}" ContentType="{content_type}"/>'
+                )
+                existing_defaults.add(extension)
+            continue
+        if part not in existing_overrides:
+            additions.append(
+                f'<Override xmlns="{namespace}" PartName="/{part}" ContentType="{content_type}"/>'
+            )
+            existing_overrides.add(part)
+    return _append_before_xml_close(xml, "Types", "".join(additions)) if additions else xml
+
+
+def _merge_drawing_packages(
+    xlsx_path: str,
+    drawing_data: dict,
+    creation_plan: dict,
+    sheet_name_to_new_file: dict,
+) -> str | None:
+    if not drawing_data and not creation_plan:
+        return None
+    tmp = str(xlsx_path) + ".~draw-merge.tmp"
+    try:
+        generated_data = _extract_drawing_data(xlsx_path, sheet_name_to_new_file)
+        with zipfile.ZipFile(str(xlsx_path), "r") as zin:
+            existing_parts = set(zin.namelist())
+            generated_parts: set[str] = set()
+            for sheet_drawing in generated_data.values():
+                drawing_part = sheet_drawing.get("drawing_file")
+                if drawing_part:
+                    generated_parts.add(drawing_part)
+                    generated_parts.add(
+                        drawing_part.rsplit("/", 1)[0] + "/_rels/" + drawing_part.rsplit("/", 1)[1] + ".rels"
+                    )
+                generated_parts.update((sheet_drawing.get("files") or {}).keys())
+
+            preserved_parts: set[str] = set()
+            for sheet_drawing in drawing_data.values():
+                drawing_part = sheet_drawing.get("drawing_file")
+                if drawing_part:
+                    preserved_parts.add(drawing_part)
+                    if sheet_drawing.get("drawing_rels"):
+                        preserved_parts.add(
+                            drawing_part.rsplit("/", 1)[0] + "/_rels/" + drawing_part.rsplit("/", 1)[1] + ".rels"
+                        )
+                preserved_parts.update((sheet_drawing.get("files") or {}).keys())
+
+            used_parts = (existing_parts - generated_parts) | preserved_parts
+            final_files: dict[str, bytes] = {}
+            sheet_patches: dict[str, bytes] = {}
+            sheet_relationship_patches: dict[str, bytes] = {}
+            final_payload_parts: set[str] = set()
+            affected_sheets = list(dict.fromkeys([*drawing_data.keys(), *creation_plan.keys()]))
+
+            for sheet_name in affected_sheets:
+                preserved = drawing_data.get(sheet_name) or {}
+                generated = generated_data.get(sheet_name) or {}
+                plan = creation_plan.get(sheet_name) or {"charts": [], "images": [], "shapes": []}
+                sheet_file = sheet_name_to_new_file.get(sheet_name)
+                if not sheet_file or sheet_file not in existing_parts:
+                    raise ValueError(f"Cannot resolve worksheet package part for {sheet_name!r}.")
+
+                preferred_drawing = preserved.get("drawing_file") or generated.get("drawing_file") or "xl/drawings/drawing1.xml"
+                if preserved.get("drawing_file"):
+                    drawing_part = preferred_drawing
+                    used_parts.add(drawing_part)
+                else:
+                    drawing_part = _allocate_package_part(preferred_drawing, used_parts)
+
+                drawing_xml = preserved.get("drawing_xml") or (
+                    '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"></xdr:wsDr>'
+                )
+                drawing_rels_xml = preserved.get("drawing_rels")
+                for part, payload in (preserved.get("files") or {}).items():
+                    final_files[part] = base64.b64decode(payload)
+                    final_payload_parts.add(part)
+
+                object_ids = {
+                    int(match.group(2))
+                    for match in re.finditer(
+                        r"<(?:[A-Za-z_][\w.-]*:)?cNvPr\b[^>]*\bid\s*=\s*([\"'])(\d+)\1",
+                        drawing_xml,
+                    )
+                }
+                next_object_id = max(object_ids, default=0) + 1
+                preserved_relationships = _drawing_relationship_records(drawing_rels_xml)
+                used_relationship_ids = set(preserved_relationships)
+                generated_relationships = _drawing_relationship_records(generated.get("drawing_rels"))
+                relationship_map: dict[str, tuple[str, str]] = {}
+                relationship_additions = []
+                anchor_additions = []
+                creation_indices = {"charts": 0, "images": 0}
+
+                for anchor_xml in _drawing_anchor_fragments(generated.get("drawing_xml") or ""):
+                    if re.search(r"<(?:[A-Za-z_][\w.-]*:)?pic\b", anchor_xml):
+                        creation_key = "images"
+                        id_match = re.search(r"\br:embed\s*=\s*([\"'])(.*?)\1", anchor_xml)
+                    elif "/chart" in anchor_xml or re.search(r"<(?:[A-Za-z_][\w.-]*:)?chart\b", anchor_xml):
+                        creation_key = "charts"
+                        id_match = re.search(r"\br:id\s*=\s*([\"'])(.*?)\1", anchor_xml)
+                    else:
+                        raise ValueError("Openpyxl generated an unsupported drawing anchor.")
+                    index = creation_indices[creation_key]
+                    creations = plan.get(creation_key) or []
+                    if index >= len(creations):
+                        raise ValueError(f"Generated {creation_key[:-1]} count does not match queued creations.")
+                    creation = creations[index]
+                    creation_indices[creation_key] += 1
+                    if not id_match:
+                        raise ValueError("Generated drawing anchor has no relationship id.")
+                    old_relationship_id = id_match.group(2)
+
+                    if old_relationship_id not in relationship_map:
+                        relationship = generated_relationships.get(old_relationship_id)
+                        if not relationship:
+                            raise ValueError(f"Missing generated drawing relationship {old_relationship_id}.")
+                        old_target = _drawing_target_part(generated.get("drawing_file"), relationship["Target"])
+                        payload_b64 = (generated.get("files") or {}).get(old_target)
+                        if payload_b64 is None:
+                            raise ValueError(f"Missing generated drawing payload {old_target}.")
+                        payload = creation.get("_raw_bytes") if creation_key == "images" else base64.b64decode(payload_b64)
+                        new_target = _allocate_package_part(old_target, used_parts)
+                        new_relationship_id = _next_relationship_id(used_relationship_ids)
+                        relationship_map[old_relationship_id] = (new_relationship_id, new_target)
+                        relationship_entry = (
+                            '<Relationship xmlns="http://schemas.openxmlformats.org/package/2006/relationships" '
+                            f'Id="{new_relationship_id}" Type={quoteattr(relationship["Type"])} '
+                            f'Target="/{new_target}"'
+                            + (
+                                f' TargetMode={quoteattr(relationship["TargetMode"])}'
+                                if relationship.get("TargetMode") else ""
+                            )
+                            + "/>"
+                        )
+                        relationship_additions.append(relationship_entry)
+                        final_files[new_target] = payload
+                        final_payload_parts.add(new_target)
+                    new_relationship_id, _ = relationship_map[old_relationship_id]
+                    anchor_xml = _replace_drawing_relationship_id(
+                        anchor_xml, old_relationship_id, new_relationship_id
+                    )
+                    requested_name = creation.get("name") if creation_key == "images" else None
+                    anchor_additions.append(
+                        _patch_drawing_object(anchor_xml, next_object_id, requested_name)
+                    )
+                    next_object_id += 1
+
+                for creation_key in ("charts", "images"):
+                    if creation_indices[creation_key] != len(plan.get(creation_key) or []):
+                        raise ValueError(f"Queued {creation_key} were not fully materialized by openpyxl.")
+                for shape in plan.get("shapes") or []:
+                    anchor_additions.append(_shape_anchor_xml(shape, next_object_id))
+                    next_object_id += 1
+
+                if anchor_additions:
+                    drawing_xml = _append_before_xml_close(drawing_xml, "wsDr", "".join(anchor_additions))
+                if relationship_additions:
+                    if not drawing_rels_xml:
+                        drawing_rels_xml = (
+                            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                            "</Relationships>"
+                        )
+                    drawing_rels_xml = _append_before_xml_close(
+                        drawing_rels_xml, "Relationships", "".join(relationship_additions)
+                    )
+
+                final_files[drawing_part] = drawing_xml.encode("utf-8")
+                final_payload_parts.add(drawing_part)
+                drawing_rels_part = (
+                    drawing_part.rsplit("/", 1)[0] + "/_rels/" + drawing_part.rsplit("/", 1)[1] + ".rels"
+                )
+                if drawing_rels_xml:
+                    final_files[drawing_rels_part] = drawing_rels_xml.encode("utf-8")
+
+                sheet_rels_part = (
+                    sheet_file.rsplit("/", 1)[0] + "/_rels/" + sheet_file.rsplit("/", 1)[1] + ".rels"
+                )
+                current_sheet_rels = (
+                    zin.read(sheet_rels_part).decode("utf-8") if sheet_rels_part in existing_parts else None
+                )
+                remaining_rels = re.sub(
+                    r"<(?:[A-Za-z_][\w.-]*:)?Relationship\b[^>]*/>",
+                    lambda match: "" if re.search(
+                        r"\bType\s*=\s*([\"']).*?/drawing/?\1", match.group(0)
+                    ) else match.group(0),
+                    current_sheet_rels or "",
+                )
+                sheet_relationship_id = _next_relationship_id(
+                    set(re.findall(r"\bId\s*=\s*[\"']([^\"']+)[\"']", remaining_rels))
+                )
+                sheet_patches[sheet_file] = _patch_sheet_drawing_reference(
+                    zin.read(sheet_file).decode("utf-8"), sheet_relationship_id
+                ).encode("utf-8")
+                sheet_relationship_patches[sheet_rels_part] = _patch_sheet_drawing_relationship(
+                    current_sheet_rels, sheet_relationship_id, drawing_part
+                ).encode("utf-8")
+
+            removed_content_type_parts = {
+                part for part in generated_parts
+                if part.startswith("xl/drawings/") or part.startswith("xl/charts/")
+            }
+            content_types = _patch_drawing_content_types(
+                zin.read("[Content_Types].xml").decode("utf-8"),
+                removed_content_type_parts,
+                final_payload_parts,
+            ).encode("utf-8")
+
+            replacements = {**final_files, **sheet_patches, **sheet_relationship_patches}
+            replacements["[Content_Types].xml"] = content_types
+            skipped = generated_parts | set(replacements)
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    if item.filename in skipped:
+                        continue
+                    zout.writestr(item, zin.read(item.filename))
+                for part, payload in replacements.items():
+                    zout.writestr(part, payload)
+        os.replace(tmp, str(xlsx_path))
+    except Exception as exc:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"drawing creation merge failed: {exc}"
+    return None
+
+
 def _extract_cf_xml(xlsx_path, sheet_names: list) -> dict:
     """
     Extract raw <conditionalFormatting> XML blocks per sheet, plus the workbook's
@@ -1106,6 +1860,154 @@ def _extract_data_validations_xml(xlsx_path, sheet_file_map: dict) -> dict:
     except Exception:
         pass
     return result
+
+
+def _extract_worksheet_xml_blocks(xlsx_path, sheet_file_map: dict, tag_name: str) -> dict:
+    result = {}
+    pattern = re.compile(
+        rf"<(?:[A-Za-z_][\w.-]*:)?{re.escape(tag_name)}\b[^>]*(?:/>|>.*?</(?:[A-Za-z_][\w.-]*:)?{re.escape(tag_name)}>)",
+        re.DOTALL,
+    )
+    try:
+        with zipfile.ZipFile(str(xlsx_path), "r") as archive:
+            names = set(archive.namelist())
+            for sheet_name, part_name in sheet_file_map.items():
+                if part_name not in names:
+                    continue
+                match = pattern.search(archive.read(part_name).decode("utf-8"))
+                if match:
+                    result[sheet_name] = match.group(0)
+    except Exception:
+        pass
+    return result
+
+
+def _resolve_relationship_target(source_part: str, target: str) -> str:
+    import posixpath
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(posixpath.dirname(source_part), target))
+
+
+_REGENERATED_SHEET_RELATIONSHIP_SUFFIXES = (
+    "/comments",
+    "/drawing",
+    "/hyperlink",
+    "/printerSettings",
+    "/table",
+    "/vmlDrawing",
+)
+
+
+def _extract_sheet_passthrough_relationships(xlsx_path, sheet_file_map: dict) -> dict:
+    """Capture worksheet relationships and target parts not rebuilt by openpyxl."""
+    result = {}
+    try:
+        with zipfile.ZipFile(str(xlsx_path), "r") as archive:
+            names = set(archive.namelist())
+            content_types = (
+                _content_type_inventory(archive.read("[Content_Types].xml"))
+                if "[Content_Types].xml" in names
+                else {"defaults": {}, "overrides": {}}
+            )
+            for sheet_name, sheet_part in sheet_file_map.items():
+                rels_part = _relationship_part_for_source(sheet_part)
+                if rels_part not in names:
+                    continue
+                relationships = []
+                parts = {}
+                rels_root = ET.fromstring(archive.read(rels_part))
+                for node in rels_root:
+                    relationship_type = str(node.get("Type") or "")
+                    normalized_type = relationship_type.rstrip("/")
+                    if any(
+                        normalized_type.endswith(suffix)
+                        for suffix in _REGENERATED_SHEET_RELATIONSHIP_SUFFIXES
+                    ):
+                        continue
+                    target = str(node.get("Target") or "")
+                    record = {
+                        "Id": node.get("Id"),
+                        "Type": relationship_type,
+                        "Target": target,
+                    }
+                    target_mode = node.get("TargetMode")
+                    if target_mode is not None:
+                        record["TargetMode"] = target_mode
+                    if target and target_mode != "External":
+                        target_part = _resolve_relationship_target(sheet_part, target)
+                        record["target_part"] = target_part
+                        if target_part in names and target_part not in parts:
+                            content_type = _content_type_for_part(target_part, content_types)
+                            extension = target_part.rsplit(".", 1)[-1].lower() if "." in target_part else None
+                            part_record = {
+                                "data": base64.b64encode(archive.read(target_part)).decode("ascii"),
+                                "content_type": content_type,
+                                "content_type_source": (
+                                    "override"
+                                    if target_part in (content_types.get("overrides") or {})
+                                    else "default"
+                                ),
+                                "extension": extension,
+                            }
+                            target_rels_part = _relationship_part_for_source(target_part)
+                            if target_rels_part in names:
+                                part_record["relationships_xml"] = base64.b64encode(
+                                    archive.read(target_rels_part)
+                                ).decode("ascii")
+                            parts[target_part] = part_record
+                    relationships.append(record)
+                if relationships:
+                    result[sheet_name] = {
+                        "relationships": relationships,
+                        "parts": parts,
+                    }
+    except Exception:
+        pass
+    return result
+
+
+def _comment_vml_part(entries: dict[str, bytes], sheet_part: str) -> str | None:
+    rels_part = _relationship_part_for_source(sheet_part)
+    raw = entries.get(rels_part)
+    if raw is None:
+        return None
+    root = ET.fromstring(raw)
+    for relationship in root:
+        if relationship.get("TargetMode") == "External":
+            continue
+        if str(relationship.get("Type", "")).endswith("/vmlDrawing"):
+            return _resolve_relationship_target(sheet_part, relationship.get("Target", ""))
+    return None
+
+
+def _extract_comment_vml(xlsx_path, sheet_file_map: dict) -> dict:
+    result = {}
+    try:
+        with zipfile.ZipFile(str(xlsx_path), "r") as archive:
+            entries = {item.filename: archive.read(item.filename) for item in archive.infolist()}
+        for sheet_name, sheet_part in sheet_file_map.items():
+            vml_part = _comment_vml_part(entries, sheet_part)
+            if vml_part and vml_part in entries:
+                result[sheet_name] = {
+                    "part_name": vml_part,
+                    "xml": entries[vml_part].decode("utf-8"),
+                }
+    except Exception:
+        pass
+    return result
+
+
+def _parse_ignored_errors_xml(xml: str | None) -> list[dict]:
+    rules = []
+    for match in re.finditer(r"<(?:[A-Za-z_][\w.-]*:)?ignoredError\b([^>]*)/?>", xml or ""):
+        attrs = _parse_xml_attrs(match.group(1))
+        rule = {"sqref": attrs.pop("sqref", "")}
+        for key, value in attrs.items():
+            rule[key] = str(value).lower() in {"1", "true"}
+        if rule["sqref"]:
+            rules.append(rule)
+    return rules
 
 
 def _inject_cf_xml(xlsx_path: str, sheet_cf: dict) -> str | None:
@@ -1381,6 +2283,116 @@ def _inject_sheet_view_attrs(xlsx_path: str, data: dict) -> str | None:
     return None
 
 
+def _inject_workbook_pr_extra(xlsx_path: str, extra_attrs: dict) -> str | None:
+    """Patch xl/workbook.xml's workbookPr with attributes openpyxl's own
+    object model has no read/write hook for at all (filterPrivacy,
+    saveExternalLinkValues, showObjects, updateLinks, ...). codeName and
+    date1904 are handled natively via wb.code_name/wb.epoch before save and
+    are not part of extra_attrs."""
+    if not extra_attrs:
+        return None
+    tmp = str(xlsx_path) + ".~workbookpr.tmp"
+    try:
+        with zipfile.ZipFile(str(xlsx_path), "r") as zin:
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    raw = zin.read(item.filename)
+                    if item.filename == "xl/workbook.xml":
+                        content = raw.decode("utf-8")
+
+                        def _replace(match):
+                            attrs = _parse_xml_attrs(match.group(1))
+                            for key, value in extra_attrs.items():
+                                if value is None:
+                                    attrs.pop(key, None)
+                                elif isinstance(value, bool):
+                                    attrs[key] = "1" if value else "0"
+                                else:
+                                    attrs[key] = str(value)
+                            return f"<workbookPr{_xml_attributes(attrs)}/>"
+
+                        content = re.sub(r"<workbookPr\b([^>]*)/>", _replace, content, count=1)
+                        raw = content.encode("utf-8")
+                    zout.writestr(item, raw)
+        os.replace(tmp, str(xlsx_path))
+    except Exception as e:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"workbookPr extra-attribute passthrough failed: {e}"
+    return None
+
+
+def _inject_doc_core_modified(xlsx_path: str, iso_value: str) -> str | None:
+    """Patch docProps/core.xml's dcterms:modified to an explicit/preserved
+    timestamp -- openpyxl's own save_workbook() unconditionally stamps this
+    element with datetime.now() as the very last step of every save, so any
+    value set on wb.properties.modified beforehand is always overwritten and
+    must be fixed up afterward for the preserve/set_explicit policies."""
+    from datetime import datetime as _dt
+    try:
+        value = _dt.fromisoformat(iso_value)
+    except Exception as e:
+        return f"Invalid document 'modified' timestamp {iso_value!r}: {e}"
+    text = value.replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
+    tmp = str(xlsx_path) + ".~modified.tmp"
+    try:
+        with zipfile.ZipFile(str(xlsx_path), "r") as zin:
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    raw = zin.read(item.filename)
+                    if item.filename == "docProps/core.xml":
+                        content = raw.decode("utf-8")
+                        content = re.sub(
+                            r"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)",
+                            lambda m: m.group(1) + text + m.group(2),
+                            content, count=1,
+                        )
+                        raw = content.encode("utf-8")
+                    zout.writestr(item, raw)
+        os.replace(tmp, str(xlsx_path))
+    except Exception as e:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"document 'modified' policy passthrough failed: {e}"
+    return None
+
+
+def _inject_app_props(xlsx_path: str, app_props: dict) -> str | None:
+    """Patch docProps/app.xml with extended (app) properties -- openpyxl's
+    writer always emits a brand new, empty ExtendedProperties document with
+    no hook to customize it, so patch the saved part directly."""
+    if not app_props:
+        return None
+    tmp = str(xlsx_path) + ".~appprops.tmp"
+    try:
+        with zipfile.ZipFile(str(xlsx_path), "r") as zin:
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    raw = zin.read(item.filename)
+                    if item.filename == "docProps/app.xml":
+                        content = raw.decode("utf-8")
+                        for key, value in app_props.items():
+                            if value is None:
+                                content = re.sub(rf"<{key}\b[^>]*>.*?</{key}>", "", content, flags=re.DOTALL)
+                                continue
+                            escaped = escape(str(value))
+                            new_child = f"<{key}>{escaped}</{key}>"
+                            new_content, count = re.subn(
+                                rf"<{key}\b[^>]*>.*?</{key}>", new_child, content,
+                                count=1, flags=re.DOTALL,
+                            )
+                            content = new_content if count else content.replace(
+                                "</Properties>", new_child + "</Properties>")
+                        raw = content.encode("utf-8")
+                    zout.writestr(item, raw)
+        os.replace(tmp, str(xlsx_path))
+    except Exception as e:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"app properties passthrough failed: {e}"
+    return None
+
+
 def _inject_raw_cols(xlsx_path: str, data: dict) -> str | None:
     """Patch saved worksheet XML with original <cols> ranges when dimensions are unchanged."""
     import zipfile, re, os
@@ -1560,6 +2572,1723 @@ def _inject_sheet_format_pr(xlsx_path: str, data: dict) -> str | None:
     return None
 
 
+# ── Lossless package/session helpers ──────────────────────────────────────────
+
+_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+
+
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _semantic_digest(value) -> str:
+    """Stable digest for the editable session model, excluding runtime markers."""
+    def clean(item):
+        if isinstance(item, dict):
+            return {
+                str(key): clean(child)
+                for key, child in sorted(item.items(), key=lambda pair: str(pair[0]))
+                if key not in {
+                    "source", "_lossless", "_dirty", "_package_edits",
+                    "_sheet_filter", "_loaded_disk_names", "_default_output_path",
+                    "_new_workbook", "_load_metrics", "_dirty_features", "_dirty_paths",
+                    "_verification_baseline_path",
+                }
+                and not str(key).startswith("_baseline")
+            }
+        if isinstance(item, (list, tuple)):
+            return [clean(child) for child in item]
+        if isinstance(item, bytes):
+            return {"__bytes_sha256__": hashlib.sha256(item).hexdigest()}
+        return item
+
+    payload = json.dumps(clean(value), sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _content_type_inventory(raw: bytes) -> dict:
+    root = ET.fromstring(raw)
+    defaults = {}
+    overrides = {}
+    for child in root:
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "Default":
+            defaults[child.get("Extension", "")] = child.get("ContentType", "")
+        elif tag == "Override":
+            overrides[child.get("PartName", "")] = child.get("ContentType", "")
+    return {"defaults": defaults, "overrides": overrides}
+
+
+def _content_type_for_part(part_name: str, inventory: dict) -> str | None:
+    override = inventory.get("overrides", {}).get("/" + part_name.lstrip("/"))
+    if override:
+        return override
+    suffix = Path(part_name).suffix.lstrip(".")
+    return inventory.get("defaults", {}).get(suffix)
+
+
+def _relationship_inventory(raw: bytes) -> list[dict]:
+    root = ET.fromstring(raw)
+    return [dict(child.attrib) for child in root if child.tag.rsplit("}", 1)[-1] == "Relationship"]
+
+
+def _extract_package_graph(path: str | Path) -> dict:
+    """Capture the complete OOXML part/content-type/relationship graph."""
+    with zipfile.ZipFile(path, "r") as archive:
+        names = archive.namelist()
+        content_types = (
+            _content_type_inventory(archive.read("[Content_Types].xml"))
+            if "[Content_Types].xml" in names
+            else {"defaults": {}, "overrides": {}}
+        )
+        parts = {}
+        relationships = {}
+        for name in names:
+            raw = archive.read(name)
+            parts[name] = {
+                "size": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "content_type": _content_type_for_part(name, content_types),
+            }
+            if name.endswith(".rels"):
+                try:
+                    relationships[name] = _relationship_inventory(raw)
+                except Exception:
+                    relationships[name] = []
+    return {
+        "parts": parts,
+        "content_types": content_types,
+        "relationships": relationships,
+    }
+
+
+def _normalise_package_part(name: str) -> str:
+    normalised = str(name).replace("\\", "/").lstrip("/")
+    if not normalised or normalised.startswith("../") or "/../" in normalised:
+        raise ValueError(f"Invalid OOXML package part name: {name!r}")
+    return normalised
+
+
+def _package_edit_bytes(value) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if not isinstance(value, dict):
+        raise ValueError("Package upsert values must be bytes, text, or an encoding object.")
+    if value.get("data_base64") is not None:
+        return base64.b64decode(value["data_base64"])
+    if value.get("base64") is not None:
+        return base64.b64decode(value["base64"])
+    if value.get("bytes_base64") is not None:
+        return base64.b64decode(value["bytes_base64"])
+    if value.get("text") is not None:
+        return str(value["text"]).encode(value.get("encoding") or "utf-8")
+    if value.get("xml") is not None:
+        return str(value["xml"]).encode(value.get("encoding") or "utf-8")
+    if value.get("content") is not None:
+        content = value["content"]
+        return content if isinstance(content, bytes) else str(content).encode(value.get("encoding") or "utf-8")
+    raise ValueError("Package upsert object requires base64, bytes_base64, text, xml, or content.")
+
+
+def _relationship_part_for_source(source: str | None) -> str:
+    if not source or str(source).strip() == "/":
+        return "_rels/.rels"
+    source = _normalise_package_part(source)
+    parent, filename = source.rsplit("/", 1) if "/" in source else ("", source)
+    prefix = f"{parent}/" if parent else ""
+    return f"{prefix}_rels/{filename}.rels"
+
+
+def _iter_edit_records(value, default_key: str) -> list[dict]:
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [dict(record) for record in value]
+    if isinstance(value, dict):
+        records = []
+        for key, item in value.items():
+            if isinstance(item, list):
+                for record in item:
+                    records.append({default_key: key, **dict(record)})
+            elif isinstance(item, dict):
+                records.append({default_key: key, **item})
+            else:
+                records.append({default_key: key, "value": item})
+        return records
+    raise ValueError(f"Expected list or object for package {default_key} edits.")
+
+
+def _apply_relationship_edits(entries: dict[str, bytes], edits) -> None:
+    for record in _iter_edit_records(edits, "source"):
+        rels_part = record.get("rels_part") or record.get("relationship_part")
+        if rels_part:
+            rels_part = _normalise_package_part(rels_part)
+        else:
+            rels_part = _relationship_part_for_source(record.get("source"))
+        raw = entries.get(rels_part)
+        root = ET.fromstring(raw) if raw else ET.Element(f"{{{_PACKAGE_REL_NS}}}Relationships")
+        rel_id = record.get("Id") or record.get("id")
+        op = str(record.get("op") or record.get("action") or "upsert").lower()
+        existing = next((node for node in root if node.get("Id") == rel_id), None) if rel_id else None
+        if op in {"delete", "remove"}:
+            if existing is not None:
+                root.remove(existing)
+        else:
+            if not rel_id:
+                raise ValueError("Relationship upsert requires id/Id.")
+            node = (
+                existing
+                if existing is not None
+                else ET.SubElement(root, f"{{{_PACKAGE_REL_NS}}}Relationship")
+            )
+            node.set("Id", str(rel_id))
+            rel_type = record.get("Type") or record.get("type")
+            target = record.get("Target") or record.get("target")
+            if not rel_type or target is None:
+                raise ValueError("Relationship upsert requires type/Type and target/Target.")
+            node.set("Type", str(rel_type))
+            node.set("Target", str(target))
+            target_mode = record.get("TargetMode") or record.get("target_mode")
+            if target_mode is not None:
+                node.set("TargetMode", str(target_mode))
+            elif "TargetMode" in node.attrib:
+                del node.attrib["TargetMode"]
+        entries[rels_part] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _apply_content_type_edits(entries: dict[str, bytes], edits) -> None:
+    if not edits:
+        return
+    raw = entries.get("[Content_Types].xml")
+    root = ET.fromstring(raw) if raw else ET.Element(f"{{{_CONTENT_TYPES_NS}}}Types")
+    if isinstance(edits, dict) and set(edits) <= {"defaults", "overrides"}:
+        records = [
+            {
+                "extension": extension,
+                "content_type": content_type,
+                "op": "delete" if content_type is None else "upsert",
+            }
+            for extension, content_type in (edits.get("defaults") or {}).items()
+        ]
+        records.extend(
+            {
+                "part_name": part_name,
+                "content_type": content_type,
+                "op": "delete" if content_type is None else "upsert",
+            }
+            for part_name, content_type in (edits.get("overrides") or {}).items()
+        )
+    else:
+        records = _iter_edit_records(edits, "part_name")
+    for record in records:
+        op = str(record.get("op") or record.get("action") or "upsert").lower()
+        extension = record.get("Extension") or record.get("extension")
+        part_name = record.get("PartName") or record.get("part_name")
+        if part_name and not str(part_name).startswith("/"):
+            part_name = "/" + _normalise_package_part(str(part_name))
+        match = None
+        for node in root:
+            tag = node.tag.rsplit("}", 1)[-1]
+            if extension is not None and tag == "Default" and node.get("Extension") == str(extension):
+                match = node
+                break
+            if part_name is not None and tag == "Override" and node.get("PartName") == str(part_name):
+                match = node
+                break
+        if op in {"delete", "remove"}:
+            if match is not None:
+                root.remove(match)
+            continue
+        content_type = record.get("ContentType") or record.get("content_type") or record.get("value")
+        if not content_type:
+            raise ValueError("Content-type upsert requires content_type/ContentType.")
+        if extension is not None:
+            node = match if match is not None else ET.SubElement(root, f"{{{_CONTENT_TYPES_NS}}}Default")
+            node.set("Extension", str(extension))
+        elif part_name is not None:
+            node = match if match is not None else ET.SubElement(root, f"{{{_CONTENT_TYPES_NS}}}Override")
+            node.set("PartName", str(part_name))
+        else:
+            raise ValueError("Content-type edit requires extension or part_name/PartName.")
+        node.set("ContentType", str(content_type))
+    entries["[Content_Types].xml"] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _apply_package_edits(xlsx_path: str, edits: dict | None) -> None:
+    """Apply expert package edits in one ZIP rewrite so partial edits never persist."""
+    if not edits:
+        return
+    with zipfile.ZipFile(xlsx_path, "r") as archive:
+        infos = {item.filename: item for item in archive.infolist()}
+        entries = {item.filename: archive.read(item.filename) for item in archive.infolist()}
+
+    for name in edits.get("delete") or []:
+        entries.pop(_normalise_package_part(name), None)
+
+    upserts = edits.get("upsert") or {}
+    if isinstance(upserts, list):
+        upserts = {
+            record.get("part") or record.get("name") or record.get("part_name"): record
+            for record in upserts
+        }
+    for name, value in upserts.items():
+        if not name:
+            raise ValueError("Package upsert requires a part name.")
+        entries[_normalise_package_part(name)] = _package_edit_bytes(value)
+
+    _apply_relationship_edits(entries, edits.get("relationships"))
+    _apply_content_type_edits(entries, edits.get("content_types"))
+
+    replacement = xlsx_path + ".~package-edits.tmp"
+    try:
+        with zipfile.ZipFile(replacement, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, raw in entries.items():
+                info = infos.get(name)
+                archive.writestr(info if info is not None else name, raw)
+        os.replace(replacement, xlsx_path)
+    except Exception:
+        if os.path.exists(replacement):
+            os.remove(replacement)
+        raise
+
+
+_SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_XML_SPACE_ATTR = "{http://www.w3.org/XML/1998/namespace}space"
+
+
+def _qname(local_name: str) -> str:
+    return f"{{{_SPREADSHEET_NS}}}{local_name}"
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _semantic_attrs(element) -> dict:
+    result = {}
+    for key, value in element.attrib.items():
+        if key == _XML_SPACE_ATTR:
+            key = "xml:space"
+        result[key] = value
+    return result
+
+
+def _node_semantics(element, include_children: bool = True) -> dict:
+    node = {"tag": _local_name(element.tag), "attrs": _semantic_attrs(element)}
+    if element.text is not None:
+        node["text"] = element.text
+    if include_children:
+        children = [_node_semantics(child) for child in element]
+        if children:
+            node["children"] = children
+    return node
+
+
+_XML_TRUE_VALUES = {"1", "true", "on", "yes"}
+
+
+def _typed_xml_attrs(
+    node: dict | None,
+    *,
+    booleans: set[str] | None = None,
+    integers: set[str] | None = None,
+    numbers: set[str] | None = None,
+) -> dict:
+    if not node:
+        return {}
+    boolean_names = booleans or set()
+    integer_names = integers or set()
+    number_names = numbers or set()
+    result = {}
+    for raw_key, raw_value in (node.get("attrs") or {}).items():
+        key = _local_name(raw_key)
+        if key in boolean_names:
+            result[key] = str(raw_value).lower() in _XML_TRUE_VALUES
+        elif key in integer_names:
+            try:
+                result[key] = int(raw_value)
+            except (TypeError, ValueError):
+                result[key] = raw_value
+        elif key in number_names:
+            try:
+                value = float(raw_value)
+                result[key] = int(value) if value.is_integer() else value
+            except (TypeError, ValueError):
+                result[key] = raw_value
+        else:
+            result[key] = raw_value
+    return result
+
+
+def _worksheet_node(snapshot: dict | None, tag: str) -> dict | None:
+    values = ((snapshot or {}).get("nodes") or {}).get(tag) or []
+    return values[-1] if values else None
+
+
+def _semantic_child(node: dict | None, tag: str) -> dict | None:
+    values = [child for child in (node or {}).get("children") or [] if child.get("tag") == tag]
+    return values[-1] if values else None
+
+
+def _split_header_footer_text(value: str | None) -> dict:
+    if not value:
+        return {}
+    matches = list(re.finditer(r"(?<!&)&([LCR])", value))
+    if not matches:
+        return {"center": value}
+    names = {"L": "left", "C": "center", "R": "right"}
+    result = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
+        result[names[match.group(1)]] = value[match.end():end]
+    return result
+
+
+def _worksheet_models_from_semantics(snapshot: dict | None) -> dict:
+    sheet_property_booleans = {
+        "enableFormatConditionsCalculation", "filterMode", "published", "syncHorizontal",
+        "syncVertical", "transitionEvaluation", "transitionEntry",
+    }
+    outline_booleans = {"applyStyles", "summaryBelow", "summaryRight", "showOutlineSymbols"}
+    page_setup_property_booleans = {"autoPageBreaks", "fitToPage"}
+    sheet_view_booleans = {
+        "windowProtection", "showFormulas", "showGridLines", "showRowColHeaders", "showZeros",
+        "rightToLeft", "tabSelected", "showRuler", "showOutlineSymbols", "defaultGridColor",
+        "showWhiteSpace", "zoomToFit",
+    }
+    sheet_view_integers = {
+        "colorId", "zoomScale", "zoomScaleNormal", "zoomScaleSheetLayoutView",
+        "zoomScalePageLayoutView", "workbookViewId",
+    }
+    page_setup_booleans = {"useFirstPageNumber", "usePrinterDefaults", "blackAndWhite", "draft"}
+    page_setup_integers = {
+        "scale", "fitToHeight", "fitToWidth", "firstPageNumber", "horizontalDpi",
+        "verticalDpi", "copies",
+    }
+    print_option_booleans = {
+        "horizontalCentered", "verticalCentered", "headings", "gridLines", "gridLinesSet",
+    }
+    header_footer_booleans = {"differentOddEven", "differentFirst", "scaleWithDoc", "alignWithMargins"}
+    break_booleans = {"man", "pt"}
+    break_integers = {"id", "min", "max"}
+
+    result = {}
+    sheet_properties_node = _worksheet_node(snapshot, "sheetPr")
+    page_setup_properties = None
+    if sheet_properties_node:
+        sheet_properties = _typed_xml_attrs(sheet_properties_node, booleans=sheet_property_booleans)
+        outline_node = _semantic_child(sheet_properties_node, "outlinePr")
+        if outline_node:
+            sheet_properties["outline"] = _typed_xml_attrs(outline_node, booleans=outline_booleans)
+        page_setup_properties_node = _semantic_child(sheet_properties_node, "pageSetUpPr")
+        if page_setup_properties_node:
+            page_setup_properties = _typed_xml_attrs(
+                page_setup_properties_node,
+                booleans=page_setup_property_booleans,
+            )
+            sheet_properties["page_setup_properties"] = copy.deepcopy(page_setup_properties)
+        result["sheet_properties"] = sheet_properties
+
+    sheet_views_node = _worksheet_node(snapshot, "sheetViews")
+    if sheet_views_node:
+        views = []
+        for view_node in sheet_views_node.get("children") or []:
+            if view_node.get("tag") != "sheetView":
+                continue
+            view = _typed_xml_attrs(
+                view_node,
+                booleans=sheet_view_booleans,
+                integers=sheet_view_integers,
+            )
+            pane_node = _semantic_child(view_node, "pane")
+            if pane_node:
+                view["pane"] = _typed_xml_attrs(pane_node, numbers={"xSplit", "ySplit"})
+            selections = [
+                _typed_xml_attrs(child, integers={"activeCellId"})
+                for child in view_node.get("children") or []
+                if child.get("tag") == "selection"
+            ]
+            if selections:
+                view["selections"] = selections
+            views.append(view)
+        result["sheet_views"] = views
+
+    page_setup_node = _worksheet_node(snapshot, "pageSetup")
+    page_setup = _typed_xml_attrs(
+        page_setup_node,
+        booleans=page_setup_booleans,
+        integers=page_setup_integers,
+    ) if page_setup_node else {}
+    if page_setup_node:
+        page_setup["present"] = True
+    if page_setup_properties and "fitToPage" in page_setup_properties:
+        page_setup["fitToPage"] = page_setup_properties["fitToPage"]
+    if page_setup:
+        result["page_setup"] = page_setup
+
+    print_options_node = _worksheet_node(snapshot, "printOptions")
+    if print_options_node:
+        print_options = _typed_xml_attrs(print_options_node, booleans=print_option_booleans)
+        print_options["present"] = True
+        result["print_options"] = print_options
+
+    header_footer_node = _worksheet_node(snapshot, "headerFooter")
+    if header_footer_node:
+        header_footer = _typed_xml_attrs(header_footer_node, booleans=header_footer_booleans)
+        section_names = {
+            "oddHeader": "odd_header", "oddFooter": "odd_footer",
+            "evenHeader": "even_header", "evenFooter": "even_footer",
+            "firstHeader": "first_header", "firstFooter": "first_footer",
+        }
+        for child in header_footer_node.get("children") or []:
+            section_name = section_names.get(child.get("tag"))
+            if section_name:
+                header_footer[section_name] = _split_header_footer_text(child.get("text"))
+        odd_aliases = {
+            ("odd_header", "left"): "hl", ("odd_header", "center"): "hc", ("odd_header", "right"): "hr",
+            ("odd_footer", "left"): "fl", ("odd_footer", "center"): "fc", ("odd_footer", "right"): "fr",
+        }
+        for (section_name, position), alias in odd_aliases.items():
+            if position in (header_footer.get(section_name) or {}):
+                header_footer[alias] = header_footer[section_name][position]
+        result["header_footer"] = header_footer
+
+    page_breaks = {}
+    for tag, axis in (("rowBreaks", "rows"), ("colBreaks", "columns")):
+        container = _worksheet_node(snapshot, tag)
+        if not container:
+            continue
+        attrs = _typed_xml_attrs(container, integers={"count", "manualBreakCount"})
+        page_breaks[f"{axis}_count"] = attrs.get("count", 0)
+        page_breaks[f"{axis}_manualBreakCount"] = attrs.get("manualBreakCount", 0)
+        page_breaks[axis] = [
+            _typed_xml_attrs(child, booleans=break_booleans, integers=break_integers)
+            for child in container.get("children") or []
+            if child.get("tag") == "brk"
+        ]
+    if page_breaks:
+        result["page_breaks"] = page_breaks
+
+    protected_ranges_node = _worksheet_node(snapshot, "protectedRanges")
+    if protected_ranges_node:
+        result["protected_ranges"] = [
+            _typed_xml_attrs(child, integers={"spinCount"})
+            for child in protected_ranges_node.get("children") or []
+            if child.get("tag") == "protectedRange"
+        ]
+    return result
+
+
+def _xml_boolean(element) -> bool:
+    value = element.get("val")
+    return value is None or str(value).lower() not in {"0", "false", "off", "no"}
+
+
+def _color_semantics_from_xml(element) -> dict | None:
+    if element is None:
+        return None
+    attrs = _semantic_attrs(element)
+    result = {"attrs": attrs}
+    if "rgb" in attrs:
+        result.update({"type": "rgb", "rgb": attrs["rgb"]})
+    elif "theme" in attrs:
+        result.update({"type": "theme", "theme": int(attrs["theme"])})
+    elif "indexed" in attrs:
+        result.update({"type": "indexed", "indexed": int(attrs["indexed"])})
+    elif "auto" in attrs:
+        result.update({"type": "auto", "auto": str(attrs["auto"]).lower() not in {"0", "false"}})
+    else:
+        result["type"] = None
+    if "tint" in attrs:
+        result["tint"] = float(attrs["tint"])
+    return result
+
+
+def _font_semantics_from_rpr(rpr) -> dict | None:
+    if rpr is None:
+        return None
+    result = {"attrs": _semantic_attrs(rpr)}
+    names = {
+        "rFont": "name", "sz": "size", "b": "bold", "i": "italic",
+        "u": "underline", "strike": "strike", "vertAlign": "vertAlign",
+        "charset": "charset", "family": "family", "scheme": "scheme",
+        "outline": "outline", "shadow": "shadow", "condense": "condense",
+        "extend": "extend",
+    }
+    boolean_tags = {"b", "i", "strike", "outline", "shadow", "condense", "extend"}
+    for child in rpr:
+        tag = _local_name(child.tag)
+        key = names.get(tag, tag)
+        if tag == "color":
+            result["color"] = _color_semantics_from_xml(child)
+        elif tag in boolean_tags:
+            result[key] = _xml_boolean(child)
+        else:
+            value = child.get("val")
+            if tag in {"sz"} and value is not None:
+                value = float(value)
+            elif tag in {"charset", "family"} and value is not None:
+                try:
+                    value = int(value)
+                except ValueError:
+                    pass
+            result[key] = value
+    return result
+
+
+def _rich_text_semantics(container, storage: str, shared_index: int | None = None) -> dict:
+    runs = []
+    offset = 0
+    rich_nodes = container.findall(_qname("r"))
+    if rich_nodes:
+        source_runs = rich_nodes
+    else:
+        source_runs = [container]
+    for source_run in source_runs:
+        text_node = source_run.find(_qname("t"))
+        text = text_node.text if text_node is not None and text_node.text is not None else ""
+        run = {
+            "text": text,
+            "start": offset,
+            "end": offset + len(text),
+            "font": _font_semantics_from_rpr(source_run.find(_qname("rPr"))),
+            "xml_space": text_node.get(_XML_SPACE_ATTR) if text_node is not None else None,
+        }
+        runs.append(run)
+        offset = run["end"]
+
+    phonetic_runs = []
+    for phonetic in container.findall(_qname("rPh")):
+        text_node = phonetic.find(_qname("t"))
+        phonetic_runs.append({
+            "text": text_node.text if text_node is not None and text_node.text is not None else "",
+            "start": int(phonetic.get("sb", "0")),
+            "end": int(phonetic.get("eb", "0")),
+            "xml_space": text_node.get(_XML_SPACE_ATTR) if text_node is not None else None,
+            "attrs": _semantic_attrs(phonetic),
+        })
+    phonetic_pr = container.find(_qname("phoneticPr"))
+    result = {
+        "is_rich_text": bool(rich_nodes),
+        "storage": storage,
+        "runs": runs,
+        "phonetic_runs": phonetic_runs,
+        "phonetic_properties": _semantic_attrs(phonetic_pr) if phonetic_pr is not None else None,
+        "text": "".join(run["text"] for run in runs),
+    }
+    if shared_index is not None:
+        result["shared_string_index"] = shared_index
+    return result
+
+
+def _style_semantics(styles_root) -> dict:
+    if styles_root is None:
+        return {"cell_xfs": [], "cell_style_xfs": [], "borders": [], "named_styles": []}
+
+    def children_of(parent_name: str, child_name: str) -> list[dict]:
+        parent = styles_root.find(_qname(parent_name))
+        if parent is None:
+            return []
+        return [_node_semantics(child) for child in parent.findall(_qname(child_name))]
+
+    named_styles = []
+    cell_styles = styles_root.find(_qname("cellStyles"))
+    if cell_styles is not None:
+        named_styles = [_node_semantics(node) for node in cell_styles.findall(_qname("cellStyle"))]
+    return {
+        "cell_xfs": children_of("cellXfs", "xf"),
+        "cell_style_xfs": children_of("cellStyleXfs", "xf"),
+        "fonts": children_of("fonts", "font"),
+        "fills": children_of("fills", "fill"),
+        "borders": children_of("borders", "border"),
+        "named_styles": named_styles,
+    }
+
+
+_XF_BOOLEAN_ATTRS = {
+    "applyNumberFormat", "applyFont", "applyFill", "applyBorder",
+    "applyAlignment", "applyProtection", "pivotButton", "quotePrefix",
+}
+_XF_INTEGER_ATTRS = {"numFmtId", "fontId", "fillId", "borderId", "xfId"}
+
+
+def _snapshot_named_style_names(wb) -> tuple[str, ...]:
+    try:
+        return tuple(wb._named_styles.names)
+    except (AttributeError, IndexError, TypeError):
+        return ()
+
+
+def _safe_named_style_name(cell, named_style_names: tuple[str, ...]) -> str | None:
+    try:
+        style = getattr(cell, "_style")
+        if style is None:
+            return named_style_names[0]
+        style_index = getattr(style, "xfId")
+        if not isinstance(style_index, int) or isinstance(style_index, bool) or style_index < 0:
+            return None
+        return named_style_names[style_index]
+    except (AttributeError, IndexError, TypeError):
+        return None
+
+
+def _cell_xf_semantics(style_id: int, definition: dict | None) -> dict:
+    result = {"style_id": style_id, "definition": definition}
+    attrs = (definition or {}).get("attrs") or {}
+    for key, value in attrs.items():
+        if key in _XF_BOOLEAN_ATTRS:
+            result[key] = str(value).lower() in {"1", "true"}
+        elif key in _XF_INTEGER_ATTRS:
+            try:
+                result[key] = int(value)
+            except (TypeError, ValueError):
+                result[key] = value
+    return result
+
+
+def _extract_ooxml_semantics(path: str | Path, sheet_file_map: dict) -> dict:
+    with zipfile.ZipFile(path, "r") as archive:
+        names = set(archive.namelist())
+        shared_strings = []
+        if "xl/sharedStrings.xml" in names:
+            shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for index, item in enumerate(shared_root.findall(_qname("si"))):
+                shared_strings.append(_rich_text_semantics(item, "shared", index))
+
+        styles_root = ET.fromstring(archive.read("xl/styles.xml")) if "xl/styles.xml" in names else None
+        styles = _style_semantics(styles_root)
+        cells_by_sheet = {}
+        worksheets = {}
+        for sheet_name, part_name in sheet_file_map.items():
+            if part_name not in names:
+                continue
+            root = ET.fromstring(archive.read(part_name))
+            cell_map = {}
+            for cell_node in root.findall(f".//{_qname('c')}"):
+                coord = cell_node.get("r")
+                if not coord:
+                    continue
+                item = {"present": True, "cell_attrs": _semantic_attrs(cell_node)}
+                formula_node = cell_node.find(_qname("f"))
+                if formula_node is not None:
+                    cached_node = cell_node.find(_qname("v"))
+                    if cached_node is None:
+                        cache_state = "missing"
+                        cached_value = None
+                    elif cached_node.text is None:
+                        cache_state = "empty"
+                        cached_value = None
+                    else:
+                        cache_state = "value"
+                        cached_value = cached_node.text
+                    item["formula"] = {
+                        "text": formula_node.text or "",
+                        "attrs": _semantic_attrs(formula_node),
+                        "cached_value": cached_value,
+                        "cache_state": cache_state,
+                    }
+                cell_type = cell_node.get("t")
+                if cell_type == "inlineStr":
+                    inline = cell_node.find(_qname("is"))
+                    if inline is not None:
+                        rich = _rich_text_semantics(inline, "inline")
+                        if rich["is_rich_text"] or rich["phonetic_runs"] or rich["phonetic_properties"]:
+                            item["rich_text"] = rich
+                elif cell_type == "s":
+                    value_node = cell_node.find(_qname("v"))
+                    try:
+                        shared_index = int(value_node.text) if value_node is not None else -1
+                    except (TypeError, ValueError):
+                        shared_index = -1
+                    if 0 <= shared_index < len(shared_strings):
+                        rich = copy.deepcopy(shared_strings[shared_index])
+                        if rich["is_rich_text"] or rich["phonetic_runs"] or rich["phonetic_properties"]:
+                            item["rich_text"] = rich
+                cell_map[coord] = item
+
+            top_level = {}
+            for child in root:
+                tag = _local_name(child.tag)
+                if tag == "sheetData":
+                    top_level[tag] = {"attrs": _semantic_attrs(child)}
+                    continue
+                top_level.setdefault(tag, []).append(_node_semantics(child))
+            worksheets[sheet_name] = {
+                "part_name": part_name,
+                "root_attrs": _semantic_attrs(root),
+                "nodes": top_level,
+            }
+            cells_by_sheet[sheet_name] = cell_map
+
+        workbook = {}
+        if "xl/workbook.xml" in names:
+            workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
+
+            def _last_singleton_child(tag: str):
+                # These elements are maxOccurs=1 per the schema, but some
+                # producers (or patched/merged documents) can leave a stray
+                # duplicate behind -- e.g. openpyxl always emits an empty
+                # <workbookProtection/> even when no protection is set, and a
+                # later edit can append a second, populated element rather
+                # than replacing it in place. `.find()` only returns the
+                # FIRST match, which would silently pick up the empty stub
+                # and hide the real one. Last-one-wins mirrors how Excel
+                # itself resolves duplicate singleton elements.
+                matches = workbook_root.findall(_qname(tag))
+                return matches[-1] if matches else None
+
+            workbook_pr = _last_singleton_child("workbookPr")
+            calc_pr = _last_singleton_child("calcPr")
+            workbook_protection = _last_singleton_child("workbookProtection")
+            workbook = {
+                "root_attrs": _semantic_attrs(workbook_root),
+                "workbook_properties": _node_semantics(workbook_pr) if workbook_pr is not None else None,
+                "calculation": _node_semantics(calc_pr) if calc_pr is not None else None,
+                "protection": _node_semantics(workbook_protection) if workbook_protection is not None else None,
+                "views": [_node_semantics(node) for node in workbook_root.findall(f"{_qname('bookViews')}/{_qname('workbookView')}")],
+                "sheets": [_node_semantics(node) for node in workbook_root.findall(f"{_qname('sheets')}/{_qname('sheet')}")],
+                "defined_names": [_node_semantics(node) for node in workbook_root.findall(f"{_qname('definedNames')}/{_qname('definedName')}")],
+            }
+
+        table_parts = {}
+        for name in sorted(part for part in names if part.startswith("xl/tables/") and part.endswith(".xml")):
+            try:
+                table_root = ET.fromstring(archive.read(name))
+                table_parts[name] = _node_semantics(table_root)
+            except Exception:
+                pass
+
+    return {
+        "cells": cells_by_sheet,
+        "worksheets": worksheets,
+        "workbook": workbook,
+        "styles": styles,
+        "tables": table_parts,
+    }
+
+
+def _color_semantics_from_openpyxl(color) -> dict | None:
+    ref = _color_ref_from_openpyxl(color)
+    if not ref:
+        return None
+    return {key: value for key, value in ref.items() if key != "rgb" or ref.get("type") == "rgb"}
+
+
+def _alignment_semantics(alignment) -> dict:
+    result = {}
+    unwrapped = copy.copy(alignment)
+    for attr in getattr(type(unwrapped), "__attrs__", ()):
+        value = getattr(alignment, attr, None)
+        if value is not None:
+            result[attr] = value
+    return result
+
+
+def _border_semantics(border, theme_colors: list[str]) -> dict:
+    result = {}
+    for attr in ("start", "end", "left", "right", "top", "bottom", "diagonal", "vertical", "horizontal"):
+        side = getattr(border, attr, None)
+        if side is None:
+            continue
+        color_ref = _color_ref_from_openpyxl(getattr(side, "color", None))
+        item = {}
+        if side.border_style is not None:
+            item["style"] = side.border_style
+        if color_ref is not None:
+            item["color"] = color_ref
+        resolved = _resolve_color(getattr(side, "color", None), theme_colors)
+        if resolved is not None:
+            item["resolved_rgb"] = resolved
+        result[attr] = item
+    for attr in ("diagonalUp", "diagonalDown", "outline"):
+        value = getattr(border, attr, None)
+        if value is not None:
+            result[attr] = value
+    return result
+
+
+def _serialize_named_styles(wb) -> list[dict]:
+    result = []
+    try:
+        named_styles = tuple(wb._named_styles)
+    except (AttributeError, TypeError):
+        return result
+
+    for named in named_styles:
+        name = getattr(named, "name", None)
+        if not name:
+            continue
+
+        item = {"name": name}
+        builtin_id = getattr(named, "builtinId", None)
+        hidden = getattr(named, "hidden", None)
+        if builtin_id is not None:
+            item["builtinId"] = builtin_id
+        if hidden is not None:
+            item["hidden"] = hidden
+
+        style = {}
+        font = getattr(named, "font", None)
+        if font is not None:
+            font_spec = {}
+            for source_key, target_key in (
+                ("name", "name"), ("size", "size"), ("bold", "bold"),
+                ("italic", "italic"), ("underline", "underline"),
+                ("strike", "strike"), ("vertAlign", "vertAlign"),
+                ("charset", "charset"), ("family", "family"),
+                ("scheme", "scheme"), ("outline", "outline"),
+                ("shadow", "shadow"), ("condense", "condense"),
+                ("extend", "extend"),
+            ):
+                value = getattr(font, source_key, None)
+                if value is None or value is False:
+                    continue
+                font_spec[target_key] = value
+            color_ref = _color_ref_from_openpyxl(getattr(font, "color", None))
+            if color_ref is not None:
+                font_spec["color"] = color_ref
+            if font_spec:
+                style["font"] = font_spec
+
+        fill = getattr(named, "fill", None)
+        if fill is not None:
+            fill_spec = {}
+            pattern_type = getattr(fill, "fill_type", None)
+            foreground = _color_ref_from_openpyxl(getattr(fill, "fgColor", None))
+            background = _color_ref_from_openpyxl(getattr(fill, "bgColor", None))
+            if pattern_type is not None:
+                fill_spec["pattern_type"] = pattern_type
+            if foreground is not None:
+                fill_spec["foreground"] = foreground
+            if background is not None:
+                fill_spec["background"] = background
+            if fill_spec:
+                style["fill"] = fill_spec
+
+        border = getattr(named, "border", None)
+        if border is not None:
+            border_spec = _border_semantics(border, [])
+            side_keys = (
+                "start", "end", "left", "right", "top", "bottom",
+                "diagonal", "vertical", "horizontal",
+            )
+            has_explicit_border = any(key in border_spec for key in side_keys)
+            has_explicit_border = has_explicit_border or bool(
+                border_spec.get("diagonalUp") or border_spec.get("diagonalDown")
+            )
+            has_explicit_border = has_explicit_border or border_spec.get("outline") is False
+            if has_explicit_border:
+                for side_key in side_keys:
+                    side = border_spec.get(side_key)
+                    if isinstance(side, dict):
+                        side.pop("resolved_rgb", None)
+                style["border"] = border_spec
+
+        alignment = getattr(named, "alignment", None)
+        if alignment is not None:
+            alignment_spec = {
+                key: value
+                for key, value in _alignment_semantics(alignment).items()
+                if value not in (None, False, 0, 0.0)
+            }
+            if alignment_spec:
+                style["alignment"] = alignment_spec
+
+        protection = getattr(named, "protection", None)
+        if protection is not None:
+            protection_spec = {}
+            locked = getattr(protection, "locked", None)
+            hidden_cell = getattr(protection, "hidden", None)
+            if locked is False:
+                protection_spec["locked"] = False
+            if hidden_cell is True:
+                protection_spec["hidden"] = True
+            if protection_spec:
+                style["protection"] = protection_spec
+
+        number_format = getattr(named, "number_format", None)
+        if number_format not in (None, "General"):
+            style["number_format"] = number_format
+        item["style"] = style
+        result.append(item)
+    return result
+
+
+def _make_border_side_semantic(item: dict | None):
+    from openpyxl.styles import Side
+    if item is None:
+        return None
+    color = _make_color_from_ref(item.get("color") or {}) if item.get("color") else None
+    return Side(border_style=item.get("style"), color=color)
+
+
+_IMPLICIT_CELL_DEFAULTS = {
+    "v": None,
+    "fill": None,
+    "bold": False,
+    "italic": False,
+    "size": None,
+    "font": None,
+    "fcolor": None,
+    "uline": None,
+    "strike": False,
+    "vAlign": None,
+    "wrap": False,
+    "halign": None,
+    "valign": None,
+    "rot": None,
+    "indent": None,
+    "shrink": False,
+    "numfmt": "General",
+    "merge": {},
+    "border": {},
+    "locked": True,
+    "hidden_cell": False,
+    "fill_color": None,
+    "font_color": None,
+    "present": False,
+    "data_type": "n",
+    "formula": None,
+    "rich_text": None,
+    "alignment": {},
+    "border_semantics": {},
+    "xf": {"style_id": 0, "definition": None},
+    "named_style": None,
+    "cell_attrs": {},
+}
+
+
+def _implicit_cell_placeholder() -> dict:
+    return {"_implicit": True, "v": None, "merge": {}}
+
+
+def _expanded_implicit_cell(cell_data: dict, defaults: dict | None = None) -> dict:
+    expanded = copy.deepcopy(defaults or _IMPLICIT_CELL_DEFAULTS)
+    expanded.update({key: value for key, value in cell_data.items() if key != "_implicit"})
+    return expanded
+
+
+def _style_cache_key(cell, style_id: int) -> tuple[int, int]:
+    try:
+        xf_id = int(getattr(getattr(cell, "_style", None), "xfId", 0) or 0)
+    except (TypeError, ValueError):
+        xf_id = 0
+    return style_id, xf_id
+
+
+def _build_cached_cell_style(
+    cell,
+    style_id: int,
+    style_semantics: dict,
+    named_style_names: tuple[str, ...],
+    theme_colors: list[str],
+) -> dict:
+    fill = cell.fill
+    fill_rgb = None
+    if fill and fill.fill_type == "solid":
+        fill_rgb = _resolve_color(fill.fgColor, theme_colors)
+
+    font = cell.font
+    fcolor = _resolve_color(font.color if font else None, theme_colors)
+    if fcolor in ("FF000000", "00000000"):
+        fcolor = None
+
+    border = cell.border
+    border_data = {}
+    if border:
+        for attr in (
+            "start", "end", "top", "bottom", "left", "right", "diagonal", "vertical", "horizontal",
+        ):
+            side = _ser_border_side(getattr(border, attr), theme_colors)
+            if side:
+                border_data[attr] = side
+        if border.diagonalUp:
+            border_data["diagonalUp"] = True
+        if border.diagonalDown:
+            border_data["diagonalDown"] = True
+        if border.outline is not None:
+            border_data["outline"] = border.outline
+
+    alignment = cell.alignment
+    xf_definition = (
+        style_semantics["cell_xfs"][style_id]
+        if 0 <= style_id < len(style_semantics["cell_xfs"])
+        else None
+    )
+    cell_style = {
+        "fill": fill_rgb,
+        "bold": bool(font.bold) if font else False,
+        "italic": bool(font.italic) if font else False,
+        "size": font.size if font else None,
+        "font": font.name if font else None,
+        "fcolor": fcolor,
+        "uline": font.underline if font else None,
+        "strike": bool(font.strike) if font else False,
+        "vAlign": font.vertAlign if font else None,
+        "wrap": bool(alignment.wrap_text) if alignment else False,
+        "halign": alignment.horizontal if alignment else None,
+        "valign": alignment.vertical if alignment else None,
+        "rot": alignment.text_rotation if alignment else None,
+        "indent": alignment.indent if alignment else None,
+        "shrink": bool(alignment.shrink_to_fit) if alignment else False,
+        "numfmt": cell.number_format,
+        "border": border_data,
+        "locked": bool(cell.protection.locked) if cell.protection else True,
+        "hidden_cell": bool(cell.protection.hidden) if cell.protection else False,
+        "fill_color": _color_semantics_from_openpyxl(getattr(fill, "fgColor", None)),
+        "font_color": _color_semantics_from_openpyxl(getattr(font, "color", None)),
+        "alignment": _alignment_semantics(alignment) if alignment else {},
+        "border_semantics": _border_semantics(border, theme_colors) if border else {},
+        "xf": _cell_xf_semantics(style_id, xf_definition),
+        "named_style": _safe_named_style_name(cell, named_style_names),
+    }
+    try:
+        if cell._style is not None and cell._style.quotePrefix:
+            cell_style["qp"] = True
+    except Exception:
+        pass
+    return {
+        "data": cell_style,
+        "font_raw": _font_raw_from_openpyxl(font, fcolor),
+        "fill_preservation": {
+            "patternType": fill.fill_type if fill else None,
+            "fgColor": _color_ref_from_openpyxl(getattr(fill, "fgColor", None)),
+            "bgColor": _color_ref_from_openpyxl(getattr(fill, "bgColor", None)),
+        },
+    }
+
+
+def _implicit_cell_defaults_from_cached_style(cell, cached_style: dict) -> dict:
+    defaults = {
+        **cached_style["data"],
+        "v": None,
+        "merge": {},
+        "data_type": cell.data_type,
+        "present": False,
+        "formula": None,
+        "rich_text": None,
+        "cell_attrs": {},
+    }
+    if cached_style["font_raw"]:
+        defaults["_font_raw"] = cached_style["font_raw"]
+    return defaults
+
+
+def _cached_fill_raw(raw_cell_fill: dict | None, cached_style: dict) -> dict | None:
+    if not raw_cell_fill:
+        return None
+    fill_raw = dict(raw_cell_fill)
+    fill_raw["rgb"] = cached_style["data"]["fill"]
+    fill_raw["is_gradient"] = "gradientFill" in (fill_raw.get("xml") or "")
+    fill_raw["patternType"] = (
+        cached_style["fill_preservation"]["patternType"]
+        if not fill_raw["is_gradient"]
+        else None
+    )
+    for key in ("fgColor", "bgColor"):
+        value = cached_style["fill_preservation"].get(key)
+        if value:
+            fill_raw[key] = value
+    return fill_raw
+
+
+_CELL_CONTENT_KEYS = (
+    "v", "present", "formula", "rich_text",
+)
+_CELL_STYLE_KEYS = (
+    "fill", "fill_color", "bold", "italic", "size", "font", "fcolor", "font_color",
+    "uline", "strike", "vAlign", "wrap", "halign", "valign", "rot", "indent", "shrink",
+    "alignment", "numfmt", "border", "border_semantics", "locked", "hidden_cell", "qp",
+    "xf", "named_style", "_fill_raw", "_font_raw",
+)
+_CELL_BASELINE_HASH_KEYS = (
+    "_baseline_content_hash", "_baseline_style_hash", "_baseline_structure_hash",
+)
+
+
+def _cell_group_payloads(cell_data: dict) -> tuple[dict, dict, dict]:
+    content = {key: cell_data.get(key) for key in _CELL_CONTENT_KEYS}
+    content["data_type"] = cell_data.get("dt") or cell_data.get("data_type")
+    return (
+        content,
+        {key: cell_data.get(key) for key in _CELL_STYLE_KEYS},
+        {"merge": cell_data.get("merge")},
+    )
+
+
+def _cell_baseline(cell_data: dict) -> None:
+    """Capture immutable semantic hashes once, immediately before first mutation."""
+    if all(key in cell_data for key in _CELL_BASELINE_HASH_KEYS):
+        return
+    content, style, structure = _cell_group_payloads(cell_data)
+    cell_data["_baseline_content_hash"] = _semantic_digest(content)
+    cell_data["_baseline_style_hash"] = _semantic_digest(style)
+    cell_data["_baseline_structure_hash"] = _semantic_digest(structure)
+    cell_data.setdefault("_dirty", [])
+
+
+def _xml_attributes(attrs: dict) -> str:
+    return "".join(f" {key}={quoteattr(str(value))}" for key, value in attrs.items() if value is not None)
+
+
+def _color_xml(color: dict | None) -> str:
+    if not color:
+        return ""
+    attrs = dict(color.get("attrs") or {})
+    if not attrs:
+        color_type = color.get("type")
+        if color_type and color.get(color_type) is not None:
+            value = color[color_type]
+            attrs[color_type] = "1" if color_type == "auto" and value is True else value
+        if color.get("tint") is not None:
+            attrs["tint"] = color["tint"]
+    return f"<color{_xml_attributes(attrs)}/>"
+
+
+def _run_properties_xml(font: dict | None) -> str:
+    if not font:
+        return ""
+    parts = []
+    scalar_tags = (
+        ("name", "rFont"), ("charset", "charset"), ("family", "family"),
+        ("size", "sz"), ("underline", "u"), ("vertAlign", "vertAlign"),
+        ("scheme", "scheme"),
+    )
+    boolean_tags = (
+        ("bold", "b"), ("italic", "i"), ("strike", "strike"),
+        ("outline", "outline"), ("shadow", "shadow"),
+        ("condense", "condense"), ("extend", "extend"),
+    )
+    for key, tag in scalar_tags:
+        if key in font and font[key] is not None:
+            parts.append(f"<{tag} val={quoteattr(str(font[key]))}/>")
+    for key, tag in boolean_tags:
+        if key in font:
+            parts.append(f"<{tag}" + ("/>" if font[key] else ' val="0"/>'))
+    if font.get("color"):
+        color = _color_xml(font["color"])
+        parts.append(color.replace("<color", "<color", 1))
+    return "<rPr>" + "".join(parts) + "</rPr>" if parts else ""
+
+
+def _text_xml(text: str, xml_space: str | None = None) -> str:
+    if xml_space is None and (text[:1].isspace() or text[-1:].isspace()):
+        xml_space = "preserve"
+    attrs = f' xml:space={quoteattr(xml_space)}' if xml_space else ""
+    return f"<t{attrs}>{escape(text)}</t>"
+
+
+def _rich_text_xml(rich_text: dict) -> str:
+    runs = rich_text.get("runs") or []
+    if rich_text.get("is_rich_text") or any(run.get("font") for run in runs):
+        body = "".join(
+            "<r>" + _run_properties_xml(run.get("font"))
+            + _text_xml(str(run.get("text") or ""), run.get("xml_space")) + "</r>"
+            for run in runs
+        )
+    else:
+        text = "".join(str(run.get("text") or "") for run in runs)
+        body = _text_xml(text, runs[0].get("xml_space") if runs else None)
+
+    for phonetic in rich_text.get("phonetic_runs") or []:
+        attrs = dict(phonetic.get("attrs") or {})
+        attrs.setdefault("sb", phonetic.get("start", 0))
+        attrs.setdefault("eb", phonetic.get("end", 0))
+        body += (
+            f"<rPh{_xml_attributes(attrs)}>"
+            + _text_xml(str(phonetic.get("text") or ""), phonetic.get("xml_space"))
+            + "</rPh>"
+        )
+    if rich_text.get("phonetic_properties"):
+        body += f"<phoneticPr{_xml_attributes(rich_text['phonetic_properties'])}/>"
+    return "<is>" + body + "</is>"
+
+
+_FORMULA_ERROR_TOKENS = {
+    "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!",
+    "#GETTING_DATA", "#SPILL!", "#CALC!", "#BLOCKED!", "#CONNECT!",
+    "#EXTERNAL!", "#FIELD!", "#UNKNOWN!",
+}
+
+
+def _formula_cache_type_and_text(cached_value, original_type: str | None) -> tuple[str | None, str]:
+    """Classify a formula's cached result so <c t=...><v> matches OOXML rules.
+
+    Returns (t attribute or None for numeric-default, <v> body text).
+    Distinguishes boolean/error/string/numeric cached values instead of
+    blindly reusing a stale original cell type: previously any non-numeric
+    cached value (a string, a boolean, an error token) was written with no
+    t="..." attribute at all, which defaults to numeric per OOXML and produces
+    a file even openpyxl itself cannot reload with data_only=True.
+    """
+    if isinstance(cached_value, bool):
+        return "b", ("1" if cached_value else "0")
+    if isinstance(cached_value, (int, float)):
+        return None, str(cached_value)
+    if isinstance(cached_value, str):
+        if cached_value in _FORMULA_ERROR_TOKENS:
+            return "e", cached_value
+        if original_type == "b" and cached_value in ("0", "1"):
+            return "b", cached_value
+        if original_type in (None, "n"):
+            try:
+                float(cached_value)
+                return None, cached_value
+            except ValueError:
+                pass
+        return "str", cached_value
+    return original_type, "" if cached_value is None else str(cached_value)
+
+
+def _formula_xml(formula: dict, value_text: str | None = None) -> str:
+    # Two conventions reach this function: core.py's own XML-parsed raw model
+    # ("attrs"/"cache_state", "text" without a leading "=") and main.py's
+    # public-tool model (_set_formula_cell: "attributes"/"cached_value_state",
+    # "text" WITH a leading "="). Accept either so a formula set via
+    # excel_set_formula writes its cache/attrs exactly like one loaded from
+    # disk. <f> elements must never contain the leading "=".
+    attrs_dict = dict(formula.get("attrs") or formula.get("attributes") or {})
+    # main.py's public-tool model (_set_formula_cell) keeps the formula kind
+    # ("shared"/"array"/"dataTable") in a separate "type" field rather than
+    # folding it into "attributes" -- without this, excel_set_formula's
+    # documented formula_type parameter had no effect on the actual OOXML
+    # unless the caller also manually duplicated t="..." into
+    # formula_attributes themselves.
+    formula_type = formula.get("type")
+    if formula_type and formula_type != "normal" and "t" not in attrs_dict:
+        attrs_dict["t"] = formula_type
+    attrs = _xml_attributes(attrs_dict)
+    text = str(formula.get("text") or "").lstrip("=")
+    body = f"<f{attrs}>{escape(text)}</f>"
+    state = formula.get("cache_state") or formula.get("cached_value_state") or "missing"
+    if state == "empty":
+        body += "<v></v>"
+    elif state == "value":
+        if value_text is None:
+            value_text = str(formula.get("cached_value") or "")
+        body += f"<v>{escape(value_text)}</v>"
+    return body
+
+
+def _contract_is_current(cell_data: dict, key: str) -> bool:
+    contract = cell_data.get(key)
+    if not contract:
+        return False
+    if key == "formula":
+        # contract["text"] may or may not already carry a leading "=" —
+        # normalize before re-adding it so both conventions compare correctly
+        # against cell_data["v"] (which always has the leading "=").
+        logical = "=" + str(contract.get("text") or "").lstrip("=")
+    else:
+        logical = str(contract.get("text") or "")
+    if cell_data.get("v") == logical:
+        return True
+    baseline = cell_data.get("_baseline_content_hash")
+    current = _semantic_digest(_cell_group_payloads(cell_data)[0])
+    return baseline is not None and baseline == current
+
+
+def _cell_xml_fragment(
+    coord: str,
+    cell_data: dict,
+    existing: str | None,
+    *,
+    include_scalar: bool = False,
+) -> str | None:
+    formula = cell_data.get("formula") if _contract_is_current(cell_data, "formula") else None
+    rich_text = cell_data.get("rich_text") if _contract_is_current(cell_data, "rich_text") else None
+    explicit_blank = bool(cell_data.get("present")) and cell_data.get("v") is None
+    if not (formula or rich_text or explicit_blank or include_scalar):
+        return existing
+
+    attrs = {}
+    if existing:
+        opening = re.match(r"<c\b([^>]*)", existing)
+        if opening:
+            attrs.update(_parse_xml_attrs(opening.group(1)))
+    attrs["r"] = coord
+    style_id = ((cell_data.get("xf") or {}).get("style_id"))
+    if style_id and "s" not in attrs:
+        attrs["s"] = style_id
+    if rich_text:
+        attrs["t"] = "inlineStr"
+        body = _rich_text_xml(rich_text)
+    elif formula:
+        original_type = (cell_data.get("cell_attrs") or {}).get("t")
+        state = formula.get("cached_value_state") or formula.get("cache_state") or "missing"
+        value_text = None
+        if state == "value":
+            computed_type, value_text = _formula_cache_type_and_text(formula.get("cached_value"), original_type)
+            if computed_type:
+                attrs["t"] = computed_type
+            else:
+                attrs.pop("t", None)
+        elif original_type:
+            attrs["t"] = original_type
+        else:
+            attrs.pop("t", None)
+        body = _formula_xml(formula, value_text)
+    elif include_scalar:
+        value = cell_data.get("v")
+        data_type = cell_data.get("dt") or cell_data.get("data_type")
+        if isinstance(value, str) and value.startswith("=") and data_type != "s":
+            attrs.pop("t", None)
+            body = f"<f>{escape(value[1:])}</f>"
+        elif value is None:
+            attrs.pop("t", None)
+            body = ""
+        elif isinstance(value, bool) or data_type == "b":
+            attrs["t"] = "b"
+            body = f"<v>{'1' if value in (True, 1, '1') else '0'}</v>"
+        elif data_type == "e":
+            attrs["t"] = "e"
+            body = f"<v>{escape(str(value))}</v>"
+        elif data_type == "d":
+            attrs["t"] = "d"
+            body = f"<v>{escape(str(value))}</v>"
+        elif isinstance(value, (int, float)) or data_type == "n":
+            attrs.pop("t", None)
+            body = f"<v>{escape(str(value))}</v>"
+        else:
+            attrs["t"] = "inlineStr"
+            body = "<is>" + _text_xml(str(value)) + "</is>"
+    else:
+        body = ""
+    return f"<c{_xml_attributes(attrs)}>" + body + "</c>"
+
+
+def _find_cell_xml(sheet_xml: str, coord: str) -> tuple[re.Match | None, str | None]:
+    coord_q = re.escape(coord)
+    pattern = re.compile(
+        rf'<c\b(?=[^>]*\br="{coord_q}")[^>]*?(?:/>|>.*?</c>)',
+        re.DOTALL,
+    )
+    match = pattern.search(sheet_xml)
+    return match, match.group(0) if match else None
+
+
+def _insert_cell_xml(sheet_xml: str, coord: str, fragment: str) -> str:
+    row_number = int(re.search(r"\d+", coord).group(0))
+    row_pattern = re.compile(
+        rf'(<row\b(?=[^>]*\br="{row_number}")[^>]*>)(.*?)(</row>)',
+        re.DOTALL,
+    )
+    row_match = row_pattern.search(sheet_xml)
+    if row_match:
+        replacement = row_match.group(1) + row_match.group(2) + fragment + row_match.group(3)
+        return sheet_xml[:row_match.start()] + replacement + sheet_xml[row_match.end():]
+    row_xml = f'<row r="{row_number}">{fragment}</row>'
+    return sheet_xml.replace("</sheetData>", row_xml + "</sheetData>", 1)
+
+
+def _inject_cell_contracts(xlsx_path: str, data: dict) -> str | None:
+    """Restore formula caches, rich-text runs, phonetics, and explicit blank cells."""
+    tmp = xlsx_path + ".~cell-contracts.tmp"
+    try:
+        with zipfile.ZipFile(xlsx_path, "r") as source:
+            workbook_xml = source.read("xl/workbook.xml").decode("utf-8")
+            rels_xml = source.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+            sheet_map = _xlsx_sheet_file_map(workbook_xml, rels_xml)
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as target:
+                for item in source.infolist():
+                    raw = source.read(item.filename)
+                    sheet_data = next(
+                        (sheet for sheet in data.get("sheets", []) if sheet_map.get(sheet.get("name")) == item.filename),
+                        None,
+                    )
+                    if sheet_data is not None:
+                        xml = raw.decode("utf-8")
+                        for row_index, row in enumerate(sheet_data.get("rows", []), 1):
+                            for col_index, cell_data in enumerate(row.get("cells", []), 1):
+                                if cell_data.get("merge") == "slave":
+                                    continue
+                                if not (cell_data.get("formula") or cell_data.get("rich_text") or (cell_data.get("present") and cell_data.get("v") is None)):
+                                    continue
+                                from openpyxl.utils import get_column_letter
+                                coord = f"{get_column_letter(col_index)}{row_index}"
+                                match, existing = _find_cell_xml(xml, coord)
+                                fragment = _cell_xml_fragment(coord, cell_data, existing)
+                                if fragment == existing:
+                                    continue
+                                if match:
+                                    xml = xml[:match.start()] + fragment + xml[match.end():]
+                                elif fragment:
+                                    xml = _insert_cell_xml(xml, coord, fragment)
+                        raw = xml.encode("utf-8")
+                    target.writestr(item, raw)
+        os.replace(tmp, xlsx_path)
+    except Exception as exc:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"cell semantic contract injection failed: {exc}"
+    return None
+
+
+def _current_cell_group_hashes(cell_data: dict) -> tuple[str, str, str]:
+    content, style, structure = _cell_group_payloads(cell_data)
+    return (
+        _semantic_digest(content),
+        _semantic_digest(style),
+        _semantic_digest(structure),
+    )
+
+
+def _compare_content_only_models(data: dict, baseline_data: dict) -> dict[str, list[str]] | None:
+    current_workbook = _semantic_digest({key: value for key, value in data.items() if key != "sheets"})
+    baseline_workbook = _semantic_digest({key: value for key, value in baseline_data.items() if key != "sheets"})
+    if current_workbook != baseline_workbook:
+        return None
+
+    baseline_sheets = {sheet.get("name"): sheet for sheet in baseline_data.get("sheets", [])}
+    changes = {}
+    for sheet in data.get("sheets", []):
+        sheet_name = sheet.get("name")
+        baseline_sheet = baseline_sheets.get(sheet_name)
+        if baseline_sheet is None:
+            return None
+        if len(sheet.get("rows", [])) != len(baseline_sheet.get("rows", [])):
+            return None
+        current_sheet_meta = _semantic_digest({key: value for key, value in sheet.items() if key != "rows"})
+        baseline_sheet_meta = _semantic_digest({key: value for key, value in baseline_sheet.items() if key != "rows"})
+        if current_sheet_meta != baseline_sheet_meta:
+            return None
+
+        changed_cells = []
+        for row_index, (row, baseline_row) in enumerate(
+            zip(sheet.get("rows", []), baseline_sheet.get("rows", [])),
+            1,
+        ):
+            cells = row.get("cells", [])
+            baseline_cells = baseline_row.get("cells", [])
+            if len(cells) != len(baseline_cells):
+                return None
+            current_row_meta = _semantic_digest({key: value for key, value in row.items() if key != "cells"})
+            baseline_row_meta = _semantic_digest({key: value for key, value in baseline_row.items() if key != "cells"})
+            if current_row_meta != baseline_row_meta:
+                return None
+            for col_index, (cell_data, baseline_cell) in enumerate(zip(cells, baseline_cells), 1):
+                content_hash, style_hash, structure_hash = _current_cell_group_hashes(cell_data)
+                baseline_content, baseline_style, baseline_structure = _current_cell_group_hashes(baseline_cell)
+                if style_hash != baseline_style or structure_hash != baseline_structure:
+                    return None
+                if content_hash != baseline_content:
+                    from openpyxl.utils import get_column_letter
+                    changed_cells.append(f"{get_column_letter(col_index)}{row_index}")
+        if changed_cells:
+            changes[sheet_name] = changed_cells
+    return changes
+
+
+def _lazy_source_content_changes(data: dict) -> dict[str, list[str]] | None:
+    source = data.get("source")
+    try:
+        baseline_data = serialize_excel(source, data.get("_sheet_filter"))
+    except Exception:
+        return None
+    return _compare_content_only_models(data, baseline_data)
+
+
+def _content_only_changes(data: dict) -> dict[str, list[str]] | None:
+    lossless = data.get("_lossless") or {}
+    source = data.get("source")
+    if not source or not os.path.isfile(source):
+        return None
+    if _sha256_file(source) != lossless.get("source_sha256"):
+        return None
+    current_workbook = _semantic_digest({key: value for key, value in data.items() if key != "sheets"})
+    if current_workbook != lossless.get("workbook_digest"):
+        return None
+    dirty = data.get("_dirty") or {}
+    if dirty.get("workbook"):
+        return None
+
+    changes = {}
+    baseline_cells_seen = False
+    for sheet in data.get("sheets", []):
+        sheet_name = sheet.get("name")
+        sheet_dirty = (dirty.get("sheets") or {}).get(sheet_name)
+        if sheet_dirty and not (isinstance(sheet_dirty, dict) and set(sheet_dirty) <= {"cells"}):
+            return None
+        if len(sheet.get("rows", [])) != sheet.get("_baseline_row_count"):
+            return None
+        current_sheet_meta = _semantic_digest({key: value for key, value in sheet.items() if key != "rows"})
+        if current_sheet_meta != sheet.get("_baseline_meta_hash"):
+            return None
+
+        changed_cells = []
+        for row_index, row in enumerate(sheet.get("rows", []), 1):
+            if len(row.get("cells", [])) != row.get("_baseline_cell_count"):
+                return None
+            current_row_meta = _semantic_digest({key: value for key, value in row.items() if key != "cells"})
+            if current_row_meta != row.get("_baseline_meta_hash"):
+                return None
+            for col_index, cell_data in enumerate(row.get("cells", []), 1):
+                present = tuple(key in cell_data for key in _CELL_BASELINE_HASH_KEYS)
+                if any(present) and not all(present):
+                    return None
+                if not all(present):
+                    continue
+                baseline_cells_seen = True
+                baseline_content, baseline_style, baseline_structure = (
+                    cell_data[key] for key in _CELL_BASELINE_HASH_KEYS
+                )
+                content_hash, style_hash, structure_hash = _current_cell_group_hashes(cell_data)
+                if style_hash != baseline_style or structure_hash != baseline_structure:
+                    return None
+                if content_hash != baseline_content:
+                    from openpyxl.utils import get_column_letter
+                    changed_cells.append(f"{get_column_letter(col_index)}{row_index}")
+        if changed_cells:
+            changes[sheet_name] = changed_cells
+    if baseline_cells_seen:
+        return changes
+    return _lazy_source_content_changes(data)
+
+
+def _cell_inner_xml(fragment: str | None) -> str:
+    if not fragment or fragment.rstrip().endswith("/>"):
+        return ""
+    match = re.match(r"<c\b[^>]*>(.*)</c>", fragment, re.DOTALL)
+    return match.group(1) if match else ""
+
+
+def _merge_generated_cell_content(source_cell: str | None, generated_cell: str | None) -> str | None:
+    if source_cell is None:
+        if generated_cell is None:
+            return None
+        generated_open = re.match(r"<c\b([^>]*)", generated_cell)
+        generated_attrs = _parse_xml_attrs(generated_open.group(1)) if generated_open else {}
+        generated_attrs.pop("s", None)
+        generated_inner = _cell_inner_xml(generated_cell)
+        return f"<c{_xml_attributes(generated_attrs)}>" + generated_inner + "</c>"
+    if generated_cell is None:
+        return source_cell
+    source_open = re.match(r"<c\b([^>]*)", source_cell)
+    generated_open = re.match(r"<c\b([^>]*)", generated_cell)
+    source_attrs = _parse_xml_attrs(source_open.group(1)) if source_open else {}
+    generated_attrs = _parse_xml_attrs(generated_open.group(1)) if generated_open else {}
+    if "t" in generated_attrs:
+        source_attrs["t"] = generated_attrs["t"]
+    else:
+        source_attrs.pop("t", None)
+    generated_inner = _cell_inner_xml(generated_cell)
+    source_inner = _cell_inner_xml(source_cell)
+    source_extras = re.sub(
+        r"<(?:f|v|is)\b[^>]*(?:/>|>.*?</(?:f|v|is)>)",
+        "",
+        source_inner,
+        flags=re.DOTALL,
+    )
+    return f"<c{_xml_attributes(source_attrs)}>" + generated_inner + source_extras + "</c>"
+
+
+def _reconstruct_content_only(data: dict, output_path: str, changes: dict[str, list[str]]) -> list[str] | None:
+    source_path = str(data["source"])
+    temp_output = str(output_path) + ".~saving.tmp"
+    try:
+        sheets_by_name = {sheet.get("name"): sheet for sheet in data.get("sheets", [])}
+        with zipfile.ZipFile(source_path, "r") as source:
+            source_wb = source.read("xl/workbook.xml").decode("utf-8")
+            source_rels = source.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+            source_sheet_map = _xlsx_sheet_file_map(source_wb, source_rels)
+            source_part_to_sheet = {part: name for name, part in source_sheet_map.items()}
+            with zipfile.ZipFile(temp_output, "w", zipfile.ZIP_DEFLATED) as target:
+                for item in source.infolist():
+                    raw = source.read(item.filename)
+                    sheet_name = source_part_to_sheet.get(item.filename)
+                    if sheet_name in changes:
+                        sheet_data = sheets_by_name.get(sheet_name)
+                        if not sheet_data:
+                            return None
+                        source_xml = raw.decode("utf-8")
+                        for coord in changes[sheet_name]:
+                            from openpyxl.utils.cell import coordinate_to_tuple
+                            row_number, column_number = coordinate_to_tuple(coord)
+                            rows = sheet_data.get("rows", [])
+                            if row_number > len(rows):
+                                return None
+                            cells = rows[row_number - 1].get("cells", [])
+                            if column_number > len(cells):
+                                return None
+                            cell_data = cells[column_number - 1]
+                            source_match, source_cell = _find_cell_xml(source_xml, coord)
+                            generated_cell = _cell_xml_fragment(
+                                coord,
+                                cell_data,
+                                None,
+                                include_scalar=True,
+                            )
+                            if (
+                                source_cell is None
+                                and cell_data.get("v") is None
+                                and not cell_data.get("present")
+                                and not cell_data.get("formula")
+                                and not cell_data.get("rich_text")
+                            ):
+                                generated_cell = None
+                            merged_cell = _merge_generated_cell_content(source_cell, generated_cell)
+                            if source_match and merged_cell is not None:
+                                source_xml = source_xml[:source_match.start()] + merged_cell + source_xml[source_match.end():]
+                            elif merged_cell is not None:
+                                source_xml = _insert_cell_xml(source_xml, coord, merged_cell)
+                        raw = source_xml.encode("utf-8")
+                    target.writestr(item, raw)
+        _apply_package_edits(temp_output, data.get("_package_edits"))
+        warnings = validate_xlsx(temp_output)
+        os.replace(temp_output, str(output_path))
+        return warnings
+    finally:
+        for candidate in (temp_output,):
+            if os.path.exists(candidate):
+                try:
+                    os.remove(candidate)
+                except OSError:
+                    pass
+
+
+def _atomic_copy_source_package(
+    data: dict,
+    output_path: str,
+    *,
+    require_session_digest: bool = True,
+) -> list[str] | None:
+    """Return warnings after an exact source copy, or None when the fast path is unsafe."""
+    lossless = data.get("_lossless") or {}
+    source = data.get("source")
+    if not source or not os.path.isfile(source):
+        return None
+    expected_source_hash = lossless.get("source_sha256")
+    if not expected_source_hash or _sha256_file(source) != expected_source_hash:
+        return None
+    if require_session_digest and _semantic_digest(data) != lossless.get("session_digest"):
+        return None
+
+    out_str = str(output_path)
+    tmp_out = out_str + ".~saving.tmp"
+    try:
+        shutil.copyfile(source, tmp_out)
+        _apply_package_edits(tmp_out, data.get("_package_edits"))
+        warnings = validate_xlsx(tmp_out)
+        os.replace(tmp_out, out_str)
+        return warnings
+    except Exception:
+        if os.path.exists(tmp_out):
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
+        raise
+
+
 # ── Serialize ─────────────────────────────────────────────────────────────────
 
 def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
@@ -1576,7 +4305,8 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
 
     path = uri_to_path(uri)
     keep_vba = path.suffix.lower() in {".xlsm", ".xltm"}
-    wb = openpyxl.load_workbook(str(path), keep_vba=keep_vba)
+    wb = openpyxl.load_workbook(str(path), keep_vba=keep_vba, rich_text=True)
+    named_style_names = _snapshot_named_style_names(wb)
     raw_theme = getattr(wb, "loaded_theme", None)
     theme_xml = None
     if raw_theme:
@@ -1587,6 +4317,7 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
 
     # Extract theme colors once — used to resolve all theme-type cell colors
     theme_colors = _wb_theme_colors(wb)
+    named_styles = _serialize_named_styles(wb)
 
     try:
         import zipfile as _zf
@@ -1598,17 +4329,28 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
         _sfm = {}
     raw_fill_data = _extract_raw_fill_data(path, _sfm)
     raw_sheet_views = _extract_sheet_view_attrs(path, _sfm)
+    raw_row_attrs = _extract_row_attrs(path, _sfm)
     raw_sheet_formats = _extract_sheet_format_data(path, _sfm)
     raw_data_validations = _extract_data_validations_xml(path, _sfm)
+    raw_sheet_extensions = _extract_worksheet_xml_blocks(path, _sfm, "extLst")
+    raw_ignored_errors = _extract_worksheet_xml_blocks(path, _sfm, "ignoredErrors")
+    raw_comment_vml = _extract_comment_vml(path, _sfm)
+    sheet_passthrough_relationships = _extract_sheet_passthrough_relationships(path, _sfm)
+    ooxml_semantics = _extract_ooxml_semantics(path, _sfm)
+    raw_cell_semantics = ooxml_semantics["cells"]
+    style_semantics = ooxml_semantics["styles"]
 
     names = [sheet_name] if sheet_name else wb.sheetnames
     sheets = []
+    cell_style_cache: dict[tuple[int, int], dict] = {}
 
     for sname in names:
         if sname not in wb.sheetnames:
             raise ValueError(f"Sheet '{sname}' not found. Available: {wb.sheetnames}")
         ws = wb[sname]
         raw_fills_for_sheet = raw_fill_data.get(sname, {})
+        raw_cells_for_sheet = raw_cell_semantics.get(sname, {})
+        implicit_cell_defaults = None
 
         # Build merge map
         merged_map: dict = {}
@@ -1630,88 +4372,67 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
             cells = []
             for cell in row:
                 mi = merged_map.get((cell.row, cell.column), {})
+                raw_cell = raw_cells_for_sheet.get(cell.coordinate, {})
+                if not raw_cell and not mi:
+                    if implicit_cell_defaults is None:
+                        style_id = int(cell.style_id or 0)
+                        style_key = _style_cache_key(cell, style_id)
+                        cached_style = cell_style_cache.get(style_key)
+                        if cached_style is None:
+                            cached_style = _build_cached_cell_style(
+                                cell,
+                                style_id,
+                                style_semantics,
+                                named_style_names,
+                                theme_colors,
+                            )
+                            cell_style_cache[style_key] = cached_style
+                        implicit_cell_defaults = _implicit_cell_defaults_from_cached_style(cell, cached_style)
+                    cells.append(_implicit_cell_placeholder())
+                    continue
+                if raw_cell.get("rich_text"):
+                    cell_value = raw_cell["rich_text"]["text"]
+                elif raw_cell.get("formula"):
+                    cell_value = "=" + raw_cell["formula"]["text"]
+                else:
+                    cell_value = cell.value
 
-                fill_rgb = None
-                fill_raw = None
-                if cell.fill:
-                    if cell.fill.fill_type == "solid":
-                        fill_rgb = _resolve_color(cell.fill.fgColor, theme_colors)
-                    raw_cell_fill = raw_fills_for_sheet.get(cell.coordinate)
-                    if raw_cell_fill:
-                        fill_raw = dict(raw_cell_fill)
-                        fill_raw["rgb"] = fill_rgb
-                        fill_raw["is_gradient"] = "gradientFill" in (fill_raw.get("xml") or "")
-                        fill_raw["patternType"] = (
-                            cell.fill.fill_type
-                            if not fill_raw["is_gradient"]
-                            else None
-                        )
-                        fg_ref = _color_ref_from_openpyxl(getattr(cell.fill, "fgColor", None))
-                        bg_ref = _color_ref_from_openpyxl(getattr(cell.fill, "bgColor", None))
-                        if fg_ref:
-                            fill_raw["fgColor"] = fg_ref
-                        if bg_ref:
-                            fill_raw["bgColor"] = bg_ref
-
-                fcolor = _resolve_color(
-                    cell.font.color if cell.font else None, theme_colors
-                )
-                # Suppress default black font color (no need to store it)
-                if fcolor in ("FF000000", "00000000"):
-                    fcolor = None
-                font_raw = _font_raw_from_openpyxl(cell.font, fcolor)
-
-                bdr = {}
-                if cell.border:
-                    for attr in ("top", "bottom", "left", "right", "diagonal"):
-                        sd = _ser_border_side(getattr(cell.border, attr), theme_colors)
-                        if sd:
-                            bdr[attr] = sd
-                    if cell.border.diagonalUp:
-                        bdr["diagonalUp"] = True
-                    if cell.border.diagonalDown:
-                        bdr["diagonalDown"] = True
-
-                aln = cell.alignment
+                try:
+                    style_id = int(raw_cell.get("cell_attrs", {}).get("s", cell.style_id or 0))
+                except (TypeError, ValueError):
+                    style_id = int(cell.style_id or 0)
+                style_key = _style_cache_key(cell, style_id)
+                cached_style = cell_style_cache.get(style_key)
+                if cached_style is None:
+                    cached_style = _build_cached_cell_style(
+                        cell,
+                        style_id,
+                        style_semantics,
+                        named_style_names,
+                        theme_colors,
+                    )
+                    cell_style_cache[style_key] = cached_style
+                fill_raw = _cached_fill_raw(raw_fills_for_sheet.get(cell.coordinate), cached_style)
                 cell_data = {
-                    "v":       cell.value,
-                    "fill":    fill_rgb,
-                    "bold":    bool(cell.font.bold)           if cell.font else False,
-                    "italic":  bool(cell.font.italic)         if cell.font else False,
-                    "size":    cell.font.size                 if cell.font else None,
-                    "font":    cell.font.name                 if cell.font else None,
-                    "fcolor":  fcolor,
-                    "uline":   cell.font.underline            if cell.font else None,
-                    "strike":  bool(cell.font.strike)         if cell.font else False,
-                    "vAlign":  cell.font.vertAlign            if cell.font else None,
-                    "wrap":    bool(aln.wrap_text)            if aln else False,
-                    "halign":  aln.horizontal                 if aln else None,
-                    "valign":  aln.vertical                   if aln else None,
-                    "rot":     aln.text_rotation              if aln else None,
-                    "indent":  aln.indent                     if aln else None,
-                    "shrink":  bool(aln.shrink_to_fit)        if aln else False,
-                    "numfmt":  cell.number_format,
-                    "merge":   mi,
-                    "border":  bdr,
-                    "locked":  bool(cell.protection.locked)   if cell.protection else True,
-                    "hidden_cell": bool(cell.protection.hidden) if cell.protection else False,
+                    **cached_style["data"],
+                    "v": cell_value,
+                    "merge": mi,
+                    "data_type": raw_cell.get("cell_attrs", {}).get("t") or cell.data_type,
+                    "present": bool(raw_cell.get("present")),
+                    "formula": copy.deepcopy(raw_cell.get("formula")),
+                    "rich_text": copy.deepcopy(raw_cell.get("rich_text")),
+                    "cell_attrs": copy.deepcopy(raw_cell.get("cell_attrs") or {}),
                 }
                 # Disambiguate literal text that LOOKS like a formula ("=…"):
                 # without this marker a text cell would silently turn into a
                 # broken formula on reconstruct.
-                if (isinstance(cell.value, str) and cell.value.startswith("=")
-                        and cell.data_type != "f"):
+                if (isinstance(cell_value, str) and cell_value.startswith("=")
+                        and cell.data_type != "f" and not raw_cell.get("formula")):
                     cell_data["dt"] = "s"
-                # quotePrefix style flag (Excel's leading-apostrophe text marker)
-                try:
-                    if cell._style is not None and cell._style.quotePrefix:
-                        cell_data["qp"] = True
-                except Exception:
-                    pass
                 if fill_raw:
                     cell_data["_fill_raw"] = fill_raw
-                if font_raw:
-                    cell_data["_font_raw"] = font_raw
+                if cached_style["font_raw"]:
+                    cell_data["_font_raw"] = cached_style["font_raw"]
                 cells.append(cell_data)
             rd = ws.row_dimensions[row[0].row]
             rows.append({
@@ -1720,6 +4441,23 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
                 "outline": rd.outlineLevel or 0,
                 "cells":   cells,
             })
+
+        for row_number, row_data in enumerate(rows, 1):
+            row_attrs = copy.deepcopy((raw_row_attrs.get(sname) or {}).get(str(row_number)) or {})
+            if row_attrs:
+                row_data["_row_attrs"] = row_attrs
+            for raw_key, public_key in (
+                ("collapsed", "collapsed"), ("thickTop", "thickTop"),
+                ("thickBot", "thickBot"), ("customFormat", "customFormat"),
+                ("customHeight", "customHeight"), ("ph", "phonetic"),
+            ):
+                if raw_key in row_attrs:
+                    row_data[public_key] = str(row_attrs[raw_key]).lower() in _XML_TRUE_VALUES
+            if "s" in row_attrs:
+                try:
+                    row_data["style"] = int(row_attrs["s"])
+                except (TypeError, ValueError):
+                    row_data["style"] = row_attrs["s"]
 
         sv = ws.sheet_view
         col_widths, col_hidden, col_outline = _ser_column_dimensions(ws)
@@ -1760,23 +4498,12 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
         protection = None
         if prot.sheet:
             protection = {
-                "password":            prot.password,
-                "selectLockedCells":   prot.selectLockedCells,
-                "selectUnlockedCells": prot.selectUnlockedCells,
-                "formatCells":         prot.formatCells,
-                "formatColumns":       prot.formatColumns,
-                "formatRows":          prot.formatRows,
-                "insertColumns":       prot.insertColumns,
-                "insertRows":          prot.insertRows,
-                "deleteColumns":       prot.deleteColumns,
-                "deleteRows":          prot.deleteRows,
-                "sort":                prot.sort,
-                "autoFilter":          prot.autoFilter,
-                "objects":             prot.objects,
-                "scenarios":           prot.scenarios,
-                "insertHyperlinks":    prot.insertHyperlinks,
-                "pivotTables":         prot.pivotTables,
+                key: getattr(prot, key)
+                for key in getattr(type(prot), "__attrs__", ())
+                if key != "sheet" and getattr(prot, key, None) is not None
             }
+            if protection.get("password") is not None:
+                protection["password_is_hashed"] = True
 
         # Print titles
         print_titles = None
@@ -1784,6 +4511,9 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
         ptc = ws.print_title_cols
         if ptr or ptc:
             print_titles = {"rows": ptr, "cols": ptc}
+
+        # Print area
+        print_area = str(ws.print_area) if ws.print_area else None
 
         # Header / footer
         hf_data = {}
@@ -1813,6 +4543,7 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
                         hyperlinks[_cell.coordinate] = {
                             "target":   target,
                             "location": location,
+                            "display":  getattr(hl, "display", None),
                             "tooltip":  getattr(hl, "tooltip", None),
                         }
 
@@ -1831,7 +4562,7 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
         try:
             for _t in ws.tables.values():
                 ts = _t.tableStyleInfo
-                tables.append({
+                tables.append(_serialize_table(_t) or {
                     "name": _t.displayName,
                     "ref":  _t.ref,
                     "style": {
@@ -1845,26 +4576,40 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
         except Exception:
             pass
 
+        worksheet_semantics = copy.deepcopy(ooxml_semantics["worksheets"].get(sname))
+        worksheet_models = _worksheet_models_from_semantics(worksheet_semantics)
         sheets.append({
             "name":          sname,
             "cw":            col_widths,
             "ch":            col_hidden,
             "co":            col_outline or None,
             "rows":          rows,
+            "_implicit_cell_defaults": implicit_cell_defaults or copy.deepcopy(_IMPLICIT_CELL_DEFAULTS),
             "freeze":        ws.freeze_panes,
             "validations":   _ser_validations(ws),
             "sheet_view":    _serialize_sheet_view(sv, raw_sheet_views.get(sname)),
             "tab_color":     tc,
             "auto_filter":   str(ws.auto_filter.ref) if ws.auto_filter.ref else None,
+            "auto_filter_model": _serialize_auto_filter(ws.auto_filter),
             "page_setup":    page_setup or None,
             "page_margins":  page_margins or None,
             "protection":    protection,
             "print_titles":  print_titles,
+            "print_area":    print_area,
             "header_footer": hf_data or None,
             "hyperlinks":    hyperlinks or None,
             "comments":      comments or None,
             "tables":        tables or None,
+            "state":         ws.sheet_state,
+            "worksheet_semantics": worksheet_semantics,
+            "_dirty":        [],
         })
+        sheets[-1].update(worksheet_models)
+        if worksheet_models.get("sheet_views") is not None:
+            sheets[-1]["sheet_view"] = copy.deepcopy(
+                worksheet_models["sheet_views"][0] if worksheet_models["sheet_views"] else {}
+            )
+
         raw_sheet_xml = raw_sheet_formats.get(sname) or {}
         if raw_sheet_xml.get("root_attrs") or raw_sheet_xml.get("sheetFormatPr"):
             sheets[-1]["_sheet_format_pr"] = {
@@ -1878,17 +4623,72 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
             }
         if raw_data_validations.get(sname):
             sheets[-1]["data_validations_xml"] = raw_data_validations[sname]
+        if raw_sheet_extensions.get(sname):
+            sheets[-1]["_worksheet_ext_xml"] = raw_sheet_extensions[sname]
+        if raw_ignored_errors.get(sname):
+            sheets[-1]["ignored_errors"] = _parse_ignored_errors_xml(raw_ignored_errors[sname])
+        if raw_comment_vml.get(sname):
+            sheets[-1]["_comment_vml"] = raw_comment_vml[sname]
+        if sheet_passthrough_relationships.get(sname):
+            sheets[-1]["passthrough_relationships"] = sheet_passthrough_relationships[sname]
 
-    # Named ranges (workbook level)
+    # Named ranges (workbook level + worksheet level, including built-ins).
+    #
+    # openpyxl's reader routes definedName elements three ways (see
+    # WorkbookParser.assign_names): global-scope names land in
+    # wb.defined_names; ordinary (non-reserved) worksheet-scoped names land in
+    # that sheet's own ws.defined_names (NOT wb.defined_names); and the three
+    # reserved built-ins (_xlnm.Print_Area / _xlnm.Print_Titles /
+    # _xlnm._FilterDatabase) are consumed entirely into ws.print_area /
+    # ws.print_title_rows+cols / ws.auto_filter and removed from every
+    # defined-names collection outright. Only scanning wb.defined_names (as
+    # before) silently dropped every worksheet-scoped name -- built-in or not.
+    _DN_META_FIELDS = (
+        "comment", "customMenu", "description", "help", "statusBar",
+        "hidden", "function", "vbProcedure", "xlm", "functionGroupId",
+        "shortcutKey", "publishToServer", "workbookParameter",
+    )
+
+    def _defined_name_record(dn, sheet_id_override=None) -> dict:
+        record = {
+            "name": dn.name,
+            "value": dn.attr_text,
+            "sheet_id": sheet_id_override if sheet_id_override is not None else dn.localSheetId,
+        }
+        for field in _DN_META_FIELDS:
+            value = getattr(dn, field, None)
+            if value is not None:
+                record[field] = value
+        return record
+
     named_ranges = []
     try:
         for name in wb.defined_names:
-            dn = wb.defined_names[name]
-            named_ranges.append({
-                "name":     dn.name,
-                "value":    dn.attr_text,
-                "sheet_id": dn.localSheetId,
-            })
+            named_ranges.append(_defined_name_record(wb.defined_names[name]))
+        for idx, ws_scan in enumerate(wb.worksheets):
+            for name in ws_scan.defined_names:
+                named_ranges.append(_defined_name_record(ws_scan.defined_names[name], sheet_id_override=idx))
+            # Resynthesize the reserved built-ins openpyxl consumed above so
+            # they still round-trip through excel_list_defined_names /
+            # excel_add_defined_name's duplicate-classification as built-ins,
+            # instead of silently disappearing after a save+reload.
+            if ws_scan.print_area:
+                named_ranges.append({
+                    "name": "_xlnm.Print_Area", "value": str(ws_scan.print_area),
+                    "sheet_id": idx, "builtin": True,
+                })
+            if ws_scan._print_rows or ws_scan._print_cols:
+                named_ranges.append({
+                    "name": "_xlnm.Print_Titles", "value": str(ws_scan.print_titles),
+                    "sheet_id": idx, "builtin": True,
+                })
+            if ws_scan.auto_filter.ref:
+                from openpyxl.utils.cell import quote_sheetname
+                named_ranges.append({
+                    "name": "_xlnm._FilterDatabase",
+                    "value": f"{quote_sheetname(ws_scan.title)}!{ws_scan.auto_filter.ref}",
+                    "sheet_id": idx, "builtin": True, "hidden": True,
+                })
     except Exception:
         pass
 
@@ -1913,16 +4713,23 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
     try:
         props = wb.properties
         for attr in ("creator", "title", "subject", "description",
-                     "keywords", "category", "lastModifiedBy"):
+                     "keywords", "category", "lastModifiedBy",
+                     "contentStatus", "identifier", "language",
+                     "revision", "version"):
             value = getattr(props, attr, None)
             if value:
                 doc_props[attr] = value
         if props.created:
             doc_props["created"] = props.created.isoformat()
+        if props.modified:
+            doc_props["modified"] = props.modified.isoformat()
+        if props.lastPrinted:
+            doc_props["lastPrinted"] = props.lastPrinted.isoformat()
     except Exception:
         pass
 
-    # Workbook view (active tab, window geometry)
+    # Workbook view (active tab, window geometry) -- kept for backward
+    # compatibility; workbook_views below carries the FULL ordered list.
     wb_view = {}
     try:
         view = wb.views[0]
@@ -1933,19 +4740,1076 @@ def serialize_excel(uri: str, sheet_name: str | None = None) -> dict:
     except Exception:
         pass
 
-    # Release the zip handle now — openpyxl workbooks have reference cycles,
-    # so waiting for GC can leave the file locked on Windows.
+    # Workbook views (bookViews) -- the full ordered list, not just the first.
+    workbook_views = []
     try:
-        wb.close()
+        for _view_idx, _view in enumerate(wb.views):
+            entry = {"index": _view_idx}
+            for attr in getattr(type(_view), "__attrs__", ()):
+                value = getattr(_view, attr, None)
+                if value is not None:
+                    entry[attr] = value
+            workbook_views.append(entry)
     except Exception:
         pass
 
-    return {"source": str(path), "sheets": sheets, "named_ranges": named_ranges,
-            "dxfs_xml": dxfs_xml, "theme_xml": theme_xml,
-            "doc_props": doc_props or None, "wb_view": wb_view or None}
+    # Calculation properties (calcPr) -- openpyxl round-trips every field
+    # natively via wb.calculation.
+    calculation_properties = {}
+    try:
+        calc = wb.calculation
+        for attr in getattr(type(calc), "__attrs__", ()):
+            value = getattr(calc, attr, None)
+            if value is not None:
+                calculation_properties[attr] = value
+    except Exception:
+        pass
+
+    # Workbook protection (workbookProtection) -- openpyxl round-trips these
+    # natively via wb.security, including already-hashed legacy passwords
+    # and the modern hash/salt/spin-count fields.
+    workbook_protection = {}
+    try:
+        sec = wb.security
+        for attr in getattr(type(sec), "__attrs__", ()):
+            value = getattr(sec, attr, None)
+            if value is not None:
+                workbook_protection[attr] = value
+    except Exception:
+        pass
+
+    # Workbook properties (workbookPr) -- codeName/date1904 round-trip
+    # natively through openpyxl's object model; everything else
+    # (filterPrivacy, saveExternalLinkValues, showObjects, updateLinks, ...)
+    # has no read/write hook on the Workbook object at all, so fall back to
+    # the raw attrs already captured by the semantic-snapshot extractor above.
+    workbook_properties = {}
+    try:
+        _WBPR_BOOL_ATTRS = {
+            "date1904", "dateCompatibility", "showBorderUnselectedTables", "filterPrivacy",
+            "promptedSolutions", "showInkAnnotation", "backupFile", "saveExternalLinkValues",
+            "hidePivotFieldList", "showPivotChartFilter", "allowRefreshQuery", "publishItems",
+            "checkCompatibility", "autoCompressPictures", "refreshAllConnections",
+        }
+        raw_wb_pr_node = (ooxml_semantics.get("workbook") or {}).get("workbook_properties") or {}
+        for key, value in (raw_wb_pr_node.get("attrs") or {}).items():
+            if key in _WBPR_BOOL_ATTRS:
+                workbook_properties[key] = str(value).strip().lower() not in {"0", "false"}
+            else:
+                workbook_properties[key] = value
+        if wb.code_name:
+            workbook_properties["codeName"] = wb.code_name
+        from openpyxl.utils.datetime import CALENDAR_MAC_1904 as _CAL_1904
+        workbook_properties["date1904"] = bool(wb.excel_base_date == _CAL_1904)
+    except Exception:
+        pass
+
+    # Custom document properties (docProps/custom.xml), typed.
+    custom_doc_props = []
+    try:
+        for prop in wb.custom_doc_props:
+            value = prop.value
+            if hasattr(value, "isoformat"):
+                value = value.isoformat()
+            custom_doc_props.append({"name": prop.name, "type": type(prop).__name__, "value": value})
+    except Exception:
+        pass
+
+    # App (extended) properties (docProps/app.xml) -- openpyxl has no object
+    # model for these at all; read the raw part directly.
+    app_props = {}
+    try:
+        import zipfile as _zf_app
+        with _zf_app.ZipFile(str(path), "r") as _z_app:
+            if "docProps/app.xml" in _z_app.namelist():
+                app_root = ET.fromstring(_z_app.read("docProps/app.xml"))
+                for child in app_root:
+                    tag = _local_name(child.tag)
+                    if child.text and not list(child):
+                        app_props[tag] = child.text
+    except Exception:
+        pass
+
+    # Release the zip handle now — openpyxl workbooks have reference cycles,
+    # so waiting for GC can leave the file locked on Windows.
+    _close_openpyxl_workbook(wb)
+
+    for sheet in sheets:
+        for row in sheet.get("rows", []):
+            row["_baseline_meta_hash"] = _semantic_digest({
+                key: value for key, value in row.items() if key != "cells"
+            })
+            row["_baseline_cell_count"] = len(row.get("cells", []))
+        sheet["_baseline_meta_hash"] = _semantic_digest({
+            key: value for key, value in sheet.items() if key != "rows"
+        })
+        sheet["_baseline_row_count"] = len(sheet.get("rows", []))
+
+    result = {"source": str(path), "sheets": sheets, "named_ranges": named_ranges,
+              "named_styles": named_styles,
+              "dxfs_xml": dxfs_xml, "theme_xml": theme_xml,
+              "doc_props": doc_props or None, "wb_view": wb_view or None,
+              "workbook_views": workbook_views or None,
+              "calculation_properties": calculation_properties,
+              "workbook_protection": workbook_protection,
+              "workbook_properties": workbook_properties,
+              "custom_doc_props": custom_doc_props,
+              "app_props": app_props,
+              "workbook_semantics": ooxml_semantics["workbook"],
+              "style_semantics": style_semantics,
+              "table_semantics": ooxml_semantics["tables"]}
+    result["_baseline_workbook_properties"] = copy.deepcopy(workbook_properties)
+    result["_lossless"] = {
+        "version": 2,
+        "source_sha256": _sha256_file(path),
+        "session_digest": _semantic_digest(result),
+        "workbook_digest": _semantic_digest({key: value for key, value in result.items() if key != "sheets"}),
+        "package_graph": _extract_package_graph(path),
+        "sheet_parts": _sfm,
+    }
+    result["_dirty"] = {"workbook": [], "sheets": {}}
+    return result
 
 
 # ── Reconstruct ───────────────────────────────────────────────────────────────
+
+_TABLE_ATTRS = (
+    "id", "name", "displayName", "comment", "ref", "tableType",
+    "headerRowCount", "insertRow", "insertRowShift", "totalsRowCount",
+    "totalsRowShown", "published", "headerRowDxfId", "dataDxfId",
+    "totalsRowDxfId", "headerRowBorderDxfId", "tableBorderDxfId",
+    "totalsRowBorderDxfId", "headerRowCellStyle", "dataCellStyle",
+    "totalsRowCellStyle", "connectionId",
+)
+_TABLE_COLUMN_ATTRS = (
+    "id", "uniqueName", "name", "totalsRowFunction", "totalsRowLabel",
+    "queryTableFieldId", "headerRowDxfId", "dataDxfId", "totalsRowDxfId",
+    "headerRowCellStyle", "dataCellStyle", "totalsRowCellStyle",
+)
+
+
+def _table_formula_model(value):
+    if value is None:
+        return None
+    text = getattr(value, "attr_text", None)
+    array = getattr(value, "array", None)
+    if array is None:
+        return text
+    return {"text": text, "array": array}
+
+
+def _serialize_table(table) -> dict:
+    result = {
+        key: getattr(table, key)
+        for key in _TABLE_ATTRS
+        if getattr(table, key, None) is not None
+    }
+    result["columns"] = []
+    for column in table.tableColumns or []:
+        item = {
+            key: getattr(column, key)
+            for key in _TABLE_COLUMN_ATTRS
+            if getattr(column, key, None) is not None
+        }
+        calculated = _table_formula_model(column.calculatedColumnFormula)
+        totals = _table_formula_model(column.totalsRowFormula)
+        if calculated is not None:
+            item["calculatedColumnFormula"] = calculated
+        if totals is not None:
+            item["totalsRowFormula"] = totals
+        result["columns"].append(item)
+    result["auto_filter"] = _serialize_auto_filter(table.autoFilter)
+    if table.sortState is not None:
+        result["sort_state"] = {
+            "ref": table.sortState.ref,
+            "conditions": [
+                {
+                    key: getattr(condition, key)
+                    for key in ("ref", "descending", "sortBy", "customList", "dxfId", "iconSet", "iconId")
+                    if getattr(condition, key, None) is not None
+                }
+                for condition in table.sortState.sortCondition or []
+            ],
+        }
+    style = table.tableStyleInfo
+    if style is not None:
+        result["style"] = {
+            "name": style.name,
+            "showRowStripes": style.showRowStripes,
+            "showColStripes": style.showColumnStripes,
+            "showFirstCol": style.showFirstColumn,
+            "showLastCol": style.showLastColumn,
+        }
+    return result
+
+
+def _table_formula(value):
+    if value is None:
+        return None
+    from openpyxl.worksheet.table import TableFormula
+    if isinstance(value, dict):
+        return TableFormula(array=value.get("array"), attr_text=value.get("text", value.get("attr_text")))
+    return TableFormula(attr_text=str(value))
+
+
+def _build_table(table_data: dict, table_id: int):
+    from openpyxl.worksheet.filters import AutoFilter
+    from openpyxl.worksheet.table import Table, TableColumn, TableStyleInfo
+
+    kwargs = {
+        key: table_data[key]
+        for key in _TABLE_ATTRS
+        if key in table_data and table_data[key] is not None
+    }
+    kwargs["id"] = int(kwargs.get("id") or table_id)
+    kwargs["displayName"] = table_data.get("displayName") or table_data.get("name")
+    kwargs["name"] = table_data.get("name") or kwargs["displayName"]
+    kwargs["ref"] = table_data["ref"]
+    table = Table(**kwargs)
+
+    columns = []
+    for index, item in enumerate(table_data.get("columns") or [], 1):
+        column_kwargs = {
+            key: item[key]
+            for key in _TABLE_COLUMN_ATTRS
+            if key in item and item[key] is not None
+        }
+        column_kwargs["id"] = int(column_kwargs.get("id") or index)
+        column_kwargs.setdefault("name", f"Column{index}")
+        column_kwargs["calculatedColumnFormula"] = _table_formula(item.get("calculatedColumnFormula"))
+        column_kwargs["totalsRowFormula"] = _table_formula(item.get("totalsRowFormula"))
+        columns.append(TableColumn(**column_kwargs))
+    if columns:
+        table.tableColumns = columns
+
+    filter_model = table_data.get("auto_filter")
+    if filter_model:
+        target = type("_FilterTarget", (), {})()
+        target.auto_filter = AutoFilter()
+        _apply_auto_filter_model(target, filter_model)
+        table.autoFilter = target.auto_filter
+    sort_model = table_data.get("sort_state")
+    if sort_model:
+        from openpyxl.worksheet.filters import SortCondition, SortState
+        table.sortState = SortState(
+            ref=sort_model.get("ref"),
+            sortCondition=[SortCondition(**item) for item in sort_model.get("conditions") or []],
+        )
+
+    style = table_data.get("style")
+    if style:
+        def flag(short_key, long_key, default=False):
+            if long_key in style:
+                return bool(style.get(long_key))
+            return bool(style.get(short_key, default))
+
+        table.tableStyleInfo = TableStyleInfo(
+            name=style.get("name"),
+            showFirstColumn=flag("showFirstCol", "showFirstColumn"),
+            showLastColumn=flag("showLastCol", "showLastColumn"),
+            showRowStripes=flag("showRowStripes", "showRowStripes", True),
+            showColumnStripes=flag("showColStripes", "showColumnStripes"),
+        )
+    return table
+
+
+def _serialize_auto_filter(auto_filter) -> dict | None:
+    if auto_filter is None or not auto_filter.ref:
+        return None
+    model = {"ref": str(auto_filter.ref), "filter_columns": [], "sort_state": None}
+    for column in auto_filter.filterColumn or []:
+        item = {
+            key: getattr(column, key)
+            for key in ("colId", "hiddenButton", "showButton")
+            if getattr(column, key, None) is not None
+        }
+        if column.filters is not None:
+            item["filters"] = list(column.filters.filter or [])
+            if column.filters.blank is not None:
+                item["blank"] = column.filters.blank
+            if column.filters.calendarType is not None:
+                item["calendarType"] = column.filters.calendarType
+        if column.customFilters is not None:
+            item["custom_filters"] = [
+                {key: getattr(entry, key) for key in ("operator", "val") if getattr(entry, key, None) is not None}
+                for entry in column.customFilters.customFilter or []
+            ]
+            item["and"] = column.customFilters.and_
+        for source, target in (
+            ("top10", "top10"), ("dynamicFilter", "dynamic_filter"),
+            ("colorFilter", "color_filter"), ("iconFilter", "icon_filter"),
+        ):
+            value = getattr(column, source, None)
+            if value is not None:
+                item[target] = {
+                    key: getattr(value, key)
+                    for key in getattr(type(value), "__attrs__", ())
+                    if getattr(value, key, None) is not None
+                }
+        model["filter_columns"].append(item)
+    if auto_filter.sortState is not None:
+        sort_state = {
+            key: getattr(auto_filter.sortState, key)
+            for key in ("columnSort", "caseSensitive", "sortMethod", "ref")
+            if getattr(auto_filter.sortState, key, None) is not None
+        }
+        sort_state["conditions"] = [
+            {
+                key: getattr(condition, key)
+                for key in ("ref", "descending", "sortBy", "customList", "dxfId", "iconSet", "iconId")
+                if getattr(condition, key, None) is not None
+            }
+            for condition in auto_filter.sortState.sortCondition or []
+        ]
+        model["sort_state"] = sort_state
+    return model
+
+
+def _apply_auto_filter_model(ws, model: dict | None) -> None:
+    if not model:
+        return
+    from openpyxl.worksheet.filters import (
+        ColorFilter, CustomFilter, CustomFilters, DynamicFilter, FilterColumn,
+        Filters, IconFilter, SortCondition, SortState, Top10,
+    )
+
+    ws.auto_filter.ref = model.get("ref")
+    columns = []
+    for entry in model.get("filter_columns") or []:
+        kwargs = {
+            key: entry[key]
+            for key in ("hiddenButton", "showButton")
+            if key in entry and entry[key] is not None
+        }
+        kwargs["colId"] = int(entry.get("colId", 0))
+        filters = entry.get("filters")
+        if filters is not None:
+            if isinstance(filters, dict):
+                values = filters.get("values", filters.get("filter", []))
+                blank = filters.get("blank")
+                calendar_type = filters.get("calendarType")
+            else:
+                values = filters
+                blank = entry.get("blank")
+                calendar_type = entry.get("calendarType")
+            kwargs["filters"] = Filters(
+                blank=blank,
+                calendarType=calendar_type,
+                filter=[str(value) for value in values or []],
+            )
+        custom_filters = entry.get("custom_filters") or entry.get("customFilters")
+        if custom_filters is not None:
+            kwargs["customFilters"] = CustomFilters(
+                and_=entry.get("and", entry.get("and_")),
+                customFilter=[CustomFilter(**item) for item in custom_filters],
+            )
+        for source, target, cls in (
+            ("top10", "top10", Top10),
+            ("dynamic_filter", "dynamicFilter", DynamicFilter),
+            ("color_filter", "colorFilter", ColorFilter),
+            ("icon_filter", "iconFilter", IconFilter),
+        ):
+            if isinstance(entry.get(source), dict):
+                kwargs[target] = cls(**entry[source])
+        columns.append(FilterColumn(**kwargs))
+    ws.auto_filter.filterColumn = columns
+
+    sort_model = model.get("sort_state")
+    if sort_model:
+        sort_kwargs = {
+            key: sort_model[key]
+            for key in ("columnSort", "caseSensitive", "sortMethod", "ref")
+            if key in sort_model and sort_model[key] is not None
+        }
+        sort_kwargs["sortCondition"] = [
+            SortCondition(**condition)
+            for condition in sort_model.get("conditions", sort_model.get("sortCondition", []))
+        ]
+        ws.auto_filter.sortState = SortState(**sort_kwargs)
+
+
+def _ignored_errors_xml(rules: list[dict]) -> str:
+    children = []
+    for rule in rules:
+        sqref = rule.get("sqref")
+        if isinstance(sqref, list):
+            sqref = " ".join(str(value) for value in sqref)
+        if not sqref:
+            continue
+        attrs = {"sqref": str(sqref)}
+        for key, value in rule.items():
+            if key == "sqref" or value is None:
+                continue
+            attrs[key] = "1" if bool(value) else "0"
+        children.append("<ignoredError" + "".join(
+            f" {key}={quoteattr(value)}" for key, value in attrs.items()
+        ) + "/>")
+    return "<ignoredErrors>" + "".join(children) + "</ignoredErrors>" if children else ""
+
+
+def _inject_worksheet_semantics_legacy(xlsx_path: str, data: dict) -> str | None:
+    requested = {}
+    for sheet in data.get("sheets") or []:
+        ignored_present = "ignored_errors" in sheet
+        extension_xml = sheet.get("_worksheet_ext_xml")
+        if ignored_present or extension_xml:
+            requested[sheet.get("name")] = {
+                "ignored": _ignored_errors_xml(sheet.get("ignored_errors") or []) if ignored_present else None,
+                "extension": extension_xml,
+            }
+    if not requested:
+        return None
+
+    tmp = xlsx_path + ".~worksheet-semantics.tmp"
+    try:
+        with zipfile.ZipFile(xlsx_path, "r") as source:
+            workbook_xml = source.read("xl/workbook.xml").decode("utf-8")
+            rels_xml = source.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+            sheet_map = _xlsx_sheet_file_map(workbook_xml, rels_xml)
+            file_map = {sheet_map[name]: value for name, value in requested.items() if name in sheet_map}
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as target:
+                for item in source.infolist():
+                    raw = source.read(item.filename)
+                    patch = file_map.get(item.filename)
+                    if patch is not None:
+                        content = raw.decode("utf-8")
+                        if patch["ignored"] is not None:
+                            content = re.sub(
+                                r"<(?:[A-Za-z_][\w.-]*:)?ignoredErrors\b[^>]*(?:/>|>.*?</(?:[A-Za-z_][\w.-]*:)?ignoredErrors>)",
+                                "",
+                                content,
+                                count=1,
+                                flags=re.DOTALL,
+                            )
+                            if patch["ignored"]:
+                                anchor = re.search(
+                                    r"<(?:smartTags|drawing\b|legacyDrawing|legacyDrawingHF|picture\b|oleObjects|controls|webPublishItems|tableParts|extLst)\b",
+                                    content,
+                                )
+                                position = anchor.start() if anchor else content.rfind("</worksheet>")
+                                content = content[:position] + patch["ignored"] + content[position:]
+                        if patch["extension"]:
+                            content = re.sub(
+                                r"<(?:[A-Za-z_][\w.-]*:)?extLst\b[^>]*(?:/>|>.*?</(?:[A-Za-z_][\w.-]*:)?extLst>)",
+                                "",
+                                content,
+                                count=1,
+                                flags=re.DOTALL,
+                            )
+                            position = content.rfind("</worksheet>")
+                            content = content[:position] + patch["extension"] + content[position:]
+                        raw = content.encode("utf-8")
+                    target.writestr(item, raw)
+        os.replace(tmp, xlsx_path)
+    except Exception as exc:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"worksheet semantic injection failed: {exc}"
+    return None
+
+
+def _worksheet_attr_value(value) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
+
+
+def _worksheet_xml_element(tag: str, model: dict | None, *, excluded: set[str] | None = None) -> str | None:
+    if not isinstance(model, dict):
+        return None
+    skipped = {"present", *(excluded or set())}
+    attrs = []
+    for key, value in model.items():
+        if key in skipped or key.startswith("_") or value is None or isinstance(value, (dict, list)):
+            continue
+        xml_key = "r:id" if key == "id" else key
+        attrs.append(f" {xml_key}={quoteattr(_worksheet_attr_value(value))}")
+    if not attrs and not model.get("present"):
+        return None
+    return f"<{tag}{''.join(attrs)}/>"
+
+
+def _page_breaks_xml(model: dict, axis: str, tag: str) -> str:
+    entries = model.get(axis) or []
+    count = model.get(f"{axis}_count", len(entries))
+    manual_count = model.get(
+        f"{axis}_manualBreakCount",
+        sum(1 for item in entries if item.get("man", True)),
+    )
+    children = []
+    for item in entries:
+        attrs = []
+        for key in ("id", "min", "max", "man", "pt"):
+            if key in item and item[key] is not None:
+                attrs.append(f" {key}={quoteattr(_worksheet_attr_value(item[key]))}")
+        children.append(f"<brk{''.join(attrs)}/>")
+    if not children:
+        return ""
+    return (
+        f"<{tag} count={quoteattr(str(count))} manualBreakCount={quoteattr(str(manual_count))}>"
+        + "".join(children)
+        + f"</{tag}>"
+    )
+
+
+def _protected_ranges_xml(ranges: list[dict]) -> str:
+    children = []
+    for item in ranges:
+        if item.get("delete"):
+            continue
+        attrs = []
+        for key, value in item.items():
+            if key == "delete" or value is None:
+                continue
+            attrs.append(f" {key}={quoteattr(_worksheet_attr_value(value))}")
+        if attrs:
+            children.append(f"<protectedRange{''.join(attrs)}/>")
+    return "<protectedRanges>" + "".join(children) + "</protectedRanges>" if children else ""
+
+
+def _patch_row_attributes(content: str, rows: list[dict]) -> str:
+    row_models = {str(index): row for index, row in enumerate(rows, 1)}
+    if not row_models:
+        return content
+
+    boolean_fields = {
+        "hidden": "hidden", "collapsed": "collapsed", "thickTop": "thickTop",
+        "thickBot": "thickBot", "customFormat": "customFormat",
+        "customHeight": "customHeight", "phonetic": "ph",
+    }
+
+    def replace(match):
+        prefix, attr_text, suffix = match.groups()
+        attrs = _parse_xml_attrs(attr_text)
+        row_number = attrs.get("r")
+        row = row_models.get(row_number)
+        if row is None:
+            return match.group(0)
+        merged = copy.deepcopy(attrs)
+        for key, value in (row.get("_row_attrs") or {}).items():
+            if key != "r" and value is not None:
+                merged[key] = str(value)
+        if row.get("h") is None:
+            merged.pop("ht", None)
+        else:
+            merged["ht"] = _worksheet_attr_value(row["h"])
+        if row.get("outline"):
+            merged["outlineLevel"] = _worksheet_attr_value(row["outline"])
+        else:
+            merged.pop("outlineLevel", None)
+        for public_key, xml_key in boolean_fields.items():
+            if public_key not in row:
+                continue
+            if row[public_key]:
+                merged[xml_key] = "1"
+            else:
+                merged.pop(xml_key, None)
+        if "style" in row:
+            if row["style"] is None:
+                merged.pop("s", None)
+            else:
+                merged["s"] = _worksheet_attr_value(row["style"])
+        ordered = []
+        if "r" in merged:
+            ordered.append(("r", merged.pop("r")))
+        ordered.extend(merged.items())
+        rendered = "".join(f" {key}={quoteattr(str(value))}" for key, value in ordered)
+        return prefix + rendered + suffix
+
+    return re.sub(
+        r"(<(?:[A-Za-z_][\w.-]*:)?row\b)([^>]*)(/?>)",
+        replace,
+        content,
+    )
+
+
+def _replace_worksheet_node(content: str, tag: str, replacement: str | None, following: tuple[str, ...]) -> str:
+    if replacement is None:
+        return content
+    pattern = (
+        rf"<(?:[A-Za-z_][\w.-]*:)?{tag}\b[^>]*(?:/>|>.*?</(?:[A-Za-z_][\w.-]*:)?{tag}>)"
+    )
+    content = re.sub(pattern, "", content, flags=re.DOTALL)
+    if not replacement:
+        return content
+    following_pattern = "|".join(re.escape(value) for value in following)
+    anchor = re.search(
+        rf"<(?:[A-Za-z_][\w.-]*:)?(?:{following_pattern})\b",
+        content,
+    ) if following_pattern else None
+    position = anchor.start() if anchor else content.rfind("</worksheet>")
+    return content[:position] + replacement + content[position:]
+
+
+def _inject_sheet_passthrough_relationships(xlsx_path: str, data: dict) -> str | None:
+    requested = {
+        sheet.get("name"): sheet.get("passthrough_relationships")
+        for sheet in data.get("sheets") or []
+        if sheet.get("passthrough_relationships")
+    }
+    if not requested:
+        return None
+
+    import posixpath
+
+    replacement = xlsx_path + ".~sheet-relationships.tmp"
+    try:
+        with zipfile.ZipFile(xlsx_path, "r") as source:
+            infos = {item.filename: item for item in source.infolist()}
+            entries = {item.filename: source.read(item.filename) for item in source.infolist()}
+
+        sheet_file_map = _xlsx_sheet_file_map(
+            entries["xl/workbook.xml"].decode("utf-8"),
+            entries["xl/_rels/workbook.xml.rels"].decode("utf-8"),
+        )
+        content_types_root = ET.fromstring(entries["[Content_Types].xml"])
+        content_types_namespace = content_types_root.tag.partition("}")[0].lstrip("{")
+        override_tag = f"{{{content_types_namespace}}}Override"
+        default_tag = f"{{{content_types_namespace}}}Default"
+
+        for sheet_name, passthrough in requested.items():
+            sheet_part = sheet_file_map.get(sheet_name)
+            if not sheet_part:
+                continue
+            sheet_xml = entries[sheet_part].decode("utf-8")
+            rels_part = _relationship_part_for_source(sheet_part)
+            rels_root = (
+                ET.fromstring(entries[rels_part])
+                if rels_part in entries
+                else ET.Element(f"{{{_PACKAGE_REL_NS}}}Relationships")
+            )
+            records = passthrough.get("relationships") or []
+            reserved_ids = {str(record.get("Id")) for record in records if record.get("Id")}
+            used_ids = {str(node.get("Id")) for node in rels_root if node.get("Id")}
+
+            def next_relationship_id() -> str:
+                index = 1
+                while f"rId{index}" in used_ids or f"rId{index}" in reserved_ids:
+                    index += 1
+                relationship_id = f"rId{index}"
+                used_ids.add(relationship_id)
+                return relationship_id
+
+            for record in records:
+                target_part = record.get("target_part")
+                target = str(record.get("Target") or "")
+                if target_part and record.get("TargetMode") != "External":
+                    target = posixpath.relpath(str(target_part), posixpath.dirname(sheet_part))
+                desired_id = str(record.get("Id") or next_relationship_id())
+                existing = next((node for node in rels_root if node.get("Id") == desired_id), None)
+                same_relationship = bool(existing is not None and (
+                    existing.get("Type") == record.get("Type")
+                    and existing.get("Target") == target
+                    and existing.get("TargetMode") == record.get("TargetMode")
+                ))
+                if existing is not None and not same_relationship:
+                    replacement_id = next_relationship_id()
+                    existing.set("Id", replacement_id)
+                    sheet_xml = sheet_xml.replace(
+                        f'r:id="{desired_id}"', f'r:id="{replacement_id}"'
+                    )
+                    sheet_xml = sheet_xml.replace(
+                        f"r:id='{desired_id}'", f"r:id='{replacement_id}'"
+                    )
+                    existing = None
+                if existing is None:
+                    node = ET.SubElement(rels_root, f"{{{_PACKAGE_REL_NS}}}Relationship")
+                    node.set("Id", desired_id)
+                    node.set("Type", str(record.get("Type") or ""))
+                    node.set("Target", target)
+                    if record.get("TargetMode") is not None:
+                        node.set("TargetMode", str(record["TargetMode"]))
+                    used_ids.add(desired_id)
+
+            for part_name, part_record in (passthrough.get("parts") or {}).items():
+                entries[part_name] = base64.b64decode(part_record.get("data") or "")
+                relationships_xml = part_record.get("relationships_xml")
+                if relationships_xml:
+                    entries[_relationship_part_for_source(part_name)] = base64.b64decode(
+                        relationships_xml
+                    )
+                content_type = part_record.get("content_type")
+                if not content_type:
+                    continue
+                if part_record.get("content_type_source") == "override":
+                    part_path = f"/{part_name}"
+                    override = next(
+                        (node for node in content_types_root if node.get("PartName") == part_path),
+                        None,
+                    )
+                    if override is None:
+                        override = ET.SubElement(content_types_root, override_tag)
+                        override.set("PartName", part_path)
+                    override.set("ContentType", str(content_type))
+                else:
+                    extension = part_record.get("extension")
+                    default = next(
+                        (node for node in content_types_root if node.get("Extension") == extension),
+                        None,
+                    )
+                    if default is None:
+                        default = ET.SubElement(content_types_root, default_tag)
+                        default.set("Extension", str(extension))
+                        default.set("ContentType", str(content_type))
+                    elif default.get("ContentType") != str(content_type):
+                        part_path = f"/{part_name}"
+                        override = next(
+                            (node for node in content_types_root if node.get("PartName") == part_path),
+                            None,
+                        )
+                        if override is None:
+                            override = ET.SubElement(content_types_root, override_tag)
+                            override.set("PartName", part_path)
+                        override.set("ContentType", str(content_type))
+
+            entries[sheet_part] = sheet_xml.encode("utf-8")
+            entries[rels_part] = ET.tostring(
+                rels_root, encoding="utf-8", xml_declaration=True
+            )
+
+        entries["[Content_Types].xml"] = ET.tostring(
+            content_types_root, encoding="utf-8", xml_declaration=True
+        )
+        with zipfile.ZipFile(replacement, "w", zipfile.ZIP_DEFLATED) as target:
+            for name, raw in entries.items():
+                target.writestr(infos.get(name, name), raw)
+        os.replace(replacement, xlsx_path)
+    except Exception as exc:
+        if os.path.exists(replacement):
+            os.remove(replacement)
+        return f"worksheet relationship passthrough failed: {exc}"
+    return None
+
+
+def _inject_worksheet_semantics(xlsx_path: str, data: dict) -> str | None:
+    requested = {}
+    row_special_keys = {
+        "collapsed", "thickTop", "thickBot", "customFormat", "customHeight", "style", "phonetic",
+    }
+    for sheet in data.get("sheets") or []:
+        page_setup = sheet.get("page_setup")
+        print_options = sheet.get("print_options")
+        page_breaks_present = "page_breaks" in sheet
+        protected_ranges_present = "protected_ranges" in sheet
+        ignored_present = "ignored_errors" in sheet
+        rows = sheet.get("rows") or []
+        rows_present = any(
+            row.get("_row_attrs") or any(key in row for key in row_special_keys)
+            for row in rows
+        )
+        extension_xml = sheet.get("_worksheet_ext_xml")
+        if not any((
+            isinstance(page_setup, dict), isinstance(print_options, dict), page_breaks_present,
+            protected_ranges_present, ignored_present, rows_present, bool(extension_xml),
+        )):
+            continue
+        requested[sheet.get("name")] = {
+            "page_setup": _worksheet_xml_element("pageSetup", page_setup, excluded={"fitToPage"}),
+            "print_options": _worksheet_xml_element("printOptions", print_options),
+            "row_breaks": _page_breaks_xml(sheet.get("page_breaks") or {}, "rows", "rowBreaks") if page_breaks_present else None,
+            "column_breaks": _page_breaks_xml(sheet.get("page_breaks") or {}, "columns", "colBreaks") if page_breaks_present else None,
+            "protected_ranges": _protected_ranges_xml(sheet.get("protected_ranges") or []) if protected_ranges_present else None,
+            "ignored": _ignored_errors_xml(sheet.get("ignored_errors") or []) if ignored_present else None,
+            "extension": extension_xml,
+            "rows": rows if rows_present else None,
+        }
+    if not requested:
+        return None
+
+    tmp = xlsx_path + ".~worksheet-semantics.tmp"
+    try:
+        with zipfile.ZipFile(xlsx_path, "r") as source:
+            workbook_xml = source.read("xl/workbook.xml").decode("utf-8")
+            rels_xml = source.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+            sheet_map = _xlsx_sheet_file_map(workbook_xml, rels_xml)
+            file_map = {sheet_map[name]: value for name, value in requested.items() if name in sheet_map}
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as target:
+                for item in source.infolist():
+                    raw = source.read(item.filename)
+                    patch = file_map.get(item.filename)
+                    if patch is not None:
+                        content = raw.decode("utf-8")
+                        if patch["rows"] is not None:
+                            content = _patch_row_attributes(content, patch["rows"])
+                        content = _replace_worksheet_node(
+                            content, "protectedRanges", patch["protected_ranges"],
+                            ("scenarios", "autoFilter", "sortState", "dataConsolidate", "customSheetViews", "mergeCells", "phoneticPr", "conditionalFormatting", "dataValidations", "hyperlinks", "printOptions"),
+                        )
+                        content = _replace_worksheet_node(
+                            content, "printOptions", patch["print_options"],
+                            ("pageMargins", "pageSetup", "headerFooter", "rowBreaks", "colBreaks", "customProperties", "cellWatches", "ignoredErrors", "drawing", "legacyDrawing", "tableParts", "extLst"),
+                        )
+                        content = _replace_worksheet_node(
+                            content, "pageSetup", patch["page_setup"],
+                            ("headerFooter", "rowBreaks", "colBreaks", "customProperties", "cellWatches", "ignoredErrors", "drawing", "legacyDrawing", "tableParts", "extLst"),
+                        )
+                        content = _replace_worksheet_node(
+                            content, "rowBreaks", patch["row_breaks"],
+                            ("colBreaks", "customProperties", "cellWatches", "ignoredErrors", "drawing", "legacyDrawing", "tableParts", "extLst"),
+                        )
+                        content = _replace_worksheet_node(
+                            content, "colBreaks", patch["column_breaks"],
+                            ("customProperties", "cellWatches", "ignoredErrors", "drawing", "legacyDrawing", "tableParts", "extLst"),
+                        )
+                        content = _replace_worksheet_node(
+                            content, "ignoredErrors", patch["ignored"],
+                            ("smartTags", "drawing", "legacyDrawing", "legacyDrawingHF", "picture", "oleObjects", "controls", "webPublishItems", "tableParts", "extLst"),
+                        )
+                        content = _replace_worksheet_node(content, "extLst", patch["extension"], ())
+                        raw = content.encode("utf-8")
+                    target.writestr(item, raw)
+        os.replace(tmp, xlsx_path)
+    except Exception as exc:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"worksheet semantic injection failed: {exc}"
+    return None
+
+
+def _vml_comment_shapes(xml: str) -> dict[tuple[int, int], str]:
+    shapes = {}
+    pattern = re.compile(
+        r"<(?:[A-Za-z_][\w.-]*:)?shape\b[^>]*>.*?</(?:[A-Za-z_][\w.-]*:)?shape>",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(xml):
+        block = match.group(0)
+        row = re.search(r"<(?:[A-Za-z_][\w.-]*:)?Row>(\d+)</(?:[A-Za-z_][\w.-]*:)?Row>", block)
+        column = re.search(r"<(?:[A-Za-z_][\w.-]*:)?Column>(\d+)</(?:[A-Za-z_][\w.-]*:)?Column>", block)
+        if row and column:
+            shapes[(int(row.group(1)), int(column.group(1)))] = block
+    return shapes
+
+
+def _inject_comment_vml(xlsx_path: str, data: dict) -> str | None:
+    requested = {
+        sheet.get("name"): {
+            "source": sheet.get("_comment_vml"),
+            "comments": set((sheet.get("comments") or {}).keys()),
+        }
+        for sheet in data.get("sheets") or []
+        if sheet.get("_comment_vml") and sheet.get("comments")
+    }
+    if not requested:
+        return None
+
+    tmp = xlsx_path + ".~comment-vml.tmp"
+    try:
+        with zipfile.ZipFile(xlsx_path, "r") as source:
+            infos = {item.filename: item for item in source.infolist()}
+            entries = {item.filename: source.read(item.filename) for item in source.infolist()}
+        workbook_xml = entries["xl/workbook.xml"].decode("utf-8")
+        rels_xml = entries["xl/_rels/workbook.xml.rels"].decode("utf-8")
+        sheet_map = _xlsx_sheet_file_map(workbook_xml, rels_xml)
+        from openpyxl.utils.cell import coordinate_to_tuple
+
+        for sheet_name, model in requested.items():
+            sheet_part = sheet_map.get(sheet_name)
+            if not sheet_part:
+                continue
+            generated_part = _comment_vml_part(entries, sheet_part)
+            if not generated_part or generated_part not in entries:
+                continue
+            source_shapes = _vml_comment_shapes(model["source"]["xml"])
+            generated_xml = entries[generated_part].decode("utf-8")
+            generated_shapes = _vml_comment_shapes(generated_xml)
+            coordinates = {
+                (row - 1, column - 1)
+                for row, column in (coordinate_to_tuple(coord) for coord in model["comments"])
+            }
+            for coordinate in coordinates:
+                source_shape = source_shapes.get(coordinate)
+                generated_shape = generated_shapes.get(coordinate)
+                if source_shape and generated_shape:
+                    generated_xml = generated_xml.replace(generated_shape, source_shape, 1)
+            entries[generated_part] = generated_xml.encode("utf-8")
+
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as target:
+            for name, raw in entries.items():
+                target.writestr(infos.get(name) or name, raw)
+        os.replace(tmp, xlsx_path)
+    except Exception as exc:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"comment VML injection failed: {exc}"
+    return None
+
+
+def _register_named_styles(wb, data: dict) -> None:
+    from openpyxl.styles import Alignment, Border, Font, NamedStyle, PatternFill, Protection
+
+    for item in data.get("named_styles") or []:
+        name = item.get("name")
+        if not name or name in wb.named_styles:
+            continue
+        style = item.get("style") or {}
+        named = NamedStyle(name=name, builtinId=item.get("builtinId"), hidden=item.get("hidden"))
+
+        font_spec = copy.deepcopy(style.get("font") or {}) if isinstance(style.get("font"), dict) else {}
+        for source_key, target_key in (
+            ("bold", "bold"), ("italic", "italic"), ("size", "size"),
+            ("font", "name"), ("fcolor", "color"), ("uline", "underline"),
+            ("strike", "strike"), ("vAlign", "vertAlign"),
+        ):
+            if source_key in style and target_key not in font_spec:
+                value = style[source_key]
+                if source_key == "font" and isinstance(value, dict):
+                    continue
+                font_spec[target_key] = value
+        font_aliases = {
+            "family": "family", "charset": "charset", "scheme": "scheme",
+            "condense": "condense", "extend": "extend", "outline": "outline",
+            "shadow": "shadow", "vert_align": "vertAlign", "vertAlign": "vertAlign",
+        }
+        font_kwargs = {}
+        for key, value in font_spec.items():
+            target = font_aliases.get(key, key)
+            if target == "color" and isinstance(value, dict):
+                value = _make_color_from_ref(value)
+            if value is not None:
+                font_kwargs[target] = value
+        if font_kwargs:
+            named.font = Font(**font_kwargs)
+
+        fill_spec = style.get("fill")
+        if isinstance(fill_spec, str):
+            named.fill = PatternFill("solid", fgColor=fill_spec)
+        elif isinstance(fill_spec, dict):
+            pattern = fill_spec.get("pattern_type") or fill_spec.get("patternType") or fill_spec.get("fill_type")
+            foreground = fill_spec.get("foreground") or fill_spec.get("fgColor")
+            background = fill_spec.get("background") or fill_spec.get("bgColor")
+            if isinstance(foreground, dict):
+                foreground = _make_color_from_ref(foreground)
+            if isinstance(background, dict):
+                background = _make_color_from_ref(background)
+            if pattern or foreground or background:
+                fill_kwargs = {"patternType": pattern or "solid"}
+                if foreground is not None:
+                    fill_kwargs["fgColor"] = foreground
+                if background is not None:
+                    fill_kwargs["bgColor"] = background
+                named.fill = PatternFill(**fill_kwargs)
+
+        alignment_spec = style.get("alignment") if isinstance(style.get("alignment"), dict) else {}
+        alignment_aliases = {
+            "wrap_text": "wrapText", "text_rotation": "textRotation",
+            "shrink_to_fit": "shrinkToFit", "merge_cell": "mergeCell",
+        }
+        alignment_kwargs = {
+            alignment_aliases.get(key, key): value
+            for key, value in alignment_spec.items()
+            if value is not None
+        }
+        if alignment_kwargs:
+            named.alignment = Alignment(**alignment_kwargs)
+
+        protection_spec = style.get("protection") if isinstance(style.get("protection"), dict) else {}
+        if protection_spec:
+            named.protection = Protection(**{
+                key: value for key, value in protection_spec.items()
+                if key in {"locked", "hidden"} and value is not None
+            })
+
+        border_spec = style.get("border") if isinstance(style.get("border"), dict) else {}
+        if border_spec:
+            named.border = Border(
+                start=_make_border_side_semantic(border_spec.get("start")),
+                end=_make_border_side_semantic(border_spec.get("end")),
+                top=_make_border_side_semantic(border_spec.get("top")),
+                bottom=_make_border_side_semantic(border_spec.get("bottom")),
+                left=_make_border_side_semantic(border_spec.get("left")),
+                right=_make_border_side_semantic(border_spec.get("right")),
+                diagonal=_make_border_side_semantic(border_spec.get("diagonal")),
+                vertical=_make_border_side_semantic(border_spec.get("vertical")),
+                horizontal=_make_border_side_semantic(border_spec.get("horizontal")),
+                diagonalUp=bool(border_spec.get("diagonalUp")),
+                diagonalDown=bool(border_spec.get("diagonalDown")),
+                outline=border_spec.get("outline", True),
+            )
+
+        number_format = style.get("number_format", style.get("numfmt"))
+        if number_format is not None:
+            named.number_format = number_format
+        wb.add_named_style(named)
+
+
+def _inject_xf_contracts(xlsx_path: str, data: dict) -> str | None:
+    requested_cells = []
+    for sheet in data.get("sheets") or []:
+        for row_index, row in enumerate(sheet.get("rows") or [], 1):
+            for col_index, cell_data in enumerate(row.get("cells") or [], 1):
+                xf = cell_data.get("xf") or {}
+                overrides = {key: xf[key] for key in _XF_BOOLEAN_ATTRS | {"xfId"} if key in xf}
+                if "qp" in cell_data:
+                    overrides["quotePrefix"] = bool(cell_data["qp"])
+                if overrides:
+                    requested_cells.append((sheet.get("name"), row_index, col_index, overrides))
+    if not requested_cells:
+        return None
+
+    tmp = xlsx_path + ".~xf-contracts.tmp"
+    try:
+        with zipfile.ZipFile(xlsx_path, "r") as source:
+            infos = {item.filename: item for item in source.infolist()}
+            entries = {item.filename: source.read(item.filename) for item in source.infolist()}
+        workbook_xml = entries["xl/workbook.xml"].decode("utf-8")
+        rels_xml = entries["xl/_rels/workbook.xml.rels"].decode("utf-8")
+        sheet_map = _xlsx_sheet_file_map(workbook_xml, rels_xml)
+        styles_root = ET.fromstring(entries["xl/styles.xml"])
+        cell_xfs = styles_root.find(_qname("cellXfs"))
+        if cell_xfs is None or not list(cell_xfs):
+            raise ValueError("xl/styles.xml has no cellXfs definitions")
+
+        sheet_roots = {}
+        style_cache = {}
+        from openpyxl.utils import get_column_letter
+        for sheet_name, row_index, col_index, overrides in requested_cells:
+            part_name = sheet_map.get(sheet_name)
+            if not part_name or part_name not in entries:
+                continue
+            sheet_root = sheet_roots.setdefault(part_name, ET.fromstring(entries[part_name]))
+            coord = f"{get_column_letter(col_index)}{row_index}"
+            cell_node = sheet_root.find(f".//{_qname('c')}[@r='{coord}']")
+            if cell_node is None:
+                continue
+            try:
+                base_index = int(cell_node.get("s", "0"))
+            except ValueError:
+                base_index = 0
+            if not 0 <= base_index < len(cell_xfs):
+                base_index = 0
+            xf_node = copy.deepcopy(cell_xfs[base_index])
+            for key, value in overrides.items():
+                if value is None:
+                    xf_node.attrib.pop(key, None)
+                elif key in _XF_BOOLEAN_ATTRS:
+                    xf_node.set(key, "1" if bool(value) else "0")
+                else:
+                    xf_node.set(key, str(value))
+            signature = ET.tostring(xf_node, encoding="utf-8")
+            style_index = style_cache.get(signature)
+            if style_index is None:
+                style_index = len(cell_xfs)
+                cell_xfs.append(xf_node)
+                style_cache[signature] = style_index
+            cell_node.set("s", str(style_index))
+
+        cell_xfs.set("count", str(len(cell_xfs)))
+        ET.register_namespace("", _SPREADSHEET_NS)
+        entries["xl/styles.xml"] = ET.tostring(styles_root, encoding="utf-8", xml_declaration=True)
+        for part_name, sheet_root in sheet_roots.items():
+            entries[part_name] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as target:
+            for name, raw in entries.items():
+                target.writestr(infos.get(name) or name, raw)
+        os.replace(tmp, xlsx_path)
+    except Exception as exc:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return f"cell XF contract injection failed: {exc}"
+    return None
+
 
 def reconstruct_excel(data: dict, output_path: str) -> list[str]:
     """Reconstruct an Excel file from metadata dict produced by serialize_excel.
@@ -1954,6 +5818,24 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
     output_path only on success, so a failure never corrupts an existing file.
     Returns warning strings for passthrough features that could not be restored.
     """
+    exact_warnings = _atomic_copy_source_package(data, output_path)
+    if exact_warnings is not None:
+        return exact_warnings
+    content_changes = _content_only_changes(data)
+    if content_changes is not None:
+        if not content_changes:
+            unchanged_warnings = _atomic_copy_source_package(
+                data,
+                output_path,
+                require_session_digest=False,
+            )
+            if unchanged_warnings is not None:
+                return unchanged_warnings
+        else:
+            content_warnings = _reconstruct_content_only(data, output_path, content_changes)
+            if content_warnings is not None:
+                return content_warnings
+
     import openpyxl
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side, Protection
     from openpyxl.worksheet.datavalidation import DataValidation
@@ -1967,13 +5849,67 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
         except Exception:
             pass
 
+    _register_named_styles(wb, data)
+
     for sd in data["sheets"]:
         ws = wb.create_sheet(sd["name"])
+        if sd.get("state") in {"visible", "hidden", "veryHidden"}:
+            ws.sheet_state = sd["state"]
+
+        sheet_properties = sd.get("sheet_properties") or {}
+        for key, value in sheet_properties.items():
+            if key in {"outline", "page_setup_properties"} or value is None:
+                continue
+            if hasattr(ws.sheet_properties, key):
+                try:
+                    setattr(ws.sheet_properties, key, value)
+                except Exception:
+                    pass
+        outline_properties = sheet_properties.get("outline") or {}
+        for key, value in outline_properties.items():
+            if value is not None and hasattr(ws.sheet_properties.outlinePr, key):
+                setattr(ws.sheet_properties.outlinePr, key, value)
+        setup_properties = sheet_properties.get("page_setup_properties") or {}
+        for key, value in setup_properties.items():
+            if value is not None and hasattr(ws.sheet_properties.pageSetUpPr, key):
+                setattr(ws.sheet_properties.pageSetUpPr, key, value)
 
         if sd.get("freeze"):
             ws.freeze_panes = sd["freeze"]
 
-        sv_data = sd.get("sheet_view") or {}
+        sheet_views_data = sd.get("sheet_views")
+        if sheet_views_data:
+            try:
+                from openpyxl.worksheet.views import Pane, Selection, SheetView
+                built_views = []
+                view_attrs = set(getattr(SheetView, "__attrs__", ()))
+                pane_attrs = set(getattr(Pane, "__attrs__", ()))
+                selection_attrs = set(getattr(Selection, "__attrs__", ()))
+                for view_data in sheet_views_data:
+                    attrs = {
+                        key: value for key, value in view_data.items()
+                        if key in view_attrs and value is not None
+                    }
+                    attrs.setdefault("workbookViewId", 0)
+                    if isinstance(view_data.get("pane"), dict):
+                        attrs["pane"] = Pane(**{
+                            key: value for key, value in view_data["pane"].items()
+                            if key in pane_attrs and value is not None
+                        })
+                    if "selections" in view_data:
+                        attrs["selection"] = [
+                            Selection(**{
+                                key: value for key, value in selection.items()
+                                if key in selection_attrs and value is not None
+                            })
+                            for selection in (view_data.get("selections") or [])
+                        ]
+                    built_views.append(SheetView(**attrs))
+                ws.views.sheetView = built_views
+            except Exception:
+                pass
+
+        sv_data = {} if sheet_views_data else (sd.get("sheet_view") or {})
         sv_aliases = {"zoom": "zoomScale"}
         sv_supported = set(getattr(type(ws.sheet_view), "__attrs__", ()))
         for key, value in sv_data.items():
@@ -1988,7 +5924,7 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
                 pass
 
         for col_letter, width in sd["cw"].items():
-            if width:
+            if width is not None:
                 ws.column_dimensions[col_letter].width = width
         for col_letter in sd.get("ch", {}):
             ws.column_dimensions[col_letter].hidden = True
@@ -1999,22 +5935,29 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
             from openpyxl.styles.colors import Color as _Color
             ws.sheet_properties.tabColor = _Color(rgb=sd["tab_color"])
 
-        if sd.get("auto_filter"):
-            ws.auto_filter.ref = sd["auto_filter"]
+        _apply_auto_filter_model(ws, sd.get("auto_filter_model") or (
+            {"ref": sd.get("auto_filter")} if sd.get("auto_filter") else None
+        ))
+
 
         ps_data = sd.get("page_setup") or {}
         if ps_data:
-            for key in ("orientation", "paperSize", "fitToWidth", "fitToHeight", "scale"):
+            for key in getattr(type(ws.page_setup), "__attrs__", ()):
                 if ps_data.get(key) is not None:
                     setattr(ws.page_setup, key, ps_data[key])
-            if ps_data.get("fitToPage"):
+            if "fitToPage" in ps_data and ps_data.get("fitToPage") is not None:
                 try:
                     from openpyxl.worksheet.properties import PageSetupProperties
                     if ws.sheet_properties.pageSetUpPr is None:
                         ws.sheet_properties.pageSetUpPr = PageSetupProperties()
-                    ws.sheet_properties.pageSetUpPr.fitToPage = True
+                    ws.sheet_properties.pageSetUpPr.fitToPage = bool(ps_data["fitToPage"])
                 except Exception:
                     pass
+
+        print_options = sd.get("print_options") or {}
+        for key in getattr(type(ws.print_options), "__attrs__", ()):
+            if key in print_options and print_options[key] is not None:
+                setattr(ws.print_options, key, print_options[key])
 
         pm_data = sd.get("page_margins") or {}
         if pm_data:
@@ -2023,18 +5966,18 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
                     setattr(ws.page_margins, key, pm_data[key])
 
         prot_data = sd.get("protection")
-        if prot_data:
+        if prot_data is not None:
             ws.protection.sheet = True
-            if prot_data.get("password"):
+            if prot_data.get("password") is not None:
                 try:
-                    ws.protection.set_password(prot_data["password"], already_hashed=True)
+                    ws.protection.set_password(
+                        prot_data["password"],
+                        already_hashed=bool(prot_data.get("password_is_hashed", True)),
+                    )
                 except Exception:
                     ws.protection.password = prot_data["password"]
-            for key in ("selectLockedCells", "selectUnlockedCells", "formatCells",
-                        "formatColumns", "formatRows", "insertColumns", "insertRows",
-                        "deleteColumns", "deleteRows", "sort", "autoFilter",
-                        "objects", "scenarios", "insertHyperlinks", "pivotTables"):
-                if prot_data.get(key) is not None:
+            for key in getattr(type(ws.protection), "__attrs__", ()):
+                if key not in {"sheet", "password"} and key in prot_data:
                     setattr(ws.protection, key, prot_data[key])
 
         # Print titles
@@ -2044,8 +5987,27 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
         if pt.get("cols"):
             ws.print_title_cols = pt["cols"]
 
+        # Print area
+        if sd.get("print_area"):
+            ws.print_area = sd["print_area"]
+
         # Header / footer
         hf = sd.get("header_footer") or {}
+        for property_name in getattr(type(ws.HeaderFooter), "__attrs__", ()):
+            if property_name in hf and hf[property_name] is not None:
+                setattr(ws.HeaderFooter, property_name, hf[property_name])
+        section_objects = {
+            "odd_header": ws.oddHeader, "odd_footer": ws.oddFooter,
+            "even_header": ws.evenHeader, "even_footer": ws.evenFooter,
+            "first_header": ws.firstHeader, "first_footer": ws.firstFooter,
+        }
+        for section_name, section_object in section_objects.items():
+            section = hf.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            for position in ("left", "center", "right"):
+                if position in section:
+                    getattr(section_object, position).text = section[position]
         if hf.get("hl"): ws.oddHeader.left.text   = hf["hl"]
         if hf.get("hc"): ws.oddHeader.center.text = hf["hc"]
         if hf.get("hr"): ws.oddHeader.right.text  = hf["hr"]
@@ -2053,37 +6015,92 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
         if hf.get("fc"): ws.oddFooter.center.text = hf["fc"]
         if hf.get("fr"): ws.oddFooter.right.text  = hf["fr"]
 
+        page_breaks = sd.get("page_breaks") or {}
+        if page_breaks:
+            try:
+                from openpyxl.worksheet.pagebreak import Break
+                for item in page_breaks.get("rows") or []:
+                    ws.row_breaks.append(Break(**{
+                        key: value for key, value in item.items()
+                        if key in {"id", "min", "max", "man", "pt"} and value is not None
+                    }))
+                for item in page_breaks.get("columns") or []:
+                    ws.col_breaks.append(Break(**{
+                        key: value for key, value in item.items()
+                        if key in {"id", "min", "max", "man", "pt"} and value is not None
+                    }))
+            except Exception:
+                pass
+
         # Tables
         try:
             from openpyxl.worksheet.table import Table, TableStyleInfo as TSI
             for t_data in (sd.get("tables") or []):
-                t = Table(displayName=t_data["name"], ref=t_data["ref"])
+                t = _build_table(t_data, len(ws.tables) + 1)
                 s = t_data.get("style")
                 if s:
+                    # Accept both the short internal aliases (showFirstCol/
+                    # showLastCol/showColStripes, used by the read side below)
+                    # and the canonical OOXML attribute names (showFirstColumn/
+                    # showLastColumn/showColumnStripes) that a caller following
+                    # the documented tableStyleInfo flag names would reasonably
+                    # pass -- previously only the short aliases were honored
+                    # and the canonical names were silently ignored (always
+                    # False).
+                    def _flag(short_key, long_key, default=False):
+                        if long_key in s:
+                            return bool(s.get(long_key))
+                        return bool(s.get(short_key, default))
+
                     t.tableStyleInfo = TSI(
                         name=s.get("name"),
-                        showFirstColumn=bool(s.get("showFirstCol")),
-                        showLastColumn=bool(s.get("showLastCol")),
-                        showRowStripes=bool(s.get("showRowStripes", True)),
-                        showColumnStripes=bool(s.get("showColStripes", False)),
+                        showFirstColumn=_flag("showFirstCol", "showFirstColumn"),
+                        showLastColumn=_flag("showLastCol", "showLastColumn"),
+                        showRowStripes=_flag("showRowStripes", "showRowStripes", True),
+                        showColumnStripes=_flag("showColStripes", "showColumnStripes"),
                     )
                 ws.add_table(t)
         except Exception:
             pass
 
         for r_idx, row_data in enumerate(sd["rows"], 1):
-            if row_data.get("h"):
+            if row_data.get("h") is not None:
                 ws.row_dimensions[r_idx].height = row_data["h"]
             if row_data.get("hidden"):
                 ws.row_dimensions[r_idx].hidden = True
             if row_data.get("outline"):
                 ws.row_dimensions[r_idx].outlineLevel = row_data["outline"]
+            row_dimension_keys = ("collapsed", "thickTop", "thickBot")
+            if any(key in row_data for key in row_dimension_keys):
+                row_dimension = ws.row_dimensions[r_idx]
+                for key in row_dimension_keys:
+                    if key in row_data:
+                        setattr(row_dimension, key, bool(row_data[key]))
 
             for c_idx, cd in enumerate(row_data["cells"], 1):
+                if cd.get("_implicit"):
+                    public_keys = {key for key in cd if key != "_implicit"}
+                    if public_keys <= {"v", "merge"} and cd.get("v") is None and not cd.get("merge"):
+                        continue
+                    cd = _expanded_implicit_cell(cd, sd.get("_implicit_cell_defaults"))
                 if cd["merge"] == "slave":
                     continue
 
-                cell = ws.cell(row=r_idx, column=c_idx, value=cd["v"])
+                style_id = (cd.get("xf") or {}).get("style_id")
+                has_explicit_style = bool(
+                    cd.get("fill") or cd.get("bold") or cd.get("italic") or cd.get("strike")
+                    or cd.get("uline") or cd.get("fcolor") or cd.get("border")
+                    or cd.get("numfmt") not in (None, "General") or style_id not in (None, 0)
+                )
+                if (not cd.get("present") and cd.get("v") is None
+                        and not cd.get("formula") and not cd.get("rich_text")
+                        and not has_explicit_style and not cd.get("merge")):
+                    continue
+
+                cell = ws.cell(row=r_idx, column=c_idx, value=cd.get("v"))
+                named_style = cd.get("named_style")
+                if named_style and named_style in wb.named_styles:
+                    cell.style = named_style
                 if cd.get("dt") == "s" and isinstance(cd["v"], str):
                     cell.data_type = "s"  # literal text, not a formula
 
@@ -2093,15 +6110,15 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
                         cell.fill = _make_pattern_fill_from_raw(raw_fill)
                     except Exception:
                         pass
-                elif cd["fill"]:
+                elif cd.get("fill"):
                     try:
                         cell.fill = PatternFill("solid", fgColor=cd["fill"])
                     except Exception:
                         pass
 
                 fk: dict = {}
-                if cd["bold"]:              fk["bold"]      = True
-                if cd["italic"]:            fk["italic"]    = True
+                if cd.get("bold"):          fk["bold"]      = True
+                if cd.get("italic"):        fk["italic"]    = True
                 if cd.get("size"):          fk["size"]      = cd["size"]
                 if cd.get("font"):          fk["name"]      = cd["font"]
                 if cd.get("uline"):
@@ -2112,29 +6129,58 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
                 if fk:
                     cell.font = Font(**fk)
 
-                ak: dict = {}
-                if cd.get("wrap"):   ak["wrap_text"]    = True
-                if cd.get("halign"): ak["horizontal"]   = cd["halign"]
-                if cd.get("valign"): ak["vertical"]     = cd["valign"]
-                if cd.get("rot"):    ak["text_rotation"] = cd["rot"]
-                if cd.get("indent"): ak["indent"]        = cd["indent"]
-                if cd.get("shrink"): ak["shrink_to_fit"] = True
+                alignment_data = cd.get("alignment") or {}
+                if alignment_data:
+                    allowed_alignment = {
+                        "horizontal", "vertical", "textRotation", "wrapText", "shrinkToFit",
+                        "indent", "relativeIndent", "justifyLastLine", "readingOrder",
+                    }
+                    ak = {key: value for key, value in alignment_data.items() if key in allowed_alignment}
+                else:
+                    ak: dict = {}
+                    if cd.get("wrap"):   ak["wrap_text"]    = True
+                    if cd.get("halign"): ak["horizontal"]   = cd["halign"]
+                    if cd.get("valign"): ak["vertical"]     = cd["valign"]
+                    if cd.get("rot"):    ak["text_rotation"] = cd["rot"]
+                    if cd.get("indent"): ak["indent"]        = cd["indent"]
+                    if cd.get("shrink"): ak["shrink_to_fit"] = True
                 if ak:
                     cell.alignment = Alignment(**ak)
 
                 if cd.get("numfmt"):
                     cell.number_format = cd["numfmt"]
 
+                border_data = cd.get("border_semantics") or {}
                 bdr = cd.get("border", {})
-                if bdr:
+                if border_data:
                     cell.border = Border(
+                        start=_make_border_side_semantic(border_data.get("start")),
+                        end=_make_border_side_semantic(border_data.get("end")),
+                        top=_make_border_side_semantic(border_data.get("top")),
+                        bottom=_make_border_side_semantic(border_data.get("bottom")),
+                        left=_make_border_side_semantic(border_data.get("left")),
+                        right=_make_border_side_semantic(border_data.get("right")),
+                        diagonal=_make_border_side_semantic(border_data.get("diagonal")),
+                        vertical=_make_border_side_semantic(border_data.get("vertical")),
+                        horizontal=_make_border_side_semantic(border_data.get("horizontal")),
+                        diagonalUp=bool(border_data.get("diagonalUp")),
+                        diagonalDown=bool(border_data.get("diagonalDown")),
+                        outline=border_data.get("outline", True),
+                    )
+                elif bdr:
+                    cell.border = Border(
+                        start=_make_border_side(bdr.get("start")),
+                        end=_make_border_side(bdr.get("end")),
                         top=_make_border_side(bdr.get("top")),
                         bottom=_make_border_side(bdr.get("bottom")),
                         left=_make_border_side(bdr.get("left")),
                         right=_make_border_side(bdr.get("right")),
                         diagonal=_make_border_side(bdr.get("diagonal")),
+                        vertical=_make_border_side(bdr.get("vertical")),
+                        horizontal=_make_border_side(bdr.get("horizontal")),
                         diagonalUp=bool(bdr.get("diagonalUp")),
                         diagonalDown=bool(bdr.get("diagonalDown")),
+                        outline=bdr.get("outline", True),
                     )
 
                 locked = cd.get("locked", True)
@@ -2189,6 +6235,8 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
                 hl = Hyperlink(ref=coord, target=hl_data.get("target"))
                 if hl_data.get("location"):
                     hl.location = hl_data["location"]
+                if "display" in hl_data and hl_data.get("display") is not None:
+                    hl.display = hl_data["display"]
                 if hl_data.get("tooltip"):
                     hl.tooltip = hl_data["tooltip"]
                 cell.hyperlink = hl
@@ -2204,49 +6252,185 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
             pass
 
     # Named ranges
+    #
+    # The three reserved built-ins are deliberately NOT written here: Print_Area
+    # and Print_Titles are already applied natively above (ws.print_area /
+    # ws.print_title_rows+cols), and _FilterDatabase is auto-generated by
+    # openpyxl's own writer whenever ws.auto_filter.ref is set. Writing a raw
+    # duplicate definedName for any of them here corrupts the workbook (two
+    # competing _xlnm.Print_Titles entries for the same sheet, one of them
+    # missing the sheet-name/$ prefix that Excel requires).
+    _RESERVED_BUILTIN_NAMES = {"_xlnm.Print_Area", "_xlnm.Print_Titles", "_xlnm._FilterDatabase"}
+    _DN_META_FIELDS = (
+        "comment", "customMenu", "description", "help", "statusBar",
+        "hidden", "function", "vbProcedure", "xlm", "functionGroupId",
+        "shortcutKey", "publishToServer", "workbookParameter",
+    )
     try:
         from openpyxl.workbook.defined_name import DefinedName
         for nr in data.get("named_ranges") or []:
-            dn = DefinedName(nr["name"], attr_text=nr["value"])
-            if nr.get("sheet_id") is not None:
-                dn.localSheetId = nr["sheet_id"]
-            wb.defined_names[nr["name"]] = dn
+            name = nr["name"]
+            if name in _RESERVED_BUILTIN_NAMES:
+                continue
+            kwargs = {field: nr[field] for field in _DN_META_FIELDS if nr.get(field) is not None}
+            dn = DefinedName(name, attr_text=nr["value"], **kwargs)
+            sheet_id = nr.get("sheet_id")
+            if sheet_id is not None and 0 <= sheet_id < len(wb.worksheets):
+                # Worksheet-scoped: goes in that sheet's OWN dict, keyed only
+                # by name -- putting every scope into the single workbook-wide
+                # wb.defined_names dict (as before) meant two different sheets
+                # both naming a local range e.g. "Data" collided and one was
+                # silently lost.
+                dn.localSheetId = sheet_id
+                wb.worksheets[sheet_id].defined_names[name] = dn
+            else:
+                if sheet_id is not None:
+                    dn.localSheetId = sheet_id
+                wb.defined_names[name] = dn
     except Exception:
         pass
 
-    # Document properties
-    dp = data.get("doc_props") or {}
+    # Document properties. "modified" is special: openpyxl's own
+    # save_workbook() unconditionally stamps wb.properties.modified with
+    # datetime.now() as its last step before writing, overriding anything set
+    # here -- so the desired final value (per modified_policy) is recorded in
+    # `_pending_modified_iso` and fixed up via _inject_doc_core_modified AFTER
+    # wb.save(), except for update_on_save where openpyxl's own stamp is
+    # exactly the desired behavior already.
+    dp = copy.deepcopy(data.get("doc_props") or {})
+    modified_policy = data.get("modified_policy", "preserve")
+    _pending_modified_iso = None
+    if modified_policy != "update_on_save" and dp.get("modified"):
+        _pending_modified_iso = dp["modified"]
     if dp:
         try:
             from datetime import datetime
             for key, value in dp.items():
-                if key == "created":
-                    wb.properties.created = datetime.fromisoformat(value)
+                if key in ("created", "modified", "lastPrinted"):
+                    setattr(wb.properties, key, datetime.fromisoformat(value))
                 else:
                     setattr(wb.properties, key, value)
         except Exception:
             pass
 
-    # Workbook view (active tab, window geometry)
-    wv = data.get("wb_view") or {}
-    if wv:
+    # Custom document properties (docProps/custom.xml) -- openpyxl round-trips
+    # typed values (string/int/float/bool/datetime/link) natively.
+    custom_props = data.get("custom_doc_props") or []
+    if custom_props:
         try:
-            view = wb.views[0]
-            supported = set(getattr(type(view), "__attrs__", ()))
-            for key, value in wv.items():
-                if key not in supported:
-                    continue
-                if key == "activeTab":
-                    value = max(0, min(int(value), len(wb.worksheets) - 1))
-                try:
-                    setattr(view, key, value)
-                except Exception:
-                    pass
-            if wv.get("activeTab") is not None:
-                # openpyxl's writer takes activeTab from wb.active, not the view
-                wb.active = max(0, min(int(wv["activeTab"]), len(wb.worksheets) - 1))
+            from openpyxl.packaging.custom import (
+                StringProperty, IntProperty, FloatProperty, BoolProperty,
+                DateTimeProperty, LinkProperty,
+            )
+            from datetime import datetime as _dt_custom
+            _CUSTOM_TYPE_MAP = {
+                "StringProperty": StringProperty, "IntProperty": IntProperty,
+                "FloatProperty": FloatProperty, "BoolProperty": BoolProperty,
+                "DateTimeProperty": DateTimeProperty, "LinkProperty": LinkProperty,
+            }
+            wb.custom_doc_props.props = []
+            for item in custom_props:
+                cls = _CUSTOM_TYPE_MAP.get(item.get("type"), StringProperty)
+                value = item.get("value")
+                if cls is DateTimeProperty and isinstance(value, str):
+                    value = _dt_custom.fromisoformat(value)
+                wb.custom_doc_props.append(cls(name=item["name"], value=value))
         except Exception:
             pass
+
+    # Calculation properties (calcPr) -- openpyxl's CalcProperties model
+    # supports every field the tool exposes natively.
+    calc_props = data.get("calculation_properties") or {}
+    if calc_props:
+        try:
+            for key, value in calc_props.items():
+                if hasattr(wb.calculation, key):
+                    setattr(wb.calculation, key, value)
+        except Exception:
+            pass
+
+    # Workbook protection (workbookProtection) -- pre-hashed values pass
+    # through untouched; plain-text passwords are hashed unless the caller
+    # already supplied a hash (already_hashed=True).
+    wb_protection = data.get("workbook_protection") or {}
+    if wb_protection:
+        try:
+            already_hashed = bool(wb_protection.get("already_hashed"))
+            for key, value in wb_protection.items():
+                if key in ("already_hashed", "workbookPassword", "revisionsPassword"):
+                    continue
+                if hasattr(wb.security, key):
+                    setattr(wb.security, key, value)
+            if wb_protection.get("workbookPassword") is not None:
+                wb.security.set_workbook_password(wb_protection["workbookPassword"], already_hashed=already_hashed)
+            if wb_protection.get("revisionsPassword") is not None:
+                wb.security.set_revisions_password(wb_protection["revisionsPassword"], already_hashed=already_hashed)
+        except Exception:
+            pass
+
+    # Workbook properties (workbookPr): codeName + date1904 round-trip
+    # natively through openpyxl's object model (wb.code_name / wb.epoch);
+    # everything else needs post-save XML injection (_wbpr_extra_attrs,
+    # applied after wb.save() below). Cell values in the data model are kept
+    # as Python datetime objects (see the per-cell loop above), and openpyxl
+    # defers date->serial conversion to save time based on wb.epoch, so
+    # simply changing wb.epoch here already achieves "preserve_displayed_dates"
+    # (same calendar date, new serial) with no per-cell changes. The opposite
+    # policy, "preserve_serial_values" (same serial, calendar date shifts),
+    # needs an explicit per-cell re-basing, done further below.
+    wb_props = data.get("workbook_properties") or {}
+    _WBPR_NON_XML_KEYS = ("codeName", "date1904", "date_system_policy")
+    _wbpr_extra_attrs = {k: v for k, v in wb_props.items() if k not in _WBPR_NON_XML_KEYS}
+    _date1904_changed = False
+    _old_epoch = wb.epoch
+    _new_epoch = _old_epoch
+    if wb_props.get("codeName"):
+        wb.code_name = wb_props["codeName"]
+    if "date1904" in wb_props:
+        try:
+            from openpyxl.utils.datetime import CALENDAR_MAC_1904, CALENDAR_WINDOWS_1900
+            baseline_props = data.get("_baseline_workbook_properties") or {}
+            baseline_date1904 = bool(baseline_props.get("date1904", False))
+            _new_epoch = CALENDAR_MAC_1904 if wb_props["date1904"] else CALENDAR_WINDOWS_1900
+            _date1904_changed = bool(wb_props["date1904"]) != baseline_date1904
+            wb.epoch = _new_epoch
+            if _date1904_changed and wb_props.get("date_system_policy") == "preserve_serial_values":
+                from openpyxl.utils.datetime import to_excel, from_excel
+                import datetime as _dtmod
+                _rebase_epoch = CALENDAR_MAC_1904 if baseline_date1904 else CALENDAR_WINDOWS_1900
+                for _ws_rebase in wb.worksheets:
+                    for _row_rebase in _ws_rebase.iter_rows():
+                        for _c_rebase in _row_rebase:
+                            _v_rebase = _c_rebase.value
+                            if isinstance(_v_rebase, (_dtmod.datetime, _dtmod.date, _dtmod.time)):
+                                _serial = to_excel(_v_rebase, epoch=_rebase_epoch)
+                                _c_rebase.value = from_excel(_serial, epoch=_new_epoch)
+        except Exception:
+            pass
+
+    # Workbook views (bookViews) -- the FULL ordered list, not just index 0.
+    wviews = data.get("workbook_views") or ([data.get("wb_view")] if data.get("wb_view") else [])
+    if wviews:
+        try:
+            from openpyxl.workbook.views import BookView
+            supported = set(getattr(BookView, "__attrs__", ()))
+            new_views = []
+            for entry in wviews:
+                kwargs = {k: v for k, v in (entry or {}).items() if k in supported and v is not None}
+                new_views.append(BookView(**kwargs))
+            if new_views:
+                wb.views = new_views
+        except Exception:
+            pass
+    primary_view = (wviews[0] if wviews else {}) or {}
+    if primary_view.get("activeTab") is not None:
+        try:
+            # openpyxl's writer takes activeTab from wb.active, not the view
+            wb.active = max(0, min(int(primary_view["activeTab"]), len(wb.worksheets) - 1))
+        except Exception:
+            pass
+
+    creation_plan = _stage_drawing_creations(wb, data)
 
     # Atomic write: assemble everything in a temp file, replace target on success.
     import os as _os
@@ -2286,7 +6470,7 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
 
         # Inject drawings/charts/images (XML passthrough, must be after save)
         drawing_sheets = {sd["name"]: sd["drawing_data"] for sd in data["sheets"] if sd.get("drawing_data")}
-        if drawing_sheets:
+        if drawing_sheets or creation_plan:
             import zipfile as _zf2
             try:
                 with _zf2.ZipFile(tmp_out, "r") as _z2:
@@ -2295,14 +6479,56 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
                 new_sfm = _xlsx_sheet_file_map(_wb2, _rels2)
             except Exception:
                 new_sfm = {}
-            w = _inject_drawing_data(tmp_out, drawing_sheets, new_sfm)
+            w = (
+                _merge_drawing_packages(tmp_out, drawing_sheets, creation_plan, new_sfm)
+                if creation_plan
+                else _inject_drawing_data(tmp_out, drawing_sheets, new_sfm)
+            )
+            if w:
+                if creation_plan:
+                    raise ValueError(w)
+                warnings.append(w)
+
+        w = _inject_sheet_passthrough_relationships(tmp_out, data)
+        if w:
+            warnings.append(w)
+
+        w = _inject_worksheet_semantics(tmp_out, data)
+        if w:
+            warnings.append(w)
+
+        w = _inject_comment_vml(tmp_out, data)
+        if w:
+            warnings.append(w)
+
+        w = _inject_cell_contracts(tmp_out, data)
+        if w:
+            warnings.append(w)
+        w = _inject_xf_contracts(tmp_out, data)
+        if w:
+            warnings.append(w)
+
+        # Inject workbookPr attributes openpyxl's object model can't set
+        # natively (filterPrivacy, saveExternalLinkValues, showObjects,
+        # updateLinks, ...), the preserved/explicit document 'modified'
+        # timestamp (openpyxl always overwrites it with now() on save), and
+        # app.xml (extended) properties (openpyxl has no hook for these at all).
+        w = _inject_workbook_pr_extra(tmp_out, _wbpr_extra_attrs)
+        if w:
+            warnings.append(w)
+        if _pending_modified_iso:
+            w = _inject_doc_core_modified(tmp_out, _pending_modified_iso)
             if w:
                 warnings.append(w)
+        w = _inject_app_props(tmp_out, data.get("app_props") or {})
+        if w:
+            warnings.append(w)
 
         w = _restore_missing_package_parts(data.get("source"), tmp_out)
         if w:
             warnings.append(w)
 
+        _apply_package_edits(tmp_out, data.get("_package_edits"))
         warnings.extend(validate_xlsx(tmp_out))
 
         # Windows: a stale GC-held handle or AV scan can briefly lock the

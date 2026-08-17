@@ -134,7 +134,7 @@ One-shot Markdown export for Excel-family files plus session-based `.xlsx` workb
 | Group | Tools |
 | --- | --- |
 | One-shot conversion | `convert_to_markdown` for read-only Markdown export without `excel_load`, `excel_get_workbook_summary`, `excel_get_sheet_preview` |
-| Session lifecycle | `excel_get_info`, `excel_load`, `excel_save`, `excel_save_as_copy`, `excel_validate_workbook`, `excel_diff_package`, `excel_reload`, `excel_close` |
+| Session lifecycle | `excel_get_info`, `excel_load`, `excel_save`, `excel_save_as_copy`, `excel_validate_workbook`, `excel_diff_package`, `excel_verify_preservation`, `excel_reload`, `excel_close` |
 | Reading/export | `excel_to_markdown`, `excel_to_markdown_range`, `excel_read_range`, `excel_find_cells`, `excel_list_tables`, `excel_list_defined_names`, `excel_get_rows`, `excel_get_cell`, `excel_get_column`, `excel_capture`, `excel_extract_images`, `excel_get_shapes` |
 | Sheets | `excel_add_sheet`, `excel_delete_sheet`, `excel_rename_sheet`, `excel_copy_sheet`, `excel_copy_sheet_to`, `excel_move_sheet` |
 | Rows/cells | `excel_clone_rows`, `excel_copy_row`, `excel_insert_rows`, `excel_edit_cells`, `excel_delete_rows`, `excel_clear_range`, `excel_find_rows`, `excel_fill_rows` |

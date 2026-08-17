@@ -5,12 +5,26 @@ const fs = require('fs');
 const https = require('https');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const SERVERS = new Set(['excel', 'md', 'pdf', 'docx', 'pptx', 'csv', 'html', 'text', 'json']);
 const RETRYABLE_RENAME_ERRORS = new Set(['EACCES', 'EBUSY', 'EPERM']);
 const OWNER = 'ndhkaeru';
 const REPO = 'docloupe-mcp';
+const SIGNAL_NAMES = process.platform === 'win32'
+  ? ['SIGINT', 'SIGTERM', 'SIGBREAK']
+  : ['SIGHUP', 'SIGINT', 'SIGTERM'];
+
+class LauncherError extends Error {
+  constructor(code, phase, message, details = {}, exitCode = 1) {
+    super(message);
+    this.name = 'LauncherError';
+    this.code = code;
+    this.phase = phase;
+    this.details = details;
+    this.exitCode = exitCode;
+  }
+}
 
 function platformKey() {
   const platform = process.platform;
@@ -148,48 +162,325 @@ function usage() {
     '  DOCLOUPE_MCP_BINARY=/path/to/server-binary',
     '  DOCLOUPE_MCP_CACHE_DIR=/path/to/cache',
     '  DOCLOUPE_MCP_RELEASE_TAG=v1.2.3',
+    '  DOCLOUPE_MCP_SHUTDOWN_GRACE_MS=5000',
+    '  DOCLOUPE_MCP_TERMINATE_GRACE_MS=2000',
+    '  DOCLOUPE_MCP_KILL_GRACE_MS=3000',
   ].join('\n'));
+}
+
+function durationFromEnvironment(name, fallback) {
+  const value = Number.parseInt(process.env[name] || '', 10);
+  if (!Number.isFinite(value) || value < 0 || value > 60000) return fallback;
+  return value;
+}
+
+function signalExitCode(signalName) {
+  const signalNumber = os.constants.signals[signalName];
+  return Number.isInteger(signalNumber) ? 128 + signalNumber : 1;
+}
+
+function launcherErrorPayload(error) {
+  const launcherError = error instanceof LauncherError
+    ? error
+    : new LauncherError('DOCLOUPE_LAUNCHER_FAILED', 'startup', error.message || String(error));
+  return {
+    component: 'docloupe-mcp-launcher',
+    code: launcherError.code,
+    phase: launcherError.phase,
+    message: launcherError.message,
+    ...launcherError.details,
+  };
+}
+
+function emitLauncherError(error) {
+  console.error(JSON.stringify(launcherErrorPayload(error)));
+  if (process.env.DOCLOUPE_MCP_DEBUG === '1' && error.stack) console.error(error.stack);
+}
+
+function taskkillTree(processId, force) {
+  const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+  const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe');
+  const command = fs.existsSync(taskkill) ? taskkill : 'taskkill.exe';
+  const args = ['/PID', String(processId), '/T'];
+  if (force) args.push('/F');
+  const result = spawnSync(command, args, {
+    stdio: 'ignore',
+    windowsHide: true,
+    timeout: 5000,
+  });
+  return result.status === 0;
+}
+
+function sendTreeSignal(child, signalName, force = false) {
+  if (!child.pid) return true;
+  if (process.platform === 'win32') return taskkillTree(child.pid, force);
+  try {
+    process.kill(-child.pid, force ? 'SIGKILL' : signalName);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return true;
+    try {
+      return child.kill(force ? 'SIGKILL' : signalName);
+    } catch {
+      return false;
+    }
+  }
+}
+
+function processGroupAlive(processId) {
+  if (process.platform === 'win32' || !processId) return false;
+  try {
+    process.kill(-processId, 0);
+    return true;
+  } catch (error) {
+    return error.code !== 'ESRCH';
+  }
+}
+
+function waitForProcessGroupExit(processId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (!processGroupAlive(processId)) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(poll, 25);
+    };
+    poll();
+  });
+}
+
+function waitWithTimeout(promise, timeoutMs) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ completed: false }), timeoutMs);
+  });
+  return Promise.race([
+    promise.then((value) => ({ completed: true, value })),
+    timeout,
+  ]).finally(() => clearTimeout(timer));
+}
+
+function closeChildInput(child) {
+  if (!child.stdin || child.stdin.destroyed || child.stdin.writableEnded) return;
+  child.stdin.end();
+}
+
+async function ensureTreeStopped(child, terminateGraceMs, killGraceMs) {
+  if (process.platform === 'win32' || !processGroupAlive(child.pid)) return true;
+  sendTreeSignal(child, 'SIGTERM', false);
+  if (await waitForProcessGroupExit(child.pid, terminateGraceMs)) return true;
+  sendTreeSignal(child, 'SIGKILL', true);
+  return waitForProcessGroupExit(child.pid, killGraceMs);
+}
+
+async function shutdownChild(child, closePromise, trigger, timings) {
+  closeChildInput(child);
+  if (trigger.signal) sendTreeSignal(child, trigger.signal, false);
+
+  let closed = await waitWithTimeout(closePromise, timings.shutdownGraceMs);
+  if (!closed.completed) {
+    sendTreeSignal(child, 'SIGTERM', false);
+    closed = await waitWithTimeout(closePromise, timings.terminateGraceMs);
+  }
+  if (!closed.completed) {
+    sendTreeSignal(child, 'SIGKILL', true);
+    closed = await waitWithTimeout(closePromise, timings.killGraceMs);
+  }
+  if (!closed.completed) {
+    child.unref();
+    throw new LauncherError(
+      'DOCLOUPE_LAUNCHER_SHUTDOWN_TIMEOUT',
+      'shutdown',
+      'Child MCP process did not exit after graceful, terminate, and kill stages.',
+      {
+        pid: child.pid,
+        trigger: trigger.kind,
+        signal: trigger.signal || null,
+        shutdown_grace_ms: timings.shutdownGraceMs,
+        terminate_grace_ms: timings.terminateGraceMs,
+        kill_grace_ms: timings.killGraceMs,
+      },
+    );
+  }
+
+  const treeStopped = await ensureTreeStopped(
+    child,
+    timings.terminateGraceMs,
+    timings.killGraceMs,
+  );
+  if (!treeStopped) {
+    throw new LauncherError(
+      'DOCLOUPE_LAUNCHER_TREE_STILL_RUNNING',
+      'shutdown',
+      'Child MCP process exited but its process group is still running.',
+      { pid: child.pid, trigger: trigger.kind },
+    );
+  }
+  return closed.value;
+}
+
+function childExitCode(closeResult, requestedSignal) {
+  if (requestedSignal) return signalExitCode(requestedSignal);
+  if (Number.isInteger(closeResult.code)) return closeResult.code;
+  if (closeResult.signal) return signalExitCode(closeResult.signal);
+  return 1;
 }
 
 async function runAsync(server, args) {
   if (!SERVERS.has(server)) {
     usage();
-    process.exit(2);
+    throw new LauncherError(
+      'DOCLOUPE_LAUNCHER_INVALID_SERVER',
+      'startup',
+      `Unsupported DocLoupe server: ${server || '<missing>'}`,
+      { server: server || null },
+      2,
+    );
   }
 
   const binary = await findBinary(server);
-  const child = spawn(binary, args, { stdio: 'inherit', windowsHide: true });
-  child.on('error', (error) => {
-    console.error(error.message);
-    process.exit(1);
+  const child = spawn(binary, args, {
+    stdio: ['pipe', 'inherit', 'inherit'],
+    windowsHide: true,
+    detached: process.platform !== 'win32',
   });
-  child.on('exit', (code, signal) => {
-    if (signal) {
-      process.kill(process.pid, signal);
-      return;
+  const timings = {
+    shutdownGraceMs: durationFromEnvironment('DOCLOUPE_MCP_SHUTDOWN_GRACE_MS', 5000),
+    terminateGraceMs: durationFromEnvironment('DOCLOUPE_MCP_TERMINATE_GRACE_MS', 2000),
+    killGraceMs: durationFromEnvironment('DOCLOUPE_MCP_KILL_GRACE_MS', 3000),
+  };
+
+  const closePromise = new Promise((resolve, reject) => {
+    child.once('error', (error) => {
+      reject(new LauncherError(
+        'DOCLOUPE_LAUNCHER_SPAWN_FAILED',
+        'startup',
+        error.message,
+        { binary, server, error_code: error.code || null },
+      ));
+    });
+    child.once('close', (code, signalName) => resolve({ code, signal: signalName }));
+  });
+
+  let resolveTrigger;
+  let triggerRequested = false;
+  const triggerPromise = new Promise((resolve) => {
+    resolveTrigger = resolve;
+  });
+  const requestShutdown = (trigger) => {
+    if (triggerRequested) return;
+    triggerRequested = true;
+    resolveTrigger(trigger);
+  };
+
+  const onStdinEnd = () => requestShutdown({ kind: 'stdin_eof', signal: null });
+  const onStdinError = (error) => requestShutdown({ kind: 'stdin_error', signal: null, error });
+  const onChildStdinError = (error) => {
+    if (error.code !== 'EPIPE' && error.code !== 'ERR_STREAM_DESTROYED') {
+      requestShutdown({ kind: 'child_stdin_error', signal: null, error });
     }
-    process.exit(code ?? 0);
-  });
+  };
+  const signalHandlers = new Map();
+  for (const signalName of SIGNAL_NAMES) {
+    const handler = () => requestShutdown({ kind: 'signal', signal: signalName });
+    signalHandlers.set(signalName, handler);
+    process.on(signalName, handler);
+  }
+
+  process.stdin.on('end', onStdinEnd);
+  process.stdin.on('close', onStdinEnd);
+  process.stdin.on('error', onStdinError);
+  child.stdin.on('error', onChildStdinError);
+  process.stdin.pipe(child.stdin);
+  if (process.stdin.readableEnded || process.stdin.destroyed) queueMicrotask(onStdinEnd);
+
+  try {
+    const first = await Promise.race([
+      closePromise.then((value) => ({ kind: 'child_exit', value })),
+      triggerPromise.then((value) => ({ kind: 'shutdown', value })),
+    ]);
+    let closeResult;
+    let requestedSignal = null;
+    if (first.kind === 'child_exit') {
+      closeResult = first.value;
+      const treeStopped = await ensureTreeStopped(
+        child,
+        timings.terminateGraceMs,
+        timings.killGraceMs,
+      );
+      if (!treeStopped) {
+        throw new LauncherError(
+          'DOCLOUPE_LAUNCHER_TREE_STILL_RUNNING',
+          'shutdown',
+          'Child MCP process exited but its process group is still running.',
+          { pid: child.pid, trigger: 'child_exit' },
+        );
+      }
+    } else {
+      requestedSignal = first.value.signal;
+      closeResult = await shutdownChild(child, closePromise, first.value, timings);
+      if (first.value.error) {
+        throw new LauncherError(
+          'DOCLOUPE_LAUNCHER_STDIN_FAILED',
+          'shutdown',
+          first.value.error.message,
+          { pid: child.pid, trigger: first.value.kind },
+        );
+      }
+    }
+    return {
+      exitCode: childExitCode(closeResult, requestedSignal),
+      childCode: closeResult.code,
+      childSignal: closeResult.signal,
+      requestedSignal,
+    };
+  } finally {
+    process.stdin.unpipe(child.stdin);
+    process.stdin.removeListener('end', onStdinEnd);
+    process.stdin.removeListener('close', onStdinEnd);
+    process.stdin.removeListener('error', onStdinError);
+    child.stdin.removeListener('error', onChildStdinError);
+    for (const [signalName, handler] of signalHandlers) {
+      process.removeListener(signalName, handler);
+    }
+    process.stdin.pause();
+  }
 }
 
-function run(server, args) {
-  runAsync(server, args).catch((error) => {
-    console.error(error.stack || error.message);
-    process.exit(1);
-  });
+async function run(server, args) {
+  try {
+    const result = await runAsync(server, args);
+    process.exitCode = result.exitCode;
+    return result;
+  } catch (error) {
+    emitLauncherError(error);
+    process.exitCode = error instanceof LauncherError ? error.exitCode : 1;
+    return null;
+  }
 }
 
 function main() {
   const invoked = path.basename(process.argv[1] || '').replace(/\.js$/, '');
   const direct = /^docloupe-(.+)-tools$/.exec(invoked);
-  if (direct) {
-    run(direct[1], process.argv.slice(2));
-    return;
-  }
+  if (direct) return run(direct[1], process.argv.slice(2));
   const [server, ...args] = process.argv.slice(2);
-  run(server, args);
+  return run(server, args);
 }
 
-module.exports = { run, platformKey, executableName };
+module.exports = {
+  LauncherError,
+  childExitCode,
+  executableName,
+  platformKey,
+  run,
+  runAsync,
+  signalExitCode,
+};
 
-if (require.main === module) main();
+if (require.main === module) void main();

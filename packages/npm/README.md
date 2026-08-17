@@ -373,6 +373,11 @@ npx -y -p @ndhkaeru/docloupe-mcp@latest docloupe-md-tools
 | `DOCLOUPE_HTML_TOOLS_BINARY` | Override `html-tools` binary. |
 | `DOCLOUPE_TEXT_TOOLS_BINARY` | Override `text-tools` binary. |
 | `DOCLOUPE_JSON_TOOLS_BINARY` | Override `json-tools` binary. |
+| `DOCLOUPE_MCP_SHUTDOWN_GRACE_MS` | Time allowed for clean shutdown after stdin EOF or a termination request; default `5000`. |
+| `DOCLOUPE_MCP_TERMINATE_GRACE_MS` | Time allowed after process-tree termination; default `2000`. |
+| `DOCLOUPE_MCP_KILL_GRACE_MS` | Time allowed after forced process-tree kill; default `3000`. |
+
+The launcher owns the child stdin stream, forwards EOF and supported termination signals, and propagates the child exit status. If the child does not stop within the configured grace periods, the launcher terminates and then force-kills the owned process tree before returning a structured JSON error on stderr.
 
 ### Native binaries
 

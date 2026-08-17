@@ -67,16 +67,25 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install dependencies
         shell: pwsh
         run: |
           python -m venv .venv-build
           .\.venv-build\Scripts\python.exe -m pip install -U pip
-          .\.venv-build\Scripts\python.exe -m pip install pytest pyinstaller "mcp[cli]" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
+          .\.venv-build\Scripts\python.exe -m pip install pytest pyinstaller "mcp[cli]==1.28.1" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
 
       - name: Run tests
         shell: pwsh
         run: .\.venv-build\Scripts\python.exe -m pytest -q
+
+      - name: Check npm launcher
+        working-directory: packages/npm
+        run: npm test
 
   build:
     name: Build ${{ matrix.platform }} executables
@@ -142,25 +151,26 @@ jobs:
           python -m venv .venv-build
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
           & $py -m pip install -U pip
-          & $py -m pip install pytest pyinstaller "mcp[cli]" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
+          & $py -m pip install pytest pyinstaller "mcp[cli]==1.28.1" openpyxl pillow pdfminer.six pdfplumber mammoth python-pptx markdownify beautifulsoup4 lxml defusedxml charset-normalizer
 
       - name: Build all servers
         shell: pwsh
         run: |
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
           $servers = @(
-            @{ name = "excel-tools"; entry = "servers/excel/main.py"; paths = "servers/excel"; hidden = @("excel_converter"); excludes = @("numpy", "lxml") },
+            @{ name = "excel-tools"; entry = "servers/excel/main.py"; paths = @("servers/excel", "servers"); hidden = @("excel_converter"); excludes = @("numpy", "lxml") },
             @{ name = "pdf-tools";   entry = "servers/pdf/main.py";   paths = "servers/pdf"; hidden = @("converter") },
             @{ name = "docx-tools";  entry = "servers/docx/main.py";  paths = "servers/docx"; hidden = @("converter") },
             @{ name = "pptx-tools";  entry = "servers/pptx/main.py";  paths = "servers/pptx"; hidden = @("converter") },
             @{ name = "csv-tools";   entry = "servers/csv/main.py";   paths = "servers/csv"; hidden = @("converter") },
             @{ name = "html-tools";  entry = "servers/html/main.py";  paths = "servers/html"; hidden = @("converter") },
-            @{ name = "md-tools";    entry = "servers/md/main.py";    paths = "servers/md" },
+            @{ name = "md-tools";    entry = "servers/md/main.py";    paths = @("servers/md", "servers") },
             @{ name = "text-tools";  entry = "servers/text/main.py";  paths = "servers/text"; hidden = @("converter") },
             @{ name = "json-tools";  entry = "servers/json/main.py";  paths = "servers/json"; hidden = @("converter") }
           )
           foreach ($server in $servers) {
-            $args = @("-m", "PyInstaller", "--clean", "--onefile", "--name", $server.name, "--paths", $server.paths, "--specpath", "build", "--workpath", "build", "--distpath", "dist")
+            $args = @("-m", "PyInstaller", "--clean", "--onefile", "--name", $server.name, "--specpath", "build", "--workpath", "build", "--distpath", "dist")
+            foreach ($serverPath in @($server.paths)) { $args += @("--paths", $serverPath) }
             if ($server.ContainsKey("hidden")) {
               foreach ($hidden in $server.hidden) { $args += @("--hidden-import", $hidden) }
             }

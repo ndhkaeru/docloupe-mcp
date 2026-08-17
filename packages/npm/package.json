@@ -22,6 +22,7 @@
   ],
   "scripts": {
     "check": "node --check bin/docloupe-mcp.js",
+    "test": "npm run check && node --check test/fixtures/launcher-child.js && node --test test/launcher.test.js",
     "pack:dry-run": "npm pack --dry-run"
   },
   "repository": {
