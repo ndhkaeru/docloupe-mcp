@@ -8,6 +8,7 @@ _SERVER_DIRECTORY = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(_SERVER_DIRECTORY))
 
+import atexit
 import copy
 import html
 import importlib.metadata
@@ -19,8 +20,11 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from typing import Any, Literal
+from typing_extensions import Required, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
@@ -72,6 +76,9 @@ from core import (
 _sessions: dict[str, dict] = {}
 _SESSION_LOCK = threading.RLock()
 _BUSY_SESSIONS: dict[str, dict] = {}
+_NEW_SESSION_PATTERN = re.compile(r"^new:([0-9a-f]{32}):(xlsx|xltx|xlsm|xltm)$")
+_SESSION_CHECKPOINT_DIRECTORY = Path(tempfile.gettempdir()) / "docloupe-excel-sessions"
+_SESSION_CHECKPOINT_RETENTION_SECONDS = 2 * 24 * 60 * 60
 start_excel_backup_cleanup()
 
 
@@ -145,6 +152,121 @@ def _check_supported(path) -> None:
             "for read-only extraction, or convert to an OOXML workbook (.xlsx/.xlsm/.xltx/.xltm).")
 
 
+def _session_checkpoint_paths(session_key: str) -> tuple[Path, Path] | None:
+    match = _NEW_SESSION_PATTERN.fullmatch(session_key)
+    if match is None:
+        return None
+    token, extension = match.groups()
+    workbook_path = _SESSION_CHECKPOINT_DIRECTORY / f"{token}.{extension}"
+    return workbook_path, workbook_path.with_suffix(workbook_path.suffix + ".json")
+
+
+def _checkpoint_session(session_key: str, data: dict) -> None:
+    paths = _session_checkpoint_paths(session_key)
+    if paths is None:
+        return
+    workbook_path, metadata_path = paths
+    _SESSION_CHECKPOINT_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    extension = workbook_path.suffix
+    workbook_stage = _SESSION_CHECKPOINT_DIRECTORY / f".{workbook_path.stem}.{uuid.uuid4().hex}{extension}"
+    metadata_stage = _SESSION_CHECKPOINT_DIRECTORY / f".{metadata_path.name}.{uuid.uuid4().hex}.tmp"
+    metadata = {
+        "schema_version": 1,
+        "session_key": session_key,
+        "source": data.get("source", ""),
+        "default_output_path": data.get("_default_output_path"),
+        "new_workbook": bool(data.get("_new_workbook")),
+        "sheet_filter": data.get("_sheet_filter"),
+        "loaded_disk_names": data.get("_loaded_disk_names"),
+        "dirty_features": data.get("_dirty_features", []),
+        "dirty_paths": data.get("_dirty_paths", []),
+        "verification_baseline_path": data.get("_verification_baseline_path"),
+        "checkpointed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        reconstruct_excel(copy.deepcopy(data), str(workbook_stage))
+        metadata_stage.write_text(
+            json.dumps(metadata, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        os.replace(workbook_stage, workbook_path)
+        os.replace(metadata_stage, metadata_path)
+    finally:
+        workbook_stage.unlink(missing_ok=True)
+        metadata_stage.unlink(missing_ok=True)
+
+
+def _restore_session_checkpoint(session_key: str) -> bool:
+    paths = _session_checkpoint_paths(session_key)
+    if paths is None:
+        return False
+    workbook_path, metadata_path = paths
+    if not workbook_path.is_file() or not metadata_path.is_file():
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("schema_version") != 1 or metadata.get("session_key") != session_key:
+            raise ValueError("checkpoint metadata does not match the requested session")
+        data = serialize_excel(str(workbook_path))
+        data["source"] = metadata.get("source") or metadata.get("default_output_path") or data["source"]
+        data["_default_output_path"] = metadata.get("default_output_path")
+        data["_new_workbook"] = bool(metadata.get("new_workbook"))
+        data["_sheet_filter"] = metadata.get("sheet_filter")
+        data["_loaded_disk_names"] = metadata.get("loaded_disk_names") or [
+            sheet["name"] for sheet in data.get("sheets", [])
+        ]
+        data["_dirty_features"] = list(metadata.get("dirty_features") or [])
+        data["_dirty_paths"] = list(metadata.get("dirty_paths") or [])
+        if metadata.get("verification_baseline_path"):
+            data["_verification_baseline_path"] = metadata["verification_baseline_path"]
+    except Exception as exc:
+        raise ValueError(
+            f"Session '{session_key}' checkpoint could not be restored: {exc}"
+        ) from exc
+    with _SESSION_LOCK:
+        _sessions[session_key] = data
+    return True
+
+
+def _delete_session_checkpoint(session_key: str) -> None:
+    paths = _session_checkpoint_paths(session_key)
+    if paths is None:
+        return
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
+def _checkpoint_all_new_sessions() -> None:
+    with _SESSION_LOCK:
+        snapshots = [
+            (session_key, copy.deepcopy(data))
+            for session_key, data in _sessions.items()
+            if _session_checkpoint_paths(session_key) is not None
+            and session_key not in _BUSY_SESSIONS
+        ]
+    for session_key, data in snapshots:
+        try:
+            _checkpoint_session(session_key, data)
+        except Exception as exc:
+            print(f"Could not checkpoint Excel session {session_key!r}: {exc}", file=sys.stderr)
+
+
+def _cleanup_stale_session_checkpoints() -> None:
+    if not _SESSION_CHECKPOINT_DIRECTORY.is_dir():
+        return
+    cutoff = time.time() - _SESSION_CHECKPOINT_RETENTION_SECONDS
+    for path in _SESSION_CHECKPOINT_DIRECTORY.iterdir():
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+_cleanup_stale_session_checkpoints()
+atexit.register(_checkpoint_all_new_sessions)
+
+
 def _resolve_session_key(session_key: str) -> str:
     """Return the canonical key for a session, tolerating path-case differences."""
     with _SESSION_LOCK:
@@ -156,6 +278,13 @@ def _resolve_session_key(session_key: str) -> str:
             alt = None
         if alt and alt in _sessions:
             return alt
+    if _restore_session_checkpoint(session_key):
+        return session_key
+    if _session_checkpoint_paths(session_key) is not None:
+        raise ValueError(
+            f"Session '{session_key}' not found and no temporary checkpoint is available. "
+            "The checkpoint may have expired or been closed; create a new workbook session."
+        )
     raise ValueError(f"Session '{session_key}' not found. Call excel_load first.")
 
 
@@ -2831,6 +2960,14 @@ def _commit_save_transaction(transaction: dict, stage_result: dict) -> str:
         data["_dirty_paths"] = []
         data["_new_workbook"] = False
 
+    try:
+        _checkpoint_session(transaction["session_key"], copy.deepcopy(data))
+    except Exception as exc:
+        print(
+            f"Could not refresh Excel session checkpoint {transaction['session_key']!r}: {exc}",
+            file=sys.stderr,
+        )
+
     verification_call = f"excel_verify_preservation(after_path={str(destination)!r}"
     if effective_reference:
         verification_call += f", before_path={effective_reference!r}"
@@ -3958,6 +4095,7 @@ def excel_close(session_key: str) -> str:
         if session_key in _BUSY_SESSIONS:
             raise _session_busy_error(session_key)
         del _sessions[session_key]
+    _delete_session_checkpoint(session_key)
     return f"Closed session '{session_key}'."
 
 
@@ -4008,6 +4146,145 @@ def _find_soffice(hint: str | None = None) -> str:
     )
 
 
+def _render_pdf_first_page_to_png(pdf_path: Path, png_path: Path) -> None:
+    try:
+        import pypdfium2 as pdfium
+    except ImportError as exc:
+        raise RuntimeError(
+            "Microsoft Excel exported a PDF, but pypdfium2 is unavailable for PNG conversion."
+        ) from exc
+
+    document = pdfium.PdfDocument(str(pdf_path))
+    page = None
+    bitmap = None
+    try:
+        if len(document) < 1:
+            raise RuntimeError("Microsoft Excel exported an empty PDF.")
+        page = document[0]
+        bitmap = page.render(scale=2)
+        bitmap.to_pil().save(png_path, format="PNG")
+    finally:
+        if bitmap is not None:
+            bitmap.close()
+        if page is not None:
+            page.close()
+        document.close()
+
+
+def _capture_with_windows_excel(
+    workbook_path: Path,
+    pdf_path: Path,
+    png_path: Path,
+    timeout_seconds: float,
+    cancel_event: threading.Event | None,
+) -> None:
+    import shutil
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        raise FileNotFoundError("PowerShell was not found, so Microsoft Excel COM cannot be used.")
+    script_path = workbook_path.parent / "excel_capture.ps1"
+    script_path.write_text(
+        r'''$ErrorActionPreference = "Stop"
+$excel = $null
+$workbook = $null
+$worksheet = $null
+$usedRange = $null
+$printRange = $null
+try {
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+    $workbook = $excel.Workbooks.Open($args[0], 0, $true)
+    $worksheet = $workbook.Worksheets.Item(1)
+    $usedRange = $worksheet.UsedRange
+    $minRow = [int]$usedRange.Row
+    $minColumn = [int]$usedRange.Column
+    $maxRow = $minRow + [int]$usedRange.Rows.Count - 1
+    $maxColumn = $minColumn + [int]$usedRange.Columns.Count - 1
+    $shapeCount = [int]$worksheet.Shapes.Count
+    for ($index = 1; $index -le $shapeCount; $index++) {
+        $shape = $null
+        $topLeft = $null
+        $bottomRight = $null
+        try {
+            $shape = $worksheet.Shapes.Item($index)
+            $topLeft = $shape.TopLeftCell
+            $bottomRight = $shape.BottomRightCell
+            $minRow = [Math]::Min($minRow, [int]$topLeft.Row)
+            $minColumn = [Math]::Min($minColumn, [int]$topLeft.Column)
+            $maxRow = [Math]::Max($maxRow, [int]$bottomRight.Row)
+            $maxColumn = [Math]::Max($maxColumn, [int]$bottomRight.Column)
+        }
+        finally {
+            if ($bottomRight -ne $null) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($bottomRight) }
+            if ($topLeft -ne $null) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($topLeft) }
+            if ($shape -ne $null) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shape) }
+        }
+    }
+    $printRange = $worksheet.Range(
+        $worksheet.Cells.Item($minRow, $minColumn),
+        $worksheet.Cells.Item($maxRow, $maxColumn)
+    )
+    $worksheet.PageSetup.PrintArea = $printRange.Address()
+    $worksheet.PageSetup.Zoom = $false
+    $worksheet.PageSetup.FitToPagesWide = 1
+    $worksheet.PageSetup.FitToPagesTall = 1
+    $worksheet.ExportAsFixedFormat(0, $args[1])
+}
+finally {
+    if ($printRange -ne $null) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($printRange) }
+    if ($usedRange -ne $null) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($usedRange) }
+    if ($worksheet -ne $null) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($worksheet) }
+    if ($workbook -ne $null) {
+        $workbook.Close($false)
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($workbook)
+    }
+    if ($excel -ne $null) {
+        $excel.Quit()
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($excel)
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+}
+''',
+        encoding="utf-8",
+    )
+    command = [
+        powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script_path),
+        str(workbook_path),
+        str(pdf_path),
+    ]
+    result = run_managed_process(
+        command,
+        timeout_seconds=timeout_seconds,
+        cancel_event=cancel_event,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if cancel_event is not None and cancel_event.is_set():
+        raise ManagedProcessCancelled(
+            command,
+            process_tree_stopped=result.process_tree_stopped,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+    if result.returncode != 0 or not pdf_path.is_file():
+        detail = f"{result.stdout or ''}{result.stderr or ''}".strip()
+        raise RuntimeError(
+            f"Microsoft Excel produced no PDF (exit_code={result.returncode}). {detail}"
+        )
+    _render_pdf_first_page_to_png(pdf_path, png_path)
+
+
 def _excel_capture_impl(
     session_key: str,
     sheet_name: str,
@@ -4018,10 +4295,9 @@ def _excel_capture_impl(
 ) -> str:
     import shutil
 
-    lo = _find_soffice(soffice_path)
     data = _get_session(session_key)
     sheet = _find_sheet(data, sheet_name)
-    command_label = (lo, "--headless", "--convert-to", "png")
+    command_label = ("excel_capture", sheet_name)
     if cancel_event is not None and cancel_event.is_set():
         raise ManagedProcessCancelled(command_label, process_tree_stopped=True)
 
@@ -4030,42 +4306,63 @@ def _excel_capture_impl(
     try:
         tmp_xlsx = tmp_dir / "capture.xlsx"
         reconstruct_excel({"source": "", "sheets": [sheet]}, str(tmp_xlsx))
-        profile = tmp_dir / "lo_profile"
-        command = [
-            lo,
-            "--headless",
-            "--norestore",
-            "--nofirststartwizard",
-            f"-env:UserInstallation=file:///{profile.as_posix()}",
-            "--convert-to",
-            "png",
-            "--outdir",
-            str(tmp_dir),
-            str(tmp_xlsx),
-        ]
-        result = run_managed_process(
-            command,
-            timeout_seconds=timeout_seconds,
-            cancel_event=cancel_event,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        if cancel_event is not None and cancel_event.is_set():
-            raise ManagedProcessCancelled(
+        try:
+            lo = _find_soffice(soffice_path)
+        except FileNotFoundError as libreoffice_error:
+            if soffice_path is not None or platform.system() != "Windows":
+                raise
+            png_path = tmp_dir / "capture.png"
+            try:
+                _capture_with_windows_excel(
+                    tmp_xlsx,
+                    tmp_dir / "capture.pdf",
+                    png_path,
+                    timeout_seconds,
+                    cancel_event,
+                )
+            except (ManagedProcessCancelled, KeyboardInterrupt):
+                raise
+            except Exception as excel_error:
+                raise RuntimeError(
+                    f"{libreoffice_error} Microsoft Excel fallback also failed: {excel_error}"
+                ) from excel_error
+            pngs = [png_path]
+        else:
+            profile = tmp_dir / "lo_profile"
+            command = [
+                lo,
+                "--headless",
+                "--norestore",
+                "--nofirststartwizard",
+                f"-env:UserInstallation=file:///{profile.as_posix()}",
+                "--convert-to",
+                "png",
+                "--outdir",
+                str(tmp_dir),
+                str(tmp_xlsx),
+            ]
+            result = run_managed_process(
                 command,
-                process_tree_stopped=result.process_tree_stopped,
-                stdout=result.stdout,
-                stderr=result.stderr,
+                timeout_seconds=timeout_seconds,
+                cancel_event=cancel_event,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
-
-        pngs = sorted(tmp_dir.glob("*.png"))
-        if result.returncode != 0 or not pngs:
-            detail = f"{result.stdout or ''}{result.stderr or ''}".strip()
-            raise RuntimeError(
-                f"LibreOffice produced no PNG (exit_code={result.returncode}). {detail}"
-            )
+            if cancel_event is not None and cancel_event.is_set():
+                raise ManagedProcessCancelled(
+                    command,
+                    process_tree_stopped=result.process_tree_stopped,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                )
+            pngs = sorted(tmp_dir.glob("*.png"))
+            if result.returncode != 0 or not pngs:
+                detail = f"{result.stdout or ''}{result.stderr or ''}".strip()
+                raise RuntimeError(
+                    f"LibreOffice produced no PNG (exit_code={result.returncode}). {detail}"
+                )
 
         output = Path(output_path).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -4081,11 +4378,11 @@ def _excel_capture_impl(
         with output_stage.open("rb") as stream:
             header = stream.read(24)
         if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
-            raise RuntimeError("LibreOffice produced an invalid PNG file.")
+            raise RuntimeError("The spreadsheet renderer produced an invalid PNG file.")
         width = int.from_bytes(header[16:20], "big")
         height = int.from_bytes(header[20:24], "big")
         if cancel_event is not None and cancel_event.is_set():
-            raise ManagedProcessCancelled(command, process_tree_stopped=True)
+            raise ManagedProcessCancelled(command_label, process_tree_stopped=True)
 
         os.replace(output_stage, output)
         output_stage = None
@@ -4094,7 +4391,7 @@ def _excel_capture_impl(
         if output_stage is not None:
             output_stage.unlink(missing_ok=True)
         if not remove_path_with_retries(tmp_dir):
-            raise RuntimeError(f"Could not remove LibreOffice workspace: {tmp_dir}")
+            raise RuntimeError(f"Could not remove spreadsheet capture workspace: {tmp_dir}")
 
 
 def excel_capture(
@@ -4104,7 +4401,7 @@ def excel_capture(
     soffice_path: str | None = None,
     timeout_seconds: float = 120.0,
 ) -> str:
-    """Render a sheet as a PNG through a bounded LibreOffice process tree."""
+    """Render a sheet as PNG with LibreOffice, or Microsoft Excel fallback on Windows."""
     return _excel_capture_impl(
         session_key,
         sheet_name,
@@ -4123,7 +4420,7 @@ async def _excel_capture_tool(
     soffice_path: str | None = None,
     timeout_seconds: float = 120.0,
 ) -> str:
-    """Render a sheet as PNG; cancellation stops LibreOffice and its descendants."""
+    """Render a sheet as PNG; cancellation stops the renderer and its descendants."""
     return await run_cancellable_in_thread(
         lambda cancel_event: _excel_capture_impl(
             session_key,
@@ -4317,10 +4614,12 @@ def excel_find_cells(
     sheet_name: str | None = None,
     regex: bool = False,
     case_sensitive: bool = False,
-    match_in: str = "value",
+    match_in: Literal["value", "formula", "all"] = "value",
     max_results: int = 100,
 ) -> str:
     """Find cells by literal text or regex across one sheet or the whole workbook."""
+    if match_in not in {"value", "formula", "all"}:
+        raise ValueError("match_in must be one of: 'value', 'formula', 'all'")
     data = _get_session(session_key)
     flags = 0 if case_sensitive else re.IGNORECASE
     pattern = re.compile(query if regex else re.escape(query), flags)
@@ -4335,8 +4634,6 @@ def excel_find_cells(
                 if match_in == "formula":
                     if not isinstance(haystack, str) or not haystack.startswith("="):
                         continue
-                elif match_in != "value":
-                    raise ValueError("match_in must be 'value' or 'formula'")
                 text = "" if haystack is None else str(haystack)
                 if pattern.search(text):
                     results.append({"sheet_name": sheet["name"], "row_index": row_index, "col_index": col_index, "value": haystack})
@@ -4905,66 +5202,195 @@ def excel_insert_column(
 
 # ── 14. Edit cells ────────────────────────────────────────────────────────────
 
+_EDIT_CELL_PAYLOAD_KEYS = frozenset({
+    "value", "data_type", "formula", "formula_type", "formula_attributes",
+    "cached_value", "cache_policy", "rich_text", "rich_text_policy", "clear", "present",
+})
+
+
+class _TypedCellEditPayload(TypedDict, total=False):
+    value: Any
+    data_type: str | None
+    formula: str | None
+    formula_type: str | None
+    formula_attributes: dict | None
+    cached_value: Any
+    cache_policy: str | None
+    rich_text: Any
+    rich_text_policy: str | None
+    clear: bool
+    present: bool
+
+
+class _A1CellEdit(_TypedCellEditPayload, total=False):
+    cell: Required[str]
+
+
+class _FlatCellEdit(_TypedCellEditPayload, total=False):
+    row_index: Required[int]
+    col_index: Required[int]
+
+
+class _GroupedCellEdit(TypedDict):
+    row_index: int
+    edits: dict[str, Any]
+
+
+_CellEdit = _A1CellEdit | _FlatCellEdit | _GroupedCellEdit
+
+
+def _normalize_cell_edits(edits: list[_CellEdit]) -> list[tuple[int, int, object]]:
+    if not isinstance(edits, list):
+        raise ValueError("edits must be a list of edit objects.")
+    normalized: list[tuple[int, int, object]] = []
+    for entry_index, entry in enumerate(edits):
+        if not isinstance(entry, dict):
+            raise ValueError(f"edits[{entry_index}] must be an object, got {type(entry).__name__}.")
+        has_cell = "cell" in entry
+        has_grouped_edits = "edits" in entry
+        has_row = "row_index" in entry
+        has_col = "col_index" in entry
+
+        if has_cell:
+            conflicting = {"row_index", "col_index", "edits"}.intersection(entry)
+            if conflicting:
+                raise ValueError(
+                    f"edits[{entry_index}] is ambiguous: 'cell' cannot be combined with "
+                    f"{sorted(conflicting)}."
+                )
+            unknown = set(entry) - {"cell"} - _EDIT_CELL_PAYLOAD_KEYS
+            if unknown:
+                raise ValueError(f"edits[{entry_index}] has unsupported fields: {sorted(unknown)}")
+            payload = {key: value for key, value in entry.items() if key != "cell"}
+            if not payload:
+                raise ValueError(f"edits[{entry_index}] must include a value or typed cell payload.")
+            cell_ref = entry["cell"]
+            if not isinstance(cell_ref, str) or not cell_ref.strip():
+                raise ValueError(f"edits[{entry_index}].cell must be a non-empty A1 reference.")
+            try:
+                r1, r2, c1, c2 = _excel_range_to_indices(cell_ref)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"edits[{entry_index}].cell is not a valid A1 reference: {cell_ref!r}") from exc
+            if r1 != r2 or c1 != c2:
+                raise ValueError(f"edits[{entry_index}].cell must reference one cell, got {cell_ref!r}.")
+            normalized.append((r1, c1, payload))
+            continue
+
+        if has_grouped_edits:
+            if not has_row or has_col:
+                raise ValueError(
+                    f"edits[{entry_index}] grouped form requires 'row_index' and 'edits', "
+                    "without 'col_index'."
+                )
+            unknown = set(entry) - {"row_index", "edits"}
+            if unknown:
+                raise ValueError(f"edits[{entry_index}] has unsupported fields: {sorted(unknown)}")
+            grouped = entry["edits"]
+            if not isinstance(grouped, dict):
+                raise ValueError(f"edits[{entry_index}].edits must be an object mapping column indexes to values.")
+            try:
+                row_index = int(entry["row_index"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"edits[{entry_index}].row_index must be an integer.") from exc
+            if row_index < 0:
+                raise ValueError(f"edits[{entry_index}].row_index must be >= 0, got {row_index}.")
+            for col_key, value in grouped.items():
+                try:
+                    col_index = int(col_key)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"edits[{entry_index}].edits contains a non-integer column index: {col_key!r}."
+                    ) from exc
+                if col_index < 0:
+                    raise ValueError(
+                        f"edits[{entry_index}].edits column indexes must be >= 0, got {col_index}."
+                    )
+                normalized.append((row_index, col_index, value))
+            continue
+
+        if has_row or has_col:
+            if not (has_row and has_col):
+                missing = "col_index" if has_row else "row_index"
+                raise ValueError(f"edits[{entry_index}] flat coordinate form is missing '{missing}'.")
+            unknown = set(entry) - {"row_index", "col_index"} - _EDIT_CELL_PAYLOAD_KEYS
+            if unknown:
+                raise ValueError(f"edits[{entry_index}] has unsupported fields: {sorted(unknown)}")
+            payload = {key: value for key, value in entry.items() if key not in {"row_index", "col_index"}}
+            if not payload:
+                raise ValueError(f"edits[{entry_index}] must include a value or typed cell payload.")
+            try:
+                row_index = int(entry["row_index"])
+                col_index = int(entry["col_index"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"edits[{entry_index}] row_index and col_index must be integers.") from exc
+            if row_index < 0 or col_index < 0:
+                raise ValueError(
+                    f"edits[{entry_index}] row_index and col_index must be >= 0, "
+                    f"got [{row_index},{col_index}]."
+                )
+            normalized.append((row_index, col_index, payload))
+            continue
+
+        raise ValueError(
+            f"edits[{entry_index}] must use one of: "
+            "{'cell': 'A1', 'value': ...}, "
+            "{'row_index': 0, 'col_index': 0, 'value': ...}, or "
+            "{'row_index': 0, 'edits': {'0': ...}}."
+        )
+    return normalized
+
+
 @mcp.tool()
 def excel_edit_cells(
     session_key: str,
     sheet_name: str,
-    edits: list[dict],
+    edits: list[_CellEdit],
 ) -> str:
-    """Edit scalar values or typed partial cell payloads without saving."""
+    """
+    Edit scalar values or typed partial cell payloads without saving.
+
+    Each item may use an A1 cell (``{"cell": "A1", "value": ...}``), flat
+    zero-based coordinates, or the legacy grouped-by-row form.
+    """
     data = _get_session(session_key)
     sheet = _find_sheet(data, sheet_name)
-    typed_keys = {
-        "value", "data_type", "formula", "formula_type", "formula_attributes",
-        "cached_value", "cache_policy", "rich_text", "rich_text_policy", "clear", "present",
-    }
     changes = []
     edited_rows = set()
-    for entry in edits:
-        row_index = int(entry["row_index"])
-        if row_index < 0:
-            raise ValueError(f"row_index must be >= 0, got {row_index}")
-        for col_key, value in entry["edits"].items():
-            col_index = int(col_key)
-            cell = _ensure_cell(sheet, row_index, col_index, capture_baseline=True)
-            if cell.get("merge") == "slave":
+    for row_index, col_index, value in _normalize_cell_edits(edits):
+        cell = _ensure_cell(sheet, row_index, col_index, capture_baseline=True)
+        if cell.get("merge") == "slave":
+            raise ValueError(
+                f"Cell [{row_index},{col_index}] is a slave cell of a merged range; edit its origin."
+            )
+        before = _cell_public_view(cell, sheet=sheet, coord=_cell_coord(row_index, col_index),
+                                   include_rich_text=True, include_formula_cache=True,
+                                   include_semantics=True)
+        if isinstance(value, dict) and _EDIT_CELL_PAYLOAD_KEYS.intersection(value):
+            _apply_typed_cell_payload(cell, value)
+        else:
+            if cell.get("rich_text"):
                 raise ValueError(
-                    f"Cell [{row_index},{col_index}] is a slave cell of a merged range; edit its origin."
+                    f"Cell [{row_index},{col_index}] has rich text; editing its plain value "
+                    "requires the typed payload form with an explicit rich_text_policy "
+                    "('replace_all' or 'preserve_runs_if_text_equal')."
                 )
-            before = _cell_public_view(cell, sheet=sheet, coord=_cell_coord(row_index, col_index),
-                                       include_rich_text=True, include_formula_cache=True,
-                                       include_semantics=True)
-            if isinstance(value, dict) and typed_keys.intersection(value):
-                _apply_typed_cell_payload(cell, value)
-            else:
-                if cell.get("rich_text"):
-                    # A bare scalar value has no way to carry rich_text_policy,
-                    # so silently clearing the existing runs here would be
-                    # exactly the "silently guessing" behavior the typed
-                    # payload path (_apply_typed_cell_payload) already refuses
-                    # to do. Require the caller to use the typed payload form
-                    # ({"value": ..., "rich_text_policy": "replace_all" |
-                    # "preserve_runs_if_text_equal"}) instead.
-                    raise ValueError(
-                        f"Cell [{row_index},{col_index}] has rich text; editing its plain value "
-                        "requires the typed payload form with an explicit rich_text_policy "
-                        "('replace_all' or 'preserve_runs_if_text_equal')."
-                    )
-                _store_cell_value(cell, value, sheet.get("_implicit_cell_defaults"))
-                cell["value"] = copy.deepcopy(cell.get("v"))
-                cell["data_type"] = cell.get("dt")
-                cell["present"] = True
-                cell.pop("rich_text", None)
-                cell.pop("formula", None)
-                cell.pop("cached_value", None)
-                cell.pop("cached_value_state", None)
-            path = f"sheets/{sheet_name}/cells/{_cell_coord(row_index, col_index)}"
-            _mark_dirty(data, "cells", path)
-            after = _cell_public_view(cell, sheet=sheet, coord=_cell_coord(row_index, col_index),
-                                      include_rich_text=True, include_formula_cache=True,
-                                      include_semantics=True)
-            changes.append({"path": path, "before": before, "after": after})
-            edited_rows.add(row_index)
+            _store_cell_value(cell, value, sheet.get("_implicit_cell_defaults"))
+            cell["value"] = copy.deepcopy(cell.get("v"))
+            cell["data_type"] = cell.get("dt")
+            cell["present"] = True
+            cell.pop("rich_text", None)
+            cell.pop("formula", None)
+            cell.pop("cached_value", None)
+            cell.pop("cached_value_state", None)
+        path = f"sheets/{sheet_name}/cells/{_cell_coord(row_index, col_index)}"
+        _mark_dirty(data, "cells", path)
+        after = _cell_public_view(cell, sheet=sheet, coord=_cell_coord(row_index, col_index),
+                                  include_rich_text=True, include_formula_cache=True,
+                                  include_semantics=True)
+        changes.append({"path": path, "before": before, "after": after})
+        edited_rows.add(row_index)
+    if _session_checkpoint_paths(session_key) is not None:
+        _checkpoint_session(session_key, copy.deepcopy(data))
     return json.dumps({
         "rows_edited": len(edited_rows),
         "cells_updated": len(changes),
@@ -5210,27 +5636,25 @@ def excel_merge_cells(
     """
     data = _get_session(session_key)
     sheet = _find_sheet(data, sheet_name)
-    rows = sheet["rows"]
+    rows = sheet.setdefault("rows", [])
     n_rows = len(rows)
 
     if unmerge:
-        if not (0 <= r1 < n_rows):
-            raise ValueError(f"r1={r1} out of range (0–{n_rows-1})")
+        if r1 < 0 or c1 < 0:
+            raise ValueError("r1 and c1 must be non-negative.")
+        if r1 >= n_rows or c1 >= len(rows[r1].get("cells", [])):
+            raise ValueError(f"Cell [{r1},{c1}] is not a merge origin.")
         cell = rows[r1]["cells"][c1]
-        if cell["merge"] == "slave":
+        if cell.get("merge") == "slave":
             raise ValueError(f"Cell [{r1},{c1}] is a slave cell. Pass the origin (top-left) of the merge.")
-        mi = cell["merge"]
+        mi = cell.get("merge")
         if not isinstance(mi, dict) or (mi.get("rowspan", 1) <= 1 and mi.get("colspan", 1) <= 1):
             raise ValueError(f"Cell [{r1},{c1}] is not a merge origin.")
         er1, ec1 = mi.get("r1", r1), mi.get("c1", c1)
         er2, ec2 = mi.get("r2", r1), mi.get("c2", c1)
         for r in range(er1, er2 + 1):
             for c in range(ec1, ec2 + 1):
-                target = _promote_implicit_cell(
-                    rows[r]["cells"][c],
-                    sheet.get("_implicit_cell_defaults"),
-                )
-                _cell_baseline(target)
+                target = _ensure_cell(sheet, r, c, capture_baseline=True)
                 target["merge"] = {}
         _mark_dirty(data, "structure", f"sheets/{sheet_name}/merges")
         return f"Unmerged [{er1},{ec1}]–[{er2},{ec2}] in sheet '{sheet_name}'."
@@ -5238,28 +5662,32 @@ def excel_merge_cells(
     # Merge
     if r2 is None or c2 is None:
         raise ValueError("r2 and c2 are required for merge. Pass unmerge=True to unmerge.")
-    if not (0 <= r1 <= r2 < n_rows):
-        raise ValueError(f"Row range [{r1}, {r2}] out of bounds (0–{n_rows-1})")
-    for r in range(r1, r2 + 1):
-        n_cols = len(rows[r]["cells"])
-        if not (0 <= c1 <= c2 < n_cols):
-            raise ValueError(f"Col range [{c1}, {c2}] out of bounds for row {r} (0–{n_cols-1})")
+    if r1 < 0 or c1 < 0 or r2 < 0 or c2 < 0:
+        raise ValueError("Merge coordinates must be non-negative.")
+    if r1 > r2 or c1 > c2:
+        raise ValueError(f"Merge range must be ordered, got [{r1},{c1}]–[{r2},{c2}].")
 
     # Reject overlap with any existing merged region (would corrupt the file)
     for r in range(r1, r2 + 1):
+        if r >= len(rows):
+            continue
+        cells = rows[r].get("cells", [])
         for c in range(c1, c2 + 1):
-            mi = rows[r]["cells"][c].get("merge")
+            if c >= len(cells):
+                continue
+            mi = cells[c].get("merge")
             if mi == "slave" or (isinstance(mi, dict)
                                  and (mi.get("rowspan", 1) > 1 or mi.get("colspan", 1) > 1)):
                 raise ValueError(
                     f"Range overlaps an existing merged region at [{r},{c}]. "
                     "Unmerge it first (excel_merge_cells with unmerge=True).")
 
-    origin = _promote_implicit_cell(
-        rows[r1]["cells"][c1],
-        sheet.get("_implicit_cell_defaults"),
-    )
-    _cell_baseline(origin)
+    for r in range(r1, r2 + 1):
+        for c in range(c1, c2 + 1):
+            _ensure_cell(sheet, r, c, capture_baseline=True)
+
+    rows = sheet["rows"]
+    origin = rows[r1]["cells"][c1]
     origin["merge"] = {
         "r1": r1, "c1": c1, "r2": r2, "c2": c2,
         "rowspan": r2 - r1 + 1, "colspan": c2 - c1 + 1,
@@ -5267,11 +5695,7 @@ def excel_merge_cells(
     for r in range(r1, r2 + 1):
         for c in range(c1, c2 + 1):
             if not (r == r1 and c == c1):
-                target = _promote_implicit_cell(
-                    rows[r]["cells"][c],
-                    sheet.get("_implicit_cell_defaults"),
-                )
-                _cell_baseline(target)
+                target = rows[r]["cells"][c]
                 target["merge"] = "slave"
     _mark_dirty(data, "structure", f"sheets/{sheet_name}/merges")
     return (
@@ -7081,8 +7505,6 @@ def excel_create_workbook(
     target_path: str | None = None,
 ) -> str:
     """Create a new in-memory workbook session; persistence still requires excel_save."""
-    import uuid
-
     extension = format.lower().lstrip(".")
     if extension not in {"xlsx", "xltx", "xlsm", "xltm"}:
         raise ValueError("format must be xlsx, xltx, xlsm, or xltm.")
@@ -7153,6 +7575,13 @@ def excel_create_workbook(
     session_key = f"new:{token}:{extension}"
     _store_session(session_key, data)
     _mark_dirty(data, "workbook", "workbook")
+    try:
+        _checkpoint_session(session_key, copy.deepcopy(data))
+    except Exception:
+        with _SESSION_LOCK:
+            _sessions.pop(session_key, None)
+        _delete_session_checkpoint(session_key)
+        raise
     return json.dumps({
         "session_key": session_key,
         "default_output_path": default_output,
@@ -7163,6 +7592,8 @@ def excel_create_workbook(
             "macros": extension in {"xlsm", "xltm"},
             "template_based": bool(selected_template),
             "requires_explicit_save": True,
+            "temporary_session_checkpoint": True,
+            "checkpoint_retention_hours": _SESSION_CHECKPOINT_RETENTION_SECONDS // 3600,
         },
     }, ensure_ascii=False)
 

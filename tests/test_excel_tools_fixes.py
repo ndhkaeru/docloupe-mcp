@@ -12,6 +12,7 @@ B3. Overlapping merges are rejected; editing a slave cell is rejected.
 C.  Internal hyperlinks, docProps and workbook view survive a round-trip;
     private keys are stripped from read-tool output.
 """
+import asyncio
 import io
 import json
 import re
@@ -368,12 +369,65 @@ def test_targeted_range_find_and_summary_tools(tmp_path):
     assert matches["matches"][0]["row_index"] == 1
     formulas = json.loads(M.excel_find_cells(key, "B3", match_in="formula"))
     assert formulas["matches"][0]["value"] == "=B3*2"
+    all_matches = json.loads(M.excel_find_cells(key, "B3", match_in="all"))
+    assert all_matches["count"] == 1
+    assert all_matches["matches"][0]["value"] == "=B3*2"
+    with pytest.raises(ValueError, match="'value', 'formula', 'all'"):
+        M.excel_find_cells(key, "B3", match_in="invalid")
     M.excel_close(key)
 
     summary = json.loads(M.excel_get_workbook_summary(str(src)))
     assert summary["sheet_count"] == 1
     assert summary["sheets"][0]["formula_count"] == 2
     assert summary["sheets"][0]["merged_ranges"] == 1
+
+
+def test_excel_tool_schemas_expose_edit_forms_and_find_enum():
+    tools = {tool.name: tool for tool in asyncio.run(M.mcp.list_tools())}
+    edit_items = tools["excel_edit_cells"].inputSchema["properties"]["edits"]["items"]
+    assert len(edit_items["anyOf"]) == 3
+    match_in = tools["excel_find_cells"].inputSchema["properties"]["match_in"]
+    assert match_in["enum"] == ["value", "formula", "all"]
+
+
+def test_excel_edit_cells_accepts_grouped_flat_and_a1_payloads(tmp_path, monkeypatch):
+    monkeypatch.setattr(M, "_SESSION_CHECKPOINT_DIRECTORY", tmp_path / "checkpoints")
+    created = json.loads(M.excel_create_workbook(sheet_names=["Data"]))
+    key = created["session_key"]
+    try:
+        result = json.loads(M.excel_edit_cells(key, "Data", [
+            {"row_index": 0, "edits": {"0": "grouped"}},
+            {"row_index": 0, "col_index": 1, "value": "flat"},
+            {"cell": "C1", "value": "a1"},
+        ]))
+        assert result["cells_updated"] == 3
+        assert json.loads(M.excel_get_cell(key, "Data", 0, 0))["value"] == "grouped"
+        assert json.loads(M.excel_get_cell(key, "Data", 0, 1))["value"] == "flat"
+        assert json.loads(M.excel_get_cell(key, "Data", 0, 2))["value"] == "a1"
+
+        with pytest.raises(ValueError, match="must use one of"):
+            M.excel_edit_cells(key, "Data", [{"value": "missing-coordinate"}])
+        with pytest.raises(ValueError, match="ambiguous"):
+            M.excel_edit_cells(key, "Data", [{"cell": "D1", "row_index": 0, "value": "x"}])
+    finally:
+        M.excel_close(key)
+
+
+def test_new_workbook_session_restores_from_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(M, "_SESSION_CHECKPOINT_DIRECTORY", tmp_path / "checkpoints")
+    created = json.loads(M.excel_create_workbook(sheet_names=["Data"]))
+    key = created["session_key"]
+    M.excel_edit_cells(key, "Data", [{"cell": "A1", "value": "survives restart"}])
+    M._checkpoint_all_new_sessions()
+    with M._SESSION_LOCK:
+        M._sessions.pop(key)
+
+    try:
+        restored = json.loads(M.excel_get_cell(key, "Data", 0, 0))
+        assert restored["value"] == "survives restart"
+        assert key in M._sessions
+    finally:
+        M.excel_close(key)
 
 def test_excel_table_defined_name_preview_and_markdown_range(tmp_path):
     src = tmp_path / "metadata.xlsx"
@@ -804,3 +858,34 @@ def test_excel_capture_failure_keeps_existing_output_and_cleans_workspace(tmp_pa
     assert output.read_bytes() == b"existing-output"
     assert workspaces and all(not workspace.exists() for workspace in workspaces)
     assert not list(tmp_path.glob(".capture.png.docloupe-*.tmp"))
+
+
+def test_excel_capture_falls_back_to_windows_excel(tmp_path, monkeypatch):
+    session_key = _capture_session(tmp_path)
+    output = tmp_path / "capture.png"
+    calls = []
+
+    def missing_soffice(_hint=None):
+        raise FileNotFoundError("LibreOffice missing")
+
+    def fake_excel_capture(workbook_path, pdf_path, png_path, timeout_seconds, cancel_event):
+        calls.append((workbook_path, pdf_path, png_path, timeout_seconds, cancel_event))
+        png_path.write_bytes(_fake_png(7, 5))
+
+    monkeypatch.setattr(M, "_find_soffice", missing_soffice)
+    monkeypatch.setattr(M.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(M, "_capture_with_windows_excel", fake_excel_capture)
+    monkeypatch.setattr(
+        M,
+        "reconstruct_excel",
+        lambda _data, target: Path(target).write_bytes(b"xlsx"),
+    )
+    try:
+        result = M.excel_capture(session_key, "Data", str(output), timeout_seconds=6.0)
+    finally:
+        M._sessions.pop(session_key, None)
+
+    assert "7×5px" in result
+    assert output.read_bytes() == _fake_png(7, 5)
+    assert len(calls) == 1
+    assert calls[0][3:] == (6.0, None)

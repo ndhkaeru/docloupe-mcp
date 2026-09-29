@@ -231,6 +231,28 @@ def test_merge_and_unmerge_across_implicit_cells(tmp_path):
     unmerged.close()
 
 
+def test_merge_materializes_missing_sparse_columns(tmp_path):
+    source = tmp_path / "minimal-sparse.xlsx"
+    output = tmp_path / "minimal-sparse-merged.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sparse"
+    worksheet["A1"] = "origin"
+    workbook.save(source)
+    workbook.close()
+    data = core.serialize_excel(str(source))
+    assert len(data["sheets"][0]["rows"][0]["cells"]) == 1
+
+    with _installed_session(data) as session_key:
+        M.excel_merge_cells(session_key, "Sparse", 0, 0, 0, 5)
+        core.reconstruct_excel(data, str(output))
+
+    merged = openpyxl.load_workbook(output)
+    assert "A1:F1" in {str(item) for item in merged["Sparse"].merged_cells.ranges}
+    assert merged["Sparse"]["A1"].value == "origin"
+    merged.close()
+
+
 def test_no_edit_reconstruction_remains_byte_identical(tmp_path):
     source = tmp_path / "exact-copy.xlsx"
     output = tmp_path / "exact-copy-output.xlsx"
