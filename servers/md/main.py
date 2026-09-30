@@ -1557,13 +1557,25 @@ def md_to_html(path: str, body_only: bool = False) -> str:
 
 @mcp.tool()
 def md_validate_diagram(path: str, diagram_index: int = 0) -> dict[str, Any]:
-    """Report whether diagram validation can run; returns skipped when the required external CLI is unavailable."""
+    """Validate a diagram with an installed CLI, or report an unavailable capability."""
     diagram = md_read_diagram(path, diagram_index)
     lang = diagram["diagram"]["language"]
     cli = "mmdc" if lang == "mermaid" else "plantuml" if lang in {"plantuml", "puml"} else "dot" if lang in {"dot", "graphviz"} else None
     if not cli or not shutil.which(cli):
         return {"path": diagram["path"], "ok": None, "skipped": True, "reason": f"{cli or lang} CLI is not installed", "diagram": diagram["diagram"]}
-    return {"path": diagram["path"], "ok": None, "skipped": True, "reason": "CLI validation is available but not run inline by this server", "diagram": diagram["diagram"]}
+    with tempfile.TemporaryDirectory(prefix=".docloupe-diagram-check-") as workspace:
+        source = Path(workspace) / ("diagram.puml" if cli == "plantuml" else "diagram.mmd" if cli == "mmdc" else "diagram.dot")
+        source.write_text(diagram["source"], encoding="utf-8")
+        output = source.with_suffix(".svg")
+        command = ([shutil.which(cli), "-i", str(source), "-o", str(output)] if cli == "mmdc" else
+                   [shutil.which(cli), "-Tsvg", str(source), "-o", str(output)] if cli == "dot" else
+                   [shutil.which(cli), "-checkonly", str(source)])
+        result = run_managed_process(command, timeout_seconds=30, capture_output=True,
+                                     text=True, encoding="utf-8", errors="replace")
+        valid = result.returncode == 0 and (cli == "plantuml" or output.is_file())
+        return {"path": diagram["path"], "ok": valid, "skipped": False,
+                "exit_code": result.returncode, "stderr": result.stderr,
+                "diagram": diagram["diagram"]}
 
 
 def _md_render_diagram_impl(
