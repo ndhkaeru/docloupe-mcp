@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import copy
+from collections import Counter
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import posixpath
@@ -1053,11 +1055,16 @@ def package_content_diff(before: str, after: str) -> dict:
 
 
 def _validate_package_xml(parts: dict[str, bytes]) -> None:
+    from core import _markup_compatibility_errors
+
     if isinstance(parts, _PackageParts) and parts.invalid_xml:
         name = sorted(parts.invalid_xml)[0]
         raise ValueError(f"Invalid XML package part: {name}")
     for name, raw in parts.items():
         if name.endswith((".xml", ".rels")) or name == "[Content_Types].xml":
+            issues = _markup_compatibility_errors(raw, name)
+            if issues:
+                raise ValueError("Invalid markup compatibility in package part: " + "; ".join(issues))
             if isinstance(parts, _PackageParts) and name in parts.xml_roots:
                 continue
             try:
@@ -1294,6 +1301,12 @@ def _worksheet_snapshot(
     if root is None:
         return {"missing": True, "cells": {}, "rows": {}}
     rels = _relationships(parts, target)
+    namespaces = {}
+    for event, value in ET.iterparse(io.BytesIO(parts[target]), events=("start-ns", "start")):
+        if event == "start":
+            break
+        namespaces[value[0] or ""] = value[1]
+    ignorable = root.attrib.get("{http://schemas.openxmlformats.org/markup-compatibility/2006}Ignorable", "")
     rows: dict[str, dict] = {}
     cells: dict[str, dict] = {}
     sheet_data = _child(root, "sheetData")
@@ -1317,6 +1330,8 @@ def _worksheet_snapshot(
     hyperlinks.sort(key=lambda value: json.dumps(value, sort_keys=True, ensure_ascii=False))
 
     return {
+        "root_attributes": dict(sorted(root.attrib.items())),
+        "ignorable_namespaces": {prefix: namespaces.get(prefix) for prefix in ignorable.split()},
         "sheet_properties": _xml_node(_child(root, "sheetPr")),
         "sheet_views": _xml_node(_child(root, "sheetViews")),
         "row_defaults": _xml_node(_child(root, "sheetFormatPr")),
@@ -1776,6 +1791,10 @@ def verify_xlsx_preservation(
         if left_sheet is None or right_sheet is None:
             changes.add(sheet_path, "worksheet", "critical", left_sheet, right_sheet)
             continue
+        _compare_mapping(changes, f"{sheet_path}/root_attributes", "worksheet_root_attributes", "high",
+                         left_sheet["root_attributes"], right_sheet["root_attributes"])
+        _compare_mapping(changes, f"{sheet_path}/ignorable_namespaces", "markup_compatibility", "critical",
+                         left_sheet["ignorable_namespaces"], right_sheet["ignorable_namespaces"])
         for key, category, severity in (
             ("sheet_properties", "sheet_properties", "high"),
             ("sheet_views", "sheet_views", "medium"),
@@ -1794,7 +1813,11 @@ def verify_xlsx_preservation(
             ("extensions", "worksheet_extensions", "high"),
         ):
             changes.add(f"{sheet_path}/{key}", category, severity, left_sheet.get(key), right_sheet.get(key))
-        _compare_mapping(changes, f"{sheet_path}/rows", "row_attributes", "high", left_sheet["rows"], right_sheet["rows"])
+        for row_number in sorted(set(left_sheet["rows"]) | set(right_sheet["rows"])):
+            _compare_mapping(
+                changes, f"{sheet_path}/rows/{row_number}", "row_attributes", "high",
+                left_sheet["rows"].get(row_number) or {}, right_sheet["rows"].get(row_number) or {},
+            )
         _compare_cells(changes, sheet_name, left_sheet["cells"], right_sheet["cells"])
 
     left_advanced = left["advanced_parts"]
@@ -1803,12 +1826,34 @@ def verify_xlsx_preservation(
         severity = "critical" if name.startswith(("xl/vbaProject", "_xmlsignatures/", "xl/activeX/", "xl/embeddings/")) else "high"
         changes.add(f"package/{name}", "advanced_part", severity, left_advanced.get(name), right_advanced.get(name))
 
-    for key, value in part_diff["relationship_changes"]["added"].items():
-        changes.add(f"package/relationships/{key}", "relationships", "high", None, value)
-    for key, value in part_diff["relationship_changes"]["removed"].items():
-        changes.add(f"package/relationships/{key}", "relationships", "high", value, None)
+    def identity(key, value):
+        return key.split("#", 1)[0], json.dumps(value, sort_keys=True)
+
+    before_relationships = Counter(identity(key, value) for key, value in left_inspection.relationship_records.items())
+    after_relationships = Counter(identity(key, value) for key, value in right_inspection.relationship_records.items())
+    removed_relationships = before_relationships - after_relationships
+    added_relationships = after_relationships - before_relationships
+
+    def unmatched(surplus, key, value):
+        marker = identity(key, value)
+        if surplus[marker]:
+            surplus[marker] -= 1
+            return value
+        return None
+
     for key, value in part_diff["relationship_changes"]["modified"].items():
-        changes.add(f"package/relationships/{key}", "relationships", "high", value["before"], value["after"])
+        old = unmatched(removed_relationships, key, value["before"])
+        new = unmatched(added_relationships, key, value["after"])
+        if old is not None or new is not None:
+            changes.add(f"package/relationships/{key}", "relationships", "high", old, new)
+    for key, value in part_diff["relationship_changes"]["added"].items():
+        new = unmatched(added_relationships, key, value)
+        if new is not None:
+            changes.add(f"package/relationships/{key}", "relationships", "high", None, new)
+    for key, value in part_diff["relationship_changes"]["removed"].items():
+        old = unmatched(removed_relationships, key, value)
+        if old is not None:
+            changes.add(f"package/relationships/{key}", "relationships", "high", old, None)
     for key, value in part_diff["content_type_changes"]["added"].items():
         changes.add(f"package/content_types/{key}", "content_types", "high", None, value)
     for key, value in part_diff["content_type_changes"]["removed"].items():

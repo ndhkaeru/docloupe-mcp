@@ -310,6 +310,106 @@ def test_mermaid_render_uses_staging_and_removes_workspace(tmp_path, monkeypatch
     assert not list(tmp_path.glob(".docloupe-mermaid-*"))
 
 
+@pytest.mark.parametrize("source", [
+    b"# A\n\nbody", b"# A\r\n\r\nbody",
+    b"\xef\xbb\xbf# A\r\n\r\nbody",
+])
+def test_append_preserves_representation_and_separates_eof(tmp_path, source):
+    path = tmp_path / "doc.md"
+    path.write_bytes(source)
+    M.md_append_to_section(str(path), "added", heading="A")
+    result = path.read_bytes()
+    assert result.startswith(b"\xef\xbb\xbf") == source.startswith(b"\xef\xbb\xbf")
+    assert not result.endswith(b"\n")
+    assert b"bodyadded" not in result
+    assert b"body\r\nadded" in result if b"\r\n" in source else b"body\nadded" in result
+    if b"\r\n" in source:
+        assert b"\n" not in result.replace(b"\r\n", b"")
+
+
+def test_tangle_rejects_parent_and_symlink_escapes(tmp_path):
+    destination = tmp_path / "out"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    path = _write(tmp_path, "```python file=../outside/pwn.txt\n1\n```\n")
+    with pytest.raises(ValueError, match="escapes"):
+        M.md_tangle(path, str(destination))
+    assert not (outside / "pwn.txt").exists()
+    try:
+        (destination / "linked").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Directory symlinks unavailable")
+    Path(path).write_text("```python file=linked/pwn.txt\n1\n```\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="escapes"):
+        M.md_tangle(path, str(destination))
+    assert not (outside / "pwn.txt").exists()
+
+
+def test_table_pipes_and_single_cell_edit_leave_other_rows_unchanged(tmp_path):
+    original = "| First  | Second |\n| :---- | ---: |\n| a\\|b | `x|y` |\n| keep   | as-is |\n"
+    path = _write(tmp_path, original)
+    assert M.md_read_table(path)["rows"] == [[r"a\|b", "`x|y`"], ["keep", "as-is"]]
+    M.md_edit_table(path, op="set_cell", row=0, col=0, value="new|value")
+    assert Path(path).read_text(encoding="utf-8") == original.replace(r"a\|b", r"new\|value")
+    M.md_format_table(path)
+    assert M.md_read_table(path)["rows"][0] == [r"new\|value", "`x|y`"]
+
+
+def test_complex_frontmatter_is_rejected_without_mutation(tmp_path):
+    path = _write(tmp_path, "---\n# comment\nitems:\n  - value\n---\n# Body\n")
+    before = Path(path).read_bytes()
+    with pytest.raises(ValueError, match="Complex YAML"):
+        M.md_frontmatter(path, op="set", key="title", value="new")
+    assert Path(path).read_bytes() == before
+
+
+def test_links_skip_code_and_keep_parenthesized_destinations(tmp_path):
+    path = _write(tmp_path, "`[example](missing.md)`\n```md\n[example](missing.md)\n```\n[valid](https://example.com/a(b))\n![img](image(a).png)\n")
+    assert [item["target"] for item in M.md_list_links(path)["links"]] == ["https://example.com/a(b)"]
+    assert [item["src"] for item in M.md_list_images(path)["images"]] == ["image(a).png"]
+    validation = M.md_validate_links(path, check_remote=True)
+    assert validation["remote_checked"] is False and validation["remote_skipped"] == 1
+    M.md_rewrite_links(path, {"https://example.com/a(b)": "new.md"})
+    assert "[valid](new.md)" in Path(path).read_text(encoding="utf-8")
+    assert "`[example](missing.md)`" in Path(path).read_text(encoding="utf-8")
+
+
+def test_mixed_newlines_reject_mutation_without_writing(tmp_path):
+    path = tmp_path / "mixed.md"
+    original = b"# A\r\n\nbody\r\n"
+    path.write_bytes(original)
+    with pytest.raises(ValueError, match="Mixed line endings"):
+        M.md_append_to_section(str(path), "more", heading="A")
+    assert path.read_bytes() == original
+
+
+def test_diagram_validation_runs_installed_cli(tmp_path, monkeypatch):
+    path = _write(tmp_path, "```mermaid\ngraph TD; A-->B\n```\n")
+    monkeypatch.setattr(M.shutil, "which", lambda _name: "fake-mmdc")
+
+    def fake_run(command, **_kwargs):
+        Path(command[command.index("-o") + 1]).write_text("<svg/>", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(M, "run_managed_process", fake_run)
+    result = M.md_validate_diagram(path)
+    assert result["ok"] is True and result["skipped"] is False
+
+
+def test_render_image_link_is_relative_to_document(tmp_path, monkeypatch):
+    path = _write(tmp_path, "```mermaid\ngraph TD; A-->B\n```\n")
+    output = tmp_path / "images" / "my chart.svg"
+    monkeypatch.setattr(M.shutil, "which", lambda _name: "fake-mmdc")
+
+    def fake_run(command, **_kwargs):
+        Path(command[command.index("-o") + 1]).write_text("<svg/>", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stderr="", process_tree_stopped=True)
+
+    monkeypatch.setattr(M, "run_managed_process", fake_run)
+    assert M.md_render_diagram(path, str(output), replace_with_image=True)["ok"] is True
+    assert "![diagram](images/my%20chart.svg)" in Path(path).read_text(encoding="utf-8")
+
+
 def test_mermaid_render_failure_keeps_existing_output(tmp_path, monkeypatch):
     markdown_path = _write(
         tmp_path,

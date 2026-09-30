@@ -173,12 +173,13 @@ def test_dimension_and_freeze_tools_record_inline_verifier_paths(tmp_path, monke
         "sheet_views",
     ]
     assert report["requested_semantic_paths"] == [
-        "sheets/Sheet/rows/0",
+        "sheets/Sheet/rows/0/height",
         "sheets/Sheet/columns",
         "sheets/Sheet/views",
     ]
     assert report["verification"]["requested_paths"] == [
-        "worksheets/Sheet/rows/1",
+        "worksheets/Sheet/rows/1/ht",
+        "worksheets/Sheet/rows/1/customHeight",
         "worksheets/Sheet/*",
         "worksheets/Sheet/sheet_views",
     ]

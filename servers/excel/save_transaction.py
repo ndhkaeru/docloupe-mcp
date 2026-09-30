@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from collections import Counter
 import os
+import posixpath
+import re
 import tempfile
 import time
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable
 
 from core import reconstruct_excel, serialize_excel
 from preservation import (
     _MemorySampler,
+    _workbook_snapshot,
     create_excel_backup,
     discard_excel_backup,
     inspect_workbook_pair,
@@ -169,6 +176,242 @@ def _verification_summary(
     }
 
 
+def _guard_advanced_package_parts(reference_path: str | None, staging: Path, allowed_deletions: set[str]) -> None:
+    if not reference_path or not zipfile.is_zipfile(reference_path):
+        return
+    protected_prefixes = (
+        "xl/drawings/", "xl/charts/", "xl/media/", "xl/printerSettings/",
+        "xl/vbaProject", "xl/externalLinks/", "xl/pivot", "xl/slicer",
+        "xl/activeX/", "xl/embeddings/", "_xmlsignatures/",
+    )
+    protected_parts = {"xl/calcChain.xml"}
+    with zipfile.ZipFile(reference_path) as before, zipfile.ZipFile(staging) as after:
+        old_parts = set(before.namelist())
+        new_parts = set(after.namelist())
+        missing = sorted(
+            part for part in old_parts - new_parts
+            if part not in allowed_deletions and (part in protected_parts or part.startswith(protected_prefixes))
+        )
+        macro_parts = {part for part in old_parts if part.startswith("xl/vbaProject")}
+        if macro_parts:
+            namespace = "http://schemas.openxmlformats.org/package/2006/content-types"
+            old_types = ET.fromstring(before.read("[Content_Types].xml"))
+            new_types = ET.fromstring(after.read("[Content_Types].xml"))
+            def workbook_type(root):
+                return next((node.get("ContentType") for node in root.findall(f"{{{namespace}}}Override")
+                             if node.get("PartName") == "/xl/workbook.xml"), None)
+            if workbook_type(old_types) != workbook_type(new_types):
+                missing.append("[Content_Types].xml: workbook macro content type")
+            if "xl/_rels/workbook.xml.rels" in old_parts and "xl/_rels/workbook.xml.rels" in new_parts:
+                def vba_targets(archive):
+                    root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+                    return sorted(node.get("Target") for node in root if (node.get("Type") or "").endswith("/vbaProject"))
+                if vba_targets(before) != vba_targets(after):
+                    missing.append("xl/_rels/workbook.xml.rels: VBA relationship")
+        if missing:
+            raise SaveTransactionError({
+                "code": "EXCEL_SAVE_ADVANCED_PARTS_LOST",
+                "message": "Staged workbook dropped advanced package content; source was not overwritten.",
+                "parts": missing,
+            })
+
+
+def _requested_package_additions(session_data: dict, before, after) -> list[str]:
+    relationship_base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+    dirty = set(session_data.get("_dirty_paths") or [])
+    before_snapshot = before.ensure_snapshot()
+    after_snapshot = after.ensure_snapshot()
+    old_sheets = {item["name"] for item in before_snapshot["workbook"]["sheets"]}
+    new_sheets = {item["name"]: item for item in after_snapshot["workbook"]["sheets"]}
+    expected_sheets = {
+        sheet["target"] for name, sheet in new_sheets.items()
+        if name not in old_sheets and f"sheets/{name}" in dirty
+    }
+    expected_links = Counter(
+        (sheet["name"], value.get("target"))
+        for sheet in session_data["sheets"]
+        for cell, value in (sheet.get("hyperlinks") or {}).items()
+        if f"sheets/{sheet['name']}/hyperlinks/{cell}" in dirty
+        and isinstance(value, dict) and value.get("target")
+    )
+    expected_tables = {
+        (sheet["name"], item.get("name"))
+        for sheet in session_data["sheets"]
+        for item in sheet.get("tables") or []
+        if f"sheets/{sheet['name']}/tables/{item.get('name')}" in dirty
+    }
+    sheet_names_by_part = {item["target"]: name for name, item in new_sheets.items()}
+
+    def related_sheet(source):
+        prefix = "xl/worksheets/_rels/"
+        if not source.startswith(prefix) or not source.endswith(".rels"):
+            return None
+        return sheet_names_by_part.get("xl/worksheets/" + source[len(prefix):-5])
+
+    def only_expected_relationships(sheet_name, expected):
+        old = (before_snapshot["worksheets"].get(sheet_name) or {}).get("relationships") or []
+        new = (after_snapshot["worksheets"].get(sheet_name) or {}).get("relationships") or []
+        old_records = Counter(json.dumps(item, sort_keys=True) for item in old)
+        new_records = Counter(json.dumps(item, sort_keys=True) for item in new)
+        additions = new_records - old_records
+        return not (old_records - new_records) and additions == expected
+
+    additions = []
+    new_parts = set(after.parts) - set(before.parts)
+    expected_sheet_relationships = {}
+    prior = Counter((key.split("#", 1)[0], json.dumps(value, sort_keys=True))
+                    for key, value in before.relationship_records.items())
+    after_records = Counter((key.split("#", 1)[0], json.dumps(value, sort_keys=True))
+                            for key, value in after.relationship_records.items())
+    before_records = prior.copy()
+    for key, record in after.relationship_records.items():
+        identity = key.split("#", 1)[0], json.dumps(record, sort_keys=True)
+        if prior[identity]:
+            prior[identity] -= 1
+            continue
+        previous = before.relationship_records.get(key)
+        if previous is not None and after_records[
+            (key.split("#", 1)[0], json.dumps(previous, sort_keys=True))
+        ] < before_records[(key.split("#", 1)[0], json.dumps(previous, sort_keys=True))]:
+            continue
+        source, _ = key.split("#", 1)
+        target = record.get("target") or ""
+        kind = record.get("type") or ""
+        if (kind == relationship_base + "worksheet" and source == "xl/_rels/workbook.xml.rels"
+                and record.get("target_mode") is None):
+            resolved = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl", target))
+            content_type = (after.content_type_records.get(f"Override:/{resolved}") or {}).get("ContentType")
+            if (resolved in expected_sheets and resolved in new_parts
+                    and f"Override:/{resolved}" not in before.content_type_records
+                    and content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"):
+                additions.extend((f"package/relationships/{key}", f"package/content_types/Override:/{resolved}"))
+        elif (kind == relationship_base + "hyperlink" and related_sheet(source)
+              and record.get("target_mode") == "External"
+              and expected_links[(related_sheet(source), target)] > 0):
+            expected_links[(related_sheet(source), target)] -= 1
+            additions.append(f"package/relationships/{key}")
+            expected = {"type": record["type"], "target": target, "external": True}
+            expected_sheet_relationships.setdefault(related_sheet(source), []).append(expected)
+        elif (kind == relationship_base + "table" and expected_tables and related_sheet(source)
+              and record.get("target_mode") is None):
+            resolved = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl/worksheets", target))
+            if resolved in new_parts and resolved.startswith("xl/tables/"):
+                root = ET.fromstring(after.parts[resolved])
+                content_type = (after.content_type_records.get(f"Override:/{resolved}") or {}).get("ContentType")
+                if ((related_sheet(source), root.get("name")) in expected_tables
+                        and f"Override:/{resolved}" not in before.content_type_records
+                        and content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"):
+                    additions.extend((f"package/relationships/{key}",
+                                      f"package/content_types/Override:/{resolved}"))
+                    expected = {"type": record["type"], "target": resolved, "external": False}
+                    expected_sheet_relationships.setdefault(related_sheet(source), []).append(expected)
+    for sheet_name, records in expected_sheet_relationships.items():
+        expected = Counter(json.dumps(item, sort_keys=True) for item in records)
+        if only_expected_relationships(sheet_name, expected):
+            additions.append(f"worksheets/{sheet_name}/relationships")
+    return additions
+
+
+def _stage_row_heights(session_data: dict, reference_path: str | None, staging: Path) -> bool:
+    dirty_paths = session_data.get("_dirty_paths") or []
+    if (not reference_path or not dirty_paths
+            or set(session_data.get("_dirty_features") or []) != {"row_properties"}
+            or (session_data.get("_package_edits") or {}).get("upsert")
+            or (session_data.get("_package_edits") or {}).get("delete")):
+        return False
+    row_paths = [re.fullmatch(r"sheets/([^/]+)/rows/(\d+)/height", path) for path in dirty_paths]
+    if any(match is None for match in row_paths):
+        return False
+
+    rows_by_sheet = {sheet["name"]: sheet["rows"] for sheet in session_data["sheets"]}
+    with zipfile.ZipFile(reference_path) as source:
+        if any(name.startswith("_xmlsignatures/") for name in source.namelist()):
+            raise SaveTransactionError({
+                "code": "EXCEL_SAVE_REQUIRES_RESIGNING",
+                "message": "Editing this signed workbook invalidates its package signature; no file was published.",
+            })
+        metadata = {name: source.read(name) for name in ("xl/workbook.xml", "xl/_rels/workbook.xml.rels")}
+        sheet_targets = {item["name"]: item["target"] for item in _workbook_snapshot(metadata)["sheets"]}
+        updates: dict[str, dict[int, float | None]] = {}
+        for match in row_paths:
+            sheet_name, index_text = match.groups()
+            row_index = int(index_text)
+            if sheet_name not in rows_by_sheet or row_index >= len(rows_by_sheet[sheet_name]):
+                raise SaveTransactionError({"code": "EXCEL_SAVE_ROW_NOT_FOUND", "message": "Edited row is absent from the session."})
+            target = sheet_targets.get(sheet_name)
+            if not target or target not in source.namelist():
+                raise SaveTransactionError({"code": "EXCEL_SAVE_SHEET_NOT_FOUND", "message": "Edited worksheet is absent from the package."})
+            height = rows_by_sheet[sheet_name][row_index].get("h")
+            if height is not None and (not isinstance(height, (int, float)) or not math.isfinite(height)):
+                raise ValueError("Row height must be a finite number or null.")
+            updates.setdefault(target, {})[row_index + 1] = height
+
+        row_tag = re.compile(rb"<(?:[A-Za-z_][\w.-]*:)?row(?=[\s/>])(?:\"[^\"]*\"|'[^']*'|[^'\">])*?>", re.DOTALL)
+        row_number = re.compile(rb"(?<![\w:.-])r\s*=\s*([\"'])(\d+)\1")
+        height_attrs = re.compile(rb"\s+(?:ht|customHeight)\s*=\s*(?:\"[^\"]*\"|'[^']*')")
+        sheet_data_tag = re.compile(rb"<(?P<prefix>[A-Za-z_][\w.-]*:)?sheetData(?=[\s/>])(?:\"[^\"]*\"|'[^']*'|[^'\">])*?>", re.DOTALL)
+        with zipfile.ZipFile(staging, "w") as output:
+            output.comment = source.comment
+            for info in source.infolist():
+                raw = source.read(info.filename)
+                pending = updates.get(info.filename)
+                if pending:
+                    sheet_data = sheet_data_tag.search(raw)
+                    if sheet_data is None:
+                        raise SaveTransactionError({"code": "EXCEL_SAVE_SHEET_DATA_NOT_FOUND", "message": "Worksheet has no sheetData element."})
+                    prefix = sheet_data.group("prefix") or b""
+                    closing = b"</" + prefix + b"sheetData>"
+                    if sheet_data.group(0).endswith(b"/>"):
+                        body_start = sheet_data.end()
+                        body_end = body_start
+                    else:
+                        body_start = sheet_data.end()
+                        body_end = raw.find(closing, body_start)
+                        if body_end < 0:
+                            raise SaveTransactionError({"code": "EXCEL_SAVE_SHEET_DATA_NOT_FOUND", "message": "Worksheet sheetData is not closed."})
+                    body = raw[body_start:body_end]
+                    seen = set()
+
+                    def change_row(found):
+                        tag = found.group(0)
+                        number = row_number.search(tag)
+                        index = int(number.group(2)) if number else None
+                        if index not in pending:
+                            return tag
+                        if index in seen:
+                            raise SaveTransactionError({"code": "EXCEL_SAVE_DUPLICATE_ROW", "message": "Worksheet has duplicate edited rows."})
+                        seen.add(index)
+                        tag = height_attrs.sub(b"", tag)
+                        height = pending[index]
+                        if height is None:
+                            return tag
+                        insertion = f' ht="{height}" customHeight="1"'.encode("ascii")
+                        offset = -2 if tag.endswith(b"/>") else -1
+                        return tag[:offset] + insertion + tag[offset:]
+
+                    body = row_tag.sub(change_row, body)
+                    for index in sorted(set(pending) - seen, reverse=True):
+                        height = pending[index]
+                        if height is None:
+                            continue
+                        new_row = (b"<" + prefix + b"row r=\"" + str(index).encode("ascii")
+                                   + f'\" ht="{height}" customHeight="1"/>'.encode("ascii"))
+                        insertion = len(body)
+                        for found in row_tag.finditer(body):
+                            number = row_number.search(found.group(0))
+                            if number and int(number.group(2)) > index:
+                                insertion = found.start()
+                                break
+                        body = body[:insertion] + new_row + body[insertion:]
+                    if sheet_data.group(0).endswith(b"/>"):
+                        raw = (raw[:sheet_data.start()] + sheet_data.group(0)[:-2] + b">"
+                               + body + closing + raw[body_end:])
+                    else:
+                        raw = raw[:body_start] + body + raw[body_end:]
+                output.writestr(info, raw)
+    return True
+
+
 def execute_save_stage(
     session_data: dict,
     *,
@@ -184,7 +427,15 @@ def execute_save_stage(
 ) -> dict[str, Any]:
     staging = Path(staging_path).expanduser().resolve()
     to_write, sheet_filter_merged = _merge_filtered_session(session_data)
-    warnings = list(reconstruct(to_write, str(staging)) or [])
+    if reconstruct is reconstruct_excel and _stage_row_heights(to_write, verification_reference_path, staging):
+        warnings = []
+    else:
+        warnings = list(reconstruct(to_write, str(staging)) or [])
+    _guard_advanced_package_parts(
+        verification_reference_path,
+        staging,
+        set((to_write.get("_package_edits") or {}).get("delete") or []),
+    )
 
     left_inspection = None
     right_inspection = None
@@ -215,6 +466,11 @@ def execute_save_stage(
             memory_sampler.finish()
             raise
         metadata_seconds = time.perf_counter() - metadata_started_at
+        if verify is verify_xlsx_preservation:
+            requested_paths = list(requested_paths)
+            for path in _requested_package_additions(session_data, left_inspection, right_inspection):
+                if path not in requested_paths:
+                    requested_paths.append(path)
 
     try:
         signature_kwargs = {}
@@ -284,6 +540,8 @@ def execute_save_stage(
                 "reference_path": verification_reference_path,
                 "requested_paths": requested_paths,
             }
+            if intentional_edit and verification_reference_path:
+                warnings.append("Preservation verification was not run for this edit; inspect the saved copy before relying on it.")
     finally:
         if left_inspection is not None:
             left_inspection.release_raw_parts()

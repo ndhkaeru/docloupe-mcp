@@ -148,8 +148,9 @@ def _check_supported(path) -> None:
     ext = Path(str(path)).suffix.lower()
     if ext in _LEGACY_OR_BINARY_EXTS:
         raise ValueError(
-            f"'{ext}' files are not supported by the edit engine. Use convert_to_markdown "
-            "for read-only extraction, or convert to an OOXML workbook (.xlsx/.xlsm/.xltx/.xltm).")
+            f"'{ext}' files are not supported by this engine, including its read-only tools. "
+            "Convert externally to an OOXML workbook (.xlsx/.xlsm/.xltx/.xltm) first; "
+            "conversion is not guaranteed to preserve every feature.")
 
 
 def _session_checkpoint_paths(session_key: str) -> tuple[Path, Path] | None:
@@ -2283,12 +2284,13 @@ IMPORTANT — writing values that start with = + - :
     by the converter.
   • Session/edit/save tools support OOXML Excel packages: .xlsx, .xlsm,
     .xltx, and .xltm. Macro/template parts are preserved best-effort.
-    Legacy/binary .xls and .xlsb need read-only conversion or conversion to
-    OOXML before editing.
+    Legacy/binary .xls and .xlsb are not readable by these tools; convert
+    externally to OOXML first (conversion is not a lossless round-trip).
   • excel_load with sheet_name loads ONLY that sheet, but excel_save merges
     the other sheets back from disk automatically — nothing is lost.
-  • excel_save validates the generated .xlsx before replacing the destination.
-    If validation fails, the existing destination file is left untouched.
+  • excel_save validates the generated package before replacing the destination.
+    Unrelated row-property edits run preservation verification even when
+    verify_preservation=false; failures leave the destination untouched.
   • Advanced DrawingML/charts/images/unknown OOXML parts are preserved
     best-effort. Use excel_validate_workbook and excel_verify_preservation for risky
     files before trusting a save workflow.
@@ -2743,7 +2745,12 @@ def _save_verifier_patterns(dirty_paths: list[str], dirty_features: list[str]) -
                 add(f"{worksheet}/cells/*/style")
         elif head == "rows":
             if len(tail) >= 2 and tail[1].isdigit():
-                add(f"{worksheet}/rows/{int(tail[1]) + 1}")
+                row_path = f"{worksheet}/rows/{int(tail[1]) + 1}"
+                attributes = tail[2:]
+                if attributes == ["height"]:
+                    add(row_path + "/ht", row_path + "/customHeight")
+                elif len(attributes) == 2 and attributes[0] == "attributes":
+                    add(row_path + "/" + attributes[1])
             else:
                 add(worksheet + "/*")
         elif head == "columns":
@@ -2761,6 +2768,8 @@ def _save_verifier_patterns(dirty_paths: list[str], dirty_features: list[str]) -
                 "package/relationships/*",
                 "package/content_types/*",
             )
+        elif head == "hyperlinks" and len(tail) == 2:
+            add(f"{worksheet}/hyperlinks", f"{worksheet}/cells/{tail[1]}")
         elif head in worksheet_parts:
             add(f"{worksheet}/{worksheet_parts[head]}")
 
@@ -2893,6 +2902,9 @@ def _prepare_save_transaction(
         for package_path in package_paths:
             if package_path not in requested_semantic_paths:
                 requested_semantic_paths.append(package_path)
+        intentional_edit = bool(dirty_features or dirty_paths or package_paths)
+        unrelated_row_edit = bool(reference and dirty_features and set(dirty_features) == {"row_properties"})
+        effective_verification = bool(verify_preservation or unrelated_row_edit)
         staging = create_staging_path(destination)
         return {
             "session_key": resolved_session,
@@ -2903,13 +2915,13 @@ def _prepare_save_transaction(
             "verification_reference": reference,
             "verification_reference_state": file_state(reference) if reference else None,
             "report_format": normalized_format,
-            "verify_preservation": bool(verify_preservation),
+            "verify_preservation": effective_verification,
             "max_differences": int(max_differences),
             "dirty_features": dirty_features,
             "dirty_paths": dirty_paths,
             "requested_semantic_paths": requested_semantic_paths,
             "requested_paths": requested_paths,
-            "intentional_edit": bool(dirty_features or dirty_paths or package_paths),
+            "intentional_edit": intentional_edit,
         }
     except BaseException:
         remove_staging_path(staging)
@@ -2930,6 +2942,7 @@ def _save_stage_payload(transaction: dict) -> dict:
 
 def _commit_save_transaction(transaction: dict, stage_result: dict) -> str:
     require_preservation_success(stage_result)
+    transaction["requested_paths"] = stage_result["verification"].get("requested_paths", transaction["requested_paths"])
     destination = transaction["destination"]
     reference = transaction["verification_reference"]
     backup = commit_staging_file(
@@ -5353,9 +5366,16 @@ def excel_edit_cells(
     zero-based coordinates, or the legacy grouped-by-row form.
     """
     data = _get_session(session_key)
-    sheet = _find_sheet(data, sheet_name)
+    staged = {
+        **data,
+        "sheets": [copy.deepcopy(item) if item["name"] == sheet_name else item for item in data["sheets"]],
+        "_dirty_features": list(data.get("_dirty_features") or []),
+        "_dirty_paths": list(data.get("_dirty_paths") or []),
+    }
+    sheet = _find_sheet(staged, sheet_name)
     changes = []
     edited_rows = set()
+    edited_cells = set()
     for row_index, col_index, value in _normalize_cell_edits(edits):
         cell = _ensure_cell(sheet, row_index, col_index, capture_baseline=True)
         if cell.get("merge") == "slave":
@@ -5383,12 +5403,21 @@ def excel_edit_cells(
             cell.pop("cached_value", None)
             cell.pop("cached_value_state", None)
         path = f"sheets/{sheet_name}/cells/{_cell_coord(row_index, col_index)}"
-        _mark_dirty(data, "cells", path)
+        _mark_dirty(staged, "cells", path)
         after = _cell_public_view(cell, sheet=sheet, coord=_cell_coord(row_index, col_index),
                                   include_rich_text=True, include_formula_cache=True,
                                   include_semantics=True)
         changes.append({"path": path, "before": before, "after": after})
         edited_rows.add(row_index)
+        edited_cells.add((row_index, col_index))
+    original_sheet = _find_sheet(data, sheet_name)
+    for row_index, col_index in edited_cells:
+        original = _ensure_cell(original_sheet, row_index, col_index, capture_baseline=True)
+        updated = sheet["rows"][row_index]["cells"][col_index]
+        original.clear()
+        original.update(updated)
+    data["_dirty_features"] = staged["_dirty_features"]
+    data["_dirty_paths"] = staged["_dirty_paths"]
     if _session_checkpoint_paths(session_key) is not None:
         _checkpoint_session(session_key, copy.deepcopy(data))
     return json.dumps({
@@ -6141,7 +6170,7 @@ def excel_set_dimension(
         if not (0 <= index < len(rows)):
             raise ValueError(f"row index {index} out of range (0–{len(rows)-1})")
         rows[index]["h"] = size
-        _mark_dirty(data, "row_properties", f"sheets/{sheet_name}/rows/{index}")
+        _mark_dirty(data, "row_properties", f"sheets/{sheet_name}/rows/{index}/height")
         return f"Set row {index} height to {size!r} in sheet '{sheet_name}'."
     elif axis == "col":
         col_letter = openpyxl.utils.get_column_letter(index + 1)
@@ -6183,7 +6212,7 @@ def excel_set_row_height(
         if not (0 <= idx < len(rows)):
             raise ValueError(f"row index {idx} out of range (0–{len(rows)-1})")
         rows[idx]["h"] = height
-        _mark_dirty(data, "row_properties", f"sheets/{sheet_name}/rows/{idx}")
+        _mark_dirty(data, "row_properties", f"sheets/{sheet_name}/rows/{idx}/height")
         updated += 1
     return f"Set height for {updated} row(s) in sheet '{sheet_name}'."
 
@@ -8195,7 +8224,8 @@ def excel_set_hyperlink(
     """Partially set external/internal hyperlink metadata on one cell."""
     data = _get_session(session_key)
     sheet, row_index, col_index, cell_data = _cell_from_a1(data, sheet_name, cell, create=True)
-    links = sheet.setdefault("hyperlinks", {})
+    links = sheet.get("hyperlinks") or {}
+    sheet["hyperlinks"] = links
     before = copy.deepcopy(links.get(cell))
     item = copy.deepcopy(before or {})
     for key, value in {
@@ -8602,6 +8632,13 @@ def excel_set_row_properties(session_key: str, sheet_name: str, row_index: int, 
     aliases = {"height": "h", "outlineLevel": "outline"}
     for key, value in properties.items():
         row[aliases.get(key, key)] = copy.deepcopy(value)
+    for key in properties:
+        attribute = aliases.get(key, key)
+        if attribute == "h":
+            _mark_dirty(data, "row_properties", f"sheets/{sheet_name}/rows/{row_index}/height")
+        else:
+            xml_attribute = {"outline": "outlineLevel"}.get(attribute, attribute)
+            _mark_dirty(data, "row_properties", f"sheets/{sheet_name}/rows/{row_index}/attributes/{xml_attribute}")
     return _mutation_result(data, "row_properties", before, row, f"sheets/{sheet_name}/rows/{row_index}/properties")
 
 

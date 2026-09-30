@@ -13,7 +13,7 @@ from html import escape
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 _SERVER_DIRECTORY = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SERVER_DIRECTORY))
@@ -63,7 +63,7 @@ def _resolve_path(path: str) -> Path:
 
 def _decode_fuzzy(data: bytes) -> tuple[str, str]:
     if data.startswith(b"\xef\xbb\xbf"):
-        return data[3:].decode("utf-8", errors="replace"), "UTF-8"
+        return data[3:].decode("utf-8", errors="replace"), "UTF-8-BOM"
     if data.startswith(b"\xff\xfe"):
         return data[2:].decode("utf-16-le", errors="replace"), "UTF-16LE"
     if data.startswith(b"\xfe\xff"):
@@ -75,6 +75,8 @@ def _decode_fuzzy(data: bytes) -> tuple[str, str]:
 
 
 def _encode_fuzzy(content: str, encoding: str) -> bytes:
+    if encoding == "UTF-8-BOM":
+        return b"\xef\xbb\xbf" + content.encode("utf-8")
     if encoding == "WINDOWS-1252":
         return content.encode("cp1252")
     if encoding == "UTF-16LE":
@@ -117,10 +119,29 @@ def _load_markdown_file(path_value: str) -> tuple[Path, str, str, int, int]:
 
 def _write_markdown_file(path: Path, content: str, encoding: str) -> dict[str, Any]:
     before = path.read_bytes()
+    original, _ = _decode_fuzzy(before)
+    if "\r\n" in original and "\n" in original.replace("\r\n", "") and content != original:
+        raise ValueError("Mixed line endings cannot be safely mutated without explicit normalization")
+    if original and content:
+        if original.endswith("\n") and not content.endswith("\n"):
+            content += "\n"
+        elif not original.endswith("\n"):
+            content = content.rstrip("\n")
+    if "\r\n" in original and "\n" not in original.replace("\r\n", ""):
+        content = re.sub(r"(?<!\r)\n", "\r\n", content)
     after = _encode_fuzzy(content, encoding)
     changed = before != after
     if changed:
-        path.write_bytes(after)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(after)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
     return {"changed": changed, "bytes_before": len(before), "bytes_written": len(after)}
 
 
@@ -284,6 +305,8 @@ def _replace_line_range(content: str, start_line: int, end_line: int, replacemen
     offsets = _line_start_offsets(content)
     start_byte = _line_start_offset(offsets, start_line, len(content))
     end_byte = _line_start_offset(offsets, end_line + 1, len(content)) if start_line <= end_line else start_byte
+    if start_line > end_line and start_byte == len(content) and content and not content.endswith("\n") and replacement:
+        replacement = "\n" + replacement.lstrip("\n")
     return content[:start_byte] + replacement + content[end_byte:]
 
 
@@ -302,9 +325,41 @@ def _normalize_block(content: str, trailing_newline: bool = True) -> str:
     return value + "\n" if value and trailing_newline else value
 
 
+def _pipe_cell_spans(line: str) -> list[tuple[int, int]]:
+    start = 0
+    spans = []
+    index = 0
+    code_ticks = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "`":
+            end = index
+            while end < len(line) and line[end] == "`":
+                end += 1
+            length = end - index
+            if code_ticks == length:
+                code_ticks = 0
+            elif not code_ticks:
+                code_ticks = length
+            index = end
+            continue
+        if char == "|" and not code_ticks:
+            spans.append((start, index))
+            start = index + 1
+        index += 1
+    spans.append((start, len(line)))
+    if spans and not line[:spans[0][1]].strip():
+        spans.pop(0)
+    if spans and not line[spans[-1][0]:].strip():
+        spans.pop()
+    return spans
+
+
 def _parse_pipe_row(line: str) -> list[str]:
-    stripped = line.strip().strip("|")
-    return [cell.strip() for cell in stripped.split("|")]
+    return [line[start:end].strip() for start, end in _pipe_cell_spans(line)]
 
 
 def _is_table_separator(line: str) -> bool:
@@ -327,6 +382,8 @@ def _find_tables(content: str) -> list[dict[str, Any]]:
             end_index += 1
         header = _parse_pipe_row(lines[index])
         rows = [_parse_pipe_row(line) for line in lines[index + 2 : end_index + 1]]
+        if len(_parse_pipe_row(lines[index + 1])) != len(header) or any(len(row) != len(header) for row in rows):
+            raise ValueError(f"Malformed table at line {start}: cell count differs from header")
         tables.append({
             "index": len(tables),
             "start_line": start,
@@ -358,7 +415,9 @@ def _table_alignments(separator: str, columns: int) -> list[str]:
 
 def _render_table(headers: list[str], rows: list[list[str]], alignments: list[str] | None = None) -> str:
     columns = len(headers)
-    normalized_rows = [(row + [""] * columns)[:columns] for row in rows]
+    if any(len(row) != columns for row in rows):
+        raise ValueError("Table row cell count differs from header")
+    normalized_rows = rows
     widths = [max(len(str(headers[col])), *(len(str(row[col])) for row in normalized_rows), 3) for col in range(columns)]
     alignments = (alignments or ["left"] * columns + ["left"] * columns)[:columns]
 
@@ -846,7 +905,9 @@ def md_edit_table(path: str, op: str, table_index: int = 0, heading: str | None 
 
     def col_index(column: int | str | None) -> int:
         if isinstance(column, int):
-            return column
+            if 0 <= column < len(headers):
+                return column
+            raise ValueError("Column index is outside the table")
         if isinstance(column, str) and column in headers:
             return headers.index(column)
         raise ValueError("A valid col index or header name is required")
@@ -854,7 +915,19 @@ def md_edit_table(path: str, op: str, table_index: int = 0, heading: str | None 
     if op == "set_cell":
         if row is None:
             raise ValueError("row is required")
-        rows[row][col_index(col)] = value
+        if not 0 <= row < len(rows):
+            raise ValueError("Row index is outside the table")
+        column = col_index(col)
+        line = raw[row + 2]
+        start, end = _pipe_cell_spans(line)[column]
+        original = line[start:end]
+        leading = original[:len(original) - len(original.lstrip())]
+        trailing = original[len(original.rstrip()):]
+        replacement = value.replace("|", "\\|") if not re.search(r"`+[^`]*\|[^`]*`+", value) else value
+        updated_line = line[:start] + leading + replacement + trailing + line[end:]
+        updated = _replace_line_range(content, table["start_line"] + row + 2, table["start_line"] + row + 2, updated_line + "\n")
+        write = _write_markdown_file(resolved_path, updated, encoding)
+        return {"success": True, "path": str(resolved_path), **write, "bytes_before": size, "op": op, "table_index": table["index"]}
     elif op == "add_row":
         rows.append((values or []).copy())
     elif op == "add_col":
@@ -996,19 +1069,118 @@ def md_insert_code_block(path: str, source: str, info: str = "", heading: str | 
     return {"success": True, "path": str(resolved_path), **write, "bytes_before": size, "inserted_line": insert_line, "info": info}
 
 
+def _link_lines(content: str):
+    fence = None
+    for number, line in enumerate(_to_lines(content), start=1):
+        match = re.match(r"^\s*([`~]{3,})", line)
+        if match:
+            marker = match.group(1)
+            if fence is None:
+                fence = marker
+            elif marker[0] == fence[0] and len(marker) >= len(fence):
+                fence = None
+            continue
+        if fence is None:
+            yield number, line.rstrip("\r")
+
+
+def _inline_links(line: str):
+    index = 0
+    code_ticks = 0
+    while index < len(line):
+        if line[index] == "\\":
+            index += 2
+            continue
+        if line[index] == "`":
+            end = index
+            while end < len(line) and line[end] == "`":
+                end += 1
+            width = end - index
+            if code_ticks == width:
+                code_ticks = 0
+            elif not code_ticks:
+                code_ticks = width
+            index = end
+            continue
+        image = line.startswith("![", index)
+        if code_ticks or (not image and line[index] != "["):
+            index += 1
+            continue
+        label_start = index + (2 if image else 1)
+        cursor = label_start
+        depth = 1
+        while cursor < len(line) and depth:
+            if line[cursor] == "\\":
+                cursor += 2
+                continue
+            if line[cursor] == "[":
+                depth += 1
+            elif line[cursor] == "]":
+                depth -= 1
+            cursor += 1
+        if depth or cursor >= len(line) or line[cursor] != "(":
+            index += 1
+            continue
+        label_end = cursor - 1
+        cursor += 1
+        while cursor < len(line) and line[cursor].isspace():
+            cursor += 1
+        angled = cursor < len(line) and line[cursor] == "<"
+        if angled:
+            cursor += 1
+        start = cursor
+        nesting = 0
+        while cursor < len(line):
+            char = line[cursor]
+            if char == "\\":
+                cursor += 2
+                continue
+            if angled and char == ">":
+                break
+            if not angled:
+                if char == "(":
+                    nesting += 1
+                elif char == ")":
+                    if nesting == 0:
+                        break
+                    nesting -= 1
+                elif char.isspace() and nesting == 0:
+                    break
+            cursor += 1
+        end = cursor
+        if angled:
+            if cursor >= len(line) or line[cursor] != ">":
+                index += 1
+                continue
+            cursor += 1
+        while cursor < len(line) and line[cursor].isspace():
+            cursor += 1
+        if cursor < len(line) and line[cursor] in "\"'":
+            quote = line[cursor]
+            cursor += 1
+            while cursor < len(line) and line[cursor] != quote:
+                cursor += 2 if line[cursor] == "\\" else 1
+            cursor += 1
+            while cursor < len(line) and line[cursor].isspace():
+                cursor += 1
+        if cursor >= len(line) or line[cursor] != ")" or nesting:
+            index += 1
+            continue
+        yield {"image": image, "text": line[label_start:label_end],
+               "target": line[start:end], "start": start, "end": end}
+        index = cursor + 1
+
+
 @mcp.tool()
 def md_list_links(path: str) -> dict[str, Any]:
     """List inline and reference Markdown links with line numbers."""
     resolved_path, content, _, _, _ = _load_markdown_file(path)
     links = []
-    inline_re = re.compile(r"!?\[([^\]]*)\]\(([^)]+)\)")
     ref_re = re.compile(r"^\s*\[([^\]]+)\]:\s*(\S+)")
-    for line_number, raw_line in enumerate(_to_lines(content), start=1):
-        line = raw_line.rstrip("\r")
-        for match in inline_re.finditer(line):
-            if match.group(0).startswith("!"):
-                continue
-            links.append({"type": "inline", "line": line_number, "text": match.group(1), "target": match.group(2)})
+    for line_number, line in _link_lines(content):
+        for match in _inline_links(line):
+            if not match["image"]:
+                links.append({"type": "inline", "line": line_number, "text": match["text"], "target": match["target"]})
         match = ref_re.match(line)
         if match:
             links.append({"type": "reference", "line": line_number, "text": match.group(1), "target": match.group(2)})
@@ -1019,11 +1191,11 @@ def md_list_links(path: str) -> dict[str, Any]:
 def md_list_images(path: str) -> dict[str, Any]:
     """List Markdown images with alt text, source, and line numbers."""
     resolved_path, content, _, _, _ = _load_markdown_file(path)
-    image_re = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
     images = []
-    for line_number, raw_line in enumerate(_to_lines(content), start=1):
-        for match in image_re.finditer(raw_line.rstrip("\r")):
-            images.append({"line": line_number, "alt": match.group(1), "src": match.group(2)})
+    for line_number, line in _link_lines(content):
+        for match in _inline_links(line):
+            if match["image"]:
+                images.append({"line": line_number, "alt": match["text"], "src": match["target"]})
     return {"path": str(resolved_path), "image_count": len(images), "images": images}
 
 
@@ -1181,11 +1353,17 @@ def md_rewrite_links(path: str, replacements: dict[str, str], regex: bool = Fals
                 return re.sub(old, new, target) if regex else new
         return target
 
-    def repl(match: re.Match[str]) -> str:
-        bang, text, target = match.group(1), match.group(2), match.group(3)
-        return f"{bang}[{text}]({rewrite_target(target)})"
-
-    updated = re.sub(r"(!?)\[([^\]]*)\]\(([^)]+)\)", repl, content)
+    offsets = _line_start_offsets(content)
+    edits = []
+    for line_number, line in _link_lines(content):
+        for match in _inline_links(line):
+            new_target = rewrite_target(match["target"])
+            if new_target != match["target"]:
+                edits.append((offsets[line_number - 1] + match["start"],
+                              offsets[line_number - 1] + match["end"], new_target))
+    updated = content
+    for start, end, new_target in reversed(edits):
+        updated = updated[:start] + new_target + updated[end:]
     write = _write_markdown_file(resolved_path, updated, encoding)
     return {"success": True, "path": str(resolved_path), **write, "bytes_before": size, "replacement_count": count}
 
@@ -1213,7 +1391,7 @@ def md_validate_links(path: str, check_remote: bool = False) -> dict[str, Any]:
             continue
         if fragment and file_path == resolved_path and fragment not in anchors:
             problems.append({**link, "problem": "missing_anchor", "anchor": fragment})
-    return {"path": str(resolved_path), "ok": not problems, "problem_count": len(problems), "problems": problems, "remote_checked": check_remote, "remote_skipped": skipped_remote if not check_remote else 0}
+    return {"path": str(resolved_path), "ok": not problems, "problem_count": len(problems), "problems": problems, "remote_checked": False, "remote_skipped": skipped_remote}
 
 
 @mcp.tool()
@@ -1224,11 +1402,28 @@ def md_frontmatter(path: str, op: str = "read", data: dict[str, Any] | None = No
     parsed = _parse_simple_yaml(raw or "")
     if op == "read":
         return {"path": str(resolved_path), "has_frontmatter": raw is not None, "frontmatter": parsed, "raw": raw or ""}
+    if op == "replace" and raw is not None and any(line.strip().startswith("#") for line in raw.splitlines()):
+        raise ValueError("Replacing commented YAML would discard comments; file was not changed")
+    if raw is not None:
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if (line[:1].isspace() or not re.fullmatch(r"[A-Za-z_][\w-]*:\s*[^#\r\n]+", line)
+                    or re.search(r":\s*[|>&*!\[{]", line)):
+                raise ValueError("Complex YAML frontmatter cannot be safely rewritten; file was not changed")
+    if key is not None and not re.fullmatch(r"[A-Za-z_][\w-]*", key):
+        raise ValueError("Frontmatter key must be a simple top-level YAML name")
     if op == "replace":
         parsed = data or {}
+        if any(not re.fullmatch(r"[A-Za-z_][\w-]*", str(item)) or not isinstance(value, (str, int, float, bool))
+               for item, value in parsed.items()):
+            raise ValueError("Only simple scalar frontmatter entries can be safely replaced")
     elif op == "set":
         if key is None:
             raise ValueError("key is required for set")
+        if not isinstance(value, (str, int, float, bool)) or (isinstance(value, str) and re.search(r"[\r\n#]", value)):
+            raise ValueError("Only simple scalar frontmatter values can be safely set")
         parsed[key] = value
     elif op == "delete":
         if key is None:
@@ -1236,8 +1431,24 @@ def md_frontmatter(path: str, op: str = "read", data: dict[str, Any] | None = No
         parsed.pop(key, None)
     else:
         raise ValueError("op must be read, replace, set, or delete")
-    frontmatter = "---\n" + _render_simple_yaml(parsed) + "\n---\n"
-    updated = frontmatter + body.lstrip("\n")
+    if op in {"set", "delete"} and raw is not None:
+        lines = raw.split("\n")
+        matches = [index for index, line in enumerate(lines) if re.match(rf"^{re.escape(key)}\s*:", line)]
+        if len(matches) > 1:
+            raise ValueError("Duplicate YAML keys cannot be safely rewritten")
+        if op == "set":
+            new_line = f"{key}: {_render_simple_yaml({key: value}).split(': ', 1)[1]}"
+            if matches:
+                lines[matches[0]] = new_line
+            else:
+                lines.append(new_line)
+        elif matches:
+            del lines[matches[0]]
+        rendered = "\n".join(lines)
+    else:
+        rendered = _render_simple_yaml(parsed)
+    frontmatter = "---\n" + rendered + "\n---\n"
+    updated = frontmatter + body
     write = _write_markdown_file(resolved_path, updated, encoding)
     return {"success": True, "path": str(resolved_path), **write, "bytes_before": size, "frontmatter": parsed}
 
@@ -1250,6 +1461,7 @@ def md_tangle(path: str, output_dir: str, language: str | None = None, overwrite
     target_dir = Path(output_dir).expanduser().resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
     written = []
+    targets = []
     ext_map = {"python": ".py", "py": ".py", "javascript": ".js", "js": ".js", "typescript": ".ts", "ts": ".ts", "bash": ".sh", "sh": ".sh", "json": ".json"}
     for index, block in enumerate(blocks, start=1):
         info_parts = block["info"].split()
@@ -1260,15 +1472,22 @@ def md_tangle(path: str, output_dir: str, language: str | None = None, overwrite
         if target_name is None:
             suffix = ext_map.get(block["language"], ".txt")
             target_name = f"block_{index}{suffix}"
-        target_path = (target_dir / target_name).resolve()
-        if not str(target_path).startswith(str(target_dir)):
+        name = Path(target_name)
+        if name.is_absolute() or name.drive or name.anchor or target_name.startswith(("/", "\\")):
+            raise ValueError("code block output path must be relative to output_dir")
+        target_path = (target_dir / name).resolve()
+        if not target_path.is_relative_to(target_dir) or target_path == target_dir:
             raise ValueError("code block output path escapes output_dir")
         if target_path.exists() and not overwrite:
             raise ValueError(f"Output file already exists: {target_path}")
+        targets.append((block, target_path))
+    for block, target_path in targets:
         target_path.parent.mkdir(parents=True, exist_ok=True)
+        if not target_path.parent.resolve().is_relative_to(target_dir) or target_path.resolve() != target_path:
+            raise ValueError("code block output path escapes output_dir")
         target_path.write_text(block["source"] + "\n", encoding="utf-8")
         written.append({"path": str(target_path), "language": block["language"], "source_line": block["start_line"]})
-    return {"path": str(resolved_path), "output_dir": str(target_dir), "written_count": len(written), "files": written}
+    return {"path": str(resolved_path), "output_dir": str(target_dir), "written_count": len(written), "files": written, "encoding": "UTF-8", "newline": "LF"}
 
 
 @mcp.tool()
@@ -1288,7 +1507,7 @@ def md_split(path: str, output_dir: str, level: int = 1, overwrite: bool = False
             raise ValueError(f"Output file already exists: {target_path}")
         target_path.write_text(_slice_lines(content, heading.line, end_line, False, None, None) + "\n", encoding="utf-8")
         files.append({"path": str(target_path), "heading": _heading_metadata(heading)})
-    return {"path": str(resolved_path), "output_dir": str(target_dir), "file_count": len(files), "files": files}
+    return {"path": str(resolved_path), "output_dir": str(target_dir), "file_count": len(files), "files": files, "encoding": "UTF-8", "newline": "LF"}
 
 
 @mcp.tool()
@@ -1302,7 +1521,7 @@ def md_merge(paths: list[str], output_path: str, heading_offset: int = 0, separa
     output.parent.mkdir(parents=True, exist_ok=True)
     merged = separator.join(part.strip("\n") for part in parts) + "\n"
     output.write_text(merged, encoding="utf-8")
-    return {"success": True, "path": str(output), "merged_count": len(paths), "bytes_written": output.stat().st_size}
+    return {"success": True, "path": str(output), "merged_count": len(paths), "bytes_written": output.stat().st_size, "encoding": "UTF-8", "newline": "LF"}
 
 
 @mcp.tool()
@@ -1426,7 +1645,11 @@ def _md_render_diagram_impl(
             content,
             {"mermaid", "plantuml", "puml", "dot", "graphviz"},
         )[diagram_index]
-        image_markdown = f"![diagram]({output.name})\n"
+        try:
+            relative = os.path.relpath(output, resolved_path.parent)
+        except ValueError as exc:
+            raise ValueError("Diagram image must be on the same drive as its Markdown file") from exc
+        image_markdown = f"![diagram]({quote(relative.replace(os.sep, '/'), safe='/-._~')})\n"
         updated = _replace_line_range(
             content,
             block["start_line"],

@@ -9,6 +9,7 @@ Reconstruct: dict → Excel (.xlsx) preserving all of the above.
 import base64
 import copy
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -410,25 +411,20 @@ def _extract_sheet_view_attrs(xlsx_path, sheet_file_map: dict) -> dict:
 
 
 def _extract_row_attrs(xlsx_path, sheet_file_map: dict) -> dict:
-    """Extract exact non-coordinate row attributes per worksheet."""
+    """Extract lexical row attributes, including their namespace prefixes."""
     result = {}
     try:
         with zipfile.ZipFile(str(xlsx_path), "r") as archive:
             for sheet_name, sheet_file in sheet_file_map.items():
                 if sheet_file not in archive.namelist():
                     continue
-                root = ET.fromstring(archive.read(sheet_file))
-                sheet_data = root.find(_qname("sheetData"))
+                content = archive.read(sheet_file).decode("utf-8")
                 rows = {}
-                for row in (list(sheet_data) if sheet_data is not None else []):
-                    row_number = row.get("r")
+                for match in re.finditer(r"<(?:[A-Za-z_][\w.-]*:)?row\b([^>]*)>", content):
+                    attrs = _parse_xml_attrs(match.group(1))
+                    row_number = attrs.pop("r", None)
                     if not row_number:
                         continue
-                    attrs = {
-                        _local_name(key): value
-                        for key, value in row.attrib.items()
-                        if _local_name(key) != "r"
-                    }
                     if attrs:
                         rows[row_number] = attrs
                 if rows:
@@ -628,6 +624,28 @@ def _xlsx_parts(path: str) -> set[str]:
         return set(zf.namelist())
 
 
+def _markup_compatibility_errors(xml: bytes, part: str) -> list[str]:
+    namespace = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+    scopes = [{"xml": "http://www.w3.org/XML/1998/namespace"}]
+    pending = {}
+    errors = []
+    for event, value in ET.iterparse(io.BytesIO(xml), events=("start-ns", "start", "end")):
+        if event == "start-ns":
+            pending[value[0] or ""] = value[1]
+        elif event == "start":
+            scope = {**scopes[-1], **pending}
+            pending.clear()
+            scopes.append(scope)
+            for key, tokens in value.attrib.items():
+                if key == f"{{{namespace}}}Ignorable":
+                    for prefix in tokens.split():
+                        if prefix not in scope:
+                            errors.append(f"{part}: undeclared mc:Ignorable prefix {prefix!r}")
+        else:
+            scopes.pop()
+    return errors
+
+
 def inspect_xlsx_package(path: str) -> dict:
     """Return a compact, validation-oriented summary of an .xlsx package."""
     import re
@@ -653,7 +671,7 @@ def inspect_xlsx_package(path: str) -> dict:
             xml_parts = [p for p in parts if p.endswith((".xml", ".rels"))]
             for part in xml_parts:
                 try:
-                    ET.fromstring(zf.read(part))
+                    errors.extend(_markup_compatibility_errors(zf.read(part), part))
                 except Exception as exc:
                     errors.append(f"invalid XML in {part}: {exc}")
 
@@ -2468,10 +2486,21 @@ def _inject_missing_root_attrs(content: str, needed_attrs: dict[str, str]) -> st
     if not root_m:
         return content
     current = root_m.group(1)
+    current_attrs = _parse_xml_attrs(current)
+    declarations = {
+        **{key[6:]: value for key, value in current_attrs.items() if key.startswith("xmlns:")},
+        **{key[6:]: value for key, value in needed_attrs.items() if key.startswith("xmlns:")},
+    }
+    current_root = ET.fromstring(root_m.group(0)[:-1] + "/>")
     additions = []
     for key, value in needed_attrs.items():
         if re.search(rf"\b{re.escape(key)}=", current):
             continue
+        if ":" in key and not key.startswith("xmlns:"):
+            prefix, local = key.split(":", 1)
+            uri = declarations.get(prefix)
+            if uri and f"{{{uri}}}{local}" in current_root.attrib:
+                continue
         additions.append(f'{key}="{value}"')
     if not additions:
         return content
@@ -2513,11 +2542,21 @@ def _inject_sheet_format_pr(xlsx_path: str, data: dict) -> str | None:
                         content = raw.decode("utf-8")
                         raw_sf = sf_data.get("sheetFormatPr")
                         root_attrs = _parse_xml_attrs(sf_data.get("root_attrs") or "")
-                        needed = {}
+                        needed = {key: value for key, value in root_attrs.items() if key.startswith("xmlns:")}
                         root_prefixes = {
                             p for p in _xml_prefixed_attrs(sf_data.get("root_attrs") or "")
                             if p not in {"xmlns", "mc"}
                         }
+                        source_sheet = next(
+                            sd for sd in data["sheets"]
+                            if sd.get("_sheet_format_pr") is sf_data
+                        )
+                        for row in source_sheet.get("rows") or []:
+                            root_prefixes.update(
+                                key.split(":", 1)[0]
+                                for key in (row.get("_row_attrs") or {})
+                                if ":" in key
+                            )
                         for prefix in root_prefixes:
                             ns_key = f"xmlns:{prefix}"
                             if root_attrs.get(ns_key):
@@ -2531,8 +2570,7 @@ def _inject_sheet_format_pr(xlsx_path: str, data: dict) -> str | None:
                                 ns_key = f"xmlns:{prefix}"
                                 if root_attrs.get(ns_key):
                                     needed[ns_key] = root_attrs[ns_key]
-                            ignorable_prefixes = prefixes | root_prefixes
-                            if ignorable_prefixes and root_attrs.get("xmlns:mc") and root_attrs.get("mc:Ignorable"):
+                            if root_attrs.get("xmlns:mc") and root_attrs.get("mc:Ignorable"):
                                 # mc:Ignorable may only list prefixes that are
                                 # actually declared in the new root — Excel
                                 # refuses to open the file otherwise.
@@ -6521,6 +6559,10 @@ def reconstruct_excel(data: dict, output_path: str) -> list[str]:
             if w:
                 warnings.append(w)
         w = _inject_app_props(tmp_out, data.get("app_props") or {})
+        if w:
+            warnings.append(w)
+
+        w = _inject_sheet_format_pr(tmp_out, data)
         if w:
             warnings.append(w)
 
