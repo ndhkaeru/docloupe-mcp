@@ -9,6 +9,13 @@ const { spawn, spawnSync } = require('child_process');
 
 const SERVERS = new Set(['excel', 'md', 'pdf', 'docx', 'pptx', 'csv', 'html', 'text', 'json']);
 const RETRYABLE_RENAME_ERRORS = new Set(['EACCES', 'EBUSY', 'EPERM']);
+const IN_USE_ERRORS = new Set(['EACCES', 'EBUSY', 'EPERM', 'ETXTBSY']);
+const PLATFORM_KEYS = new Set(['win32-x64', 'linux-x64', 'darwin-x64', 'darwin-arm64']);
+const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+[0-9A-Za-z.+-]*$/;
+const CACHE_FILE_PATTERN = /^[a-z]+-tools(\.exe)?(\.\d+\.\d+)?(\.tmp)?$/;
+const CACHE_STALE_MS = 7 * 24 * 60 * 60 * 1000;
+const TEMPORARY_STALE_MS = 60 * 60 * 1000;
+const DOWNLOAD_IDLE_TIMEOUT_MS = 60 * 1000;
 const OWNER = 'ndhkaeru';
 const REPO = 'docloupe-mcp';
 const SIGNAL_NAMES = process.platform === 'win32'
@@ -97,42 +104,186 @@ function renameWithRetry(sourcePath, outputPath, attempt = 0) {
   });
 }
 
-function download(url, outputPath, redirects = 0) {
+function fileSize(filePath) {
+  try {
+    return fs.statSync(filePath).size;
+  } catch {
+    return -1;
+  }
+}
+
+// Another launcher may place the same release asset first; its copy can already be
+// running (and locked on Windows), so an identical file is reused instead of replaced.
+async function placeDownloadedFile(tmpPath, outputPath, size) {
+  if (fileSize(outputPath) === size) {
+    fs.rmSync(tmpPath, { force: true });
+    return;
+  }
+  try {
+    await renameWithRetry(tmpPath, outputPath);
+  } catch (error) {
+    fs.rmSync(tmpPath, { force: true });
+    if (fileSize(outputPath) === size) return;
+    throw error;
+  }
+  if (process.platform !== 'win32') fs.chmodSync(outputPath, 0o755);
+}
+
+// Each download writes its own temporary file and is only renamed into the cache after
+// the full Content-Length arrived, so an interrupted download is never cached.
+function download(url, outputPath, options = {}, redirects = 0) {
+  const get = options.get || https.get;
   return new Promise((resolve, reject) => {
-    const request = https.get(url, { headers: { 'User-Agent': 'docloupe-mcp-npm' } }, (response) => {
+    let settled = false;
+    let cleanup = null;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      if (cleanup) cleanup(() => reject(error));
+      else reject(error);
+    };
+
+    const request = get(url, { headers: { 'User-Agent': 'docloupe-mcp-npm' } }, (response) => {
       if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
         response.resume();
+        settled = true;
         if (!response.headers.location || redirects >= 5) {
           reject(new Error(`Too many redirects while downloading ${url}`));
           return;
         }
-        download(response.headers.location, outputPath, redirects + 1).then(resolve, reject);
+        download(response.headers.location, outputPath, options, redirects + 1).then(resolve, reject);
         return;
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        reject(new Error(`Download failed (${response.statusCode}): ${url}`));
         response.resume();
+        fail(new Error(`Download failed (${response.statusCode}): ${url}`));
         return;
       }
 
-      const tmpPath = `${outputPath}.tmp`;
+      const expected = Number.parseInt(response.headers['content-length'] || '', 10);
+      const tmpPath = `${outputPath}.${process.pid}.${Date.now()}.tmp`;
       const file = fs.createWriteStream(tmpPath);
-      response.pipe(file);
+      let received = 0;
+      cleanup = (done) => {
+        response.destroy();
+        const remove = () => fs.rm(tmpPath, { force: true }, () => done());
+        if (file.closed) remove();
+        else {
+          file.once('close', remove);
+          file.destroy();
+        }
+      };
+
+      response.on('data', (chunk) => {
+        received += chunk.length;
+      });
+      response.on('error', fail);
+      response.on('close', () => {
+        if (!response.complete) fail(new Error(`Download interrupted after ${received} bytes: ${url}`));
+      });
+      file.on('error', fail);
       file.on('finish', () => {
-        file.close(() => {
-          renameWithRetry(tmpPath, outputPath).then(() => {
-            if (process.platform !== 'win32') fs.chmodSync(outputPath, 0o755);
-            resolve();
-          }, reject);
+        file.close((closeError) => {
+          if (settled) return;
+          if (closeError) {
+            fail(closeError);
+            return;
+          }
+          if (Number.isFinite(expected) && received !== expected) {
+            fail(new Error(`Download incomplete (${received} of ${expected} bytes): ${url}`));
+            return;
+          }
+          settled = true;
+          placeDownloadedFile(tmpPath, outputPath, received).then(resolve, reject);
         });
       });
-      file.on('error', (error) => {
-        fs.rmSync(tmpPath, { force: true });
-        reject(error);
-      });
+      response.pipe(file);
     });
-    request.on('error', reject);
+    request.setTimeout(DOWNLOAD_IDLE_TIMEOUT_MS, () => {
+      request.destroy(new Error(`Download timed out after ${DOWNLOAD_IDLE_TIMEOUT_MS} ms without data: ${url}`));
+    });
+    request.on('error', fail);
   });
+}
+
+function cachePruneEnabled() {
+  const value = String(process.env.DOCLOUPE_MCP_CACHE_PRUNE || '').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off'].includes(value);
+}
+
+function markCacheUsed(root = cacheRoot(), tag = releaseTag(), now = Date.now()) {
+  const touchedAt = new Date(now);
+  fs.utimesSync(path.join(root, tag), touchedAt, touchedAt);
+}
+
+// Lists the files of one release-tag cache directory, or null when it holds anything
+// the launcher did not create (such directories are never deleted).
+function cacheFiles(tagDirectory) {
+  const files = [];
+  for (const platformEntry of fs.readdirSync(tagDirectory, { withFileTypes: true })) {
+    if (!platformEntry.isDirectory() || !PLATFORM_KEYS.has(platformEntry.name)) return null;
+    const platformDirectory = path.join(tagDirectory, platformEntry.name);
+    for (const fileEntry of fs.readdirSync(platformDirectory, { withFileTypes: true })) {
+      if (!fileEntry.isFile() || !CACHE_FILE_PATTERN.test(fileEntry.name)) return null;
+      files.push(path.join(platformDirectory, fileEntry.name));
+    }
+  }
+  return files;
+}
+
+// Windows refuses write access to a running executable and Linux reports ETXTBSY.
+function isRunning(filePath) {
+  if (filePath.endsWith('.tmp')) return false;
+  try {
+    fs.closeSync(fs.openSync(filePath, 'r+'));
+    return false;
+  } catch (error) {
+    return IN_USE_ERRORS.has(error.code);
+  }
+}
+
+// Removes release caches unused for a week and stale partial downloads. Directories with
+// a running server binary or unexpected content are left alone and retried on a later start.
+function pruneCache(root = cacheRoot(), currentTag = releaseTag(), options = {}) {
+  const now = options.now || Date.now();
+  const maxAgeMs = options.maxAgeMs || CACHE_STALE_MS;
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !RELEASE_TAG_PATTERN.test(entry.name)) continue;
+    const tagDirectory = path.join(root, entry.name);
+    try {
+      const files = cacheFiles(tagDirectory);
+      if (!files) continue;
+      if (entry.name === currentTag) {
+        for (const file of files) {
+          if (file.endsWith('.tmp') && now - fs.statSync(file).mtimeMs > TEMPORARY_STALE_MS) {
+            fs.rmSync(file, { force: true });
+          }
+        }
+        continue;
+      }
+      if (now - fs.statSync(tagDirectory).mtimeMs <= maxAgeMs) continue;
+      if (files.some(isRunning)) continue;
+      fs.rmSync(tagDirectory, { recursive: true, force: true });
+    } catch {
+      // Concurrently removed or locked; a later start retries.
+    }
+  }
+}
+
+function maintainCache() {
+  if (!cachePruneEnabled()) return;
+  try {
+    markCacheUsed();
+    pruneCache();
+  } catch {
+    // Cache maintenance must never block a server start.
+  }
 }
 
 async function findBinary(server) {
@@ -143,11 +294,12 @@ async function findBinary(server) {
   if (fs.existsSync(bundled)) return bundled;
 
   const cached = cachedBinary(server);
-  if (fs.existsSync(cached)) return cached;
-
-  fs.mkdirSync(path.dirname(cached), { recursive: true });
-  console.error(`Downloading docloupe ${server}-tools ${releaseTag()} for ${platformKey()}...`);
-  await download(assetUrl(server), cached);
+  if (!fs.existsSync(cached)) {
+    fs.mkdirSync(path.dirname(cached), { recursive: true });
+    console.error(`Downloading docloupe ${server}-tools ${releaseTag()} for ${platformKey()}...`);
+    await download(assetUrl(server), cached);
+  }
+  maintainCache();
   return cached;
 }
 
@@ -161,6 +313,7 @@ function usage() {
     '  DOCLOUPE_EXCEL_TOOLS_BINARY=/path/to/excel-tools',
     '  DOCLOUPE_MCP_BINARY=/path/to/server-binary',
     '  DOCLOUPE_MCP_CACHE_DIR=/path/to/cache',
+    '  DOCLOUPE_MCP_CACHE_PRUNE=0   (keep release caches unused for over 7 days)',
     '  DOCLOUPE_MCP_RELEASE_TAG=v1.2.3',
     '  DOCLOUPE_MCP_SHUTDOWN_GRACE_MS=5000',
     '  DOCLOUPE_MCP_TERMINATE_GRACE_MS=2000',
@@ -476,8 +629,11 @@ function main() {
 module.exports = {
   LauncherError,
   childExitCode,
+  download,
   executableName,
+  markCacheUsed,
   platformKey,
+  pruneCache,
   run,
   runAsync,
   signalExitCode,
