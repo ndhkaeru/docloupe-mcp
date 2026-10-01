@@ -48,7 +48,7 @@ Columns:
 | `excel_close(session_key)` | Drops the session even when it has unsaved edits | `excel_close` | `UNSAVED_CHANGES` unless `discard_unsaved: true` |
 | `excel_get_session_status(session_key)` | Busy flag, dirty feature/path counts | `excel_status` | Adds ledger, `source_changed_on_disk`, oracle availability, list mode |
 | `excel_reload(session_key)` | Re-reads the file from disk, discarding edits. Untested per audit | `excel_undo {to_revision: saved_revision}`; if the disk changed: `excel_close` + `excel_open` | Never silently loads a file that changed on disk |
-| `excel_save(session_key, output_path?, report_format="text", verify_preservation=False, max_differences=200, timeout_seconds?)` ([main.py:3139](../../excel/main.py#L3139)) | Picks one of three tiers ([core.py:5852](../../excel/core.py#L5852)); verification **off by default**, except for row-only edits; text report by default | `excel_save {mode: "overwrite" \| "save_as"}` | Gates always on; structured report; readback from the written file; `assert`, `accept`, oracles |
+| `excel_save(session_key, output_path?, report_format="text", verify_preservation=False, max_differences=200, timeout_seconds?)` ([main.py:3139](../../excel/main.py#L3139)) | Picks one of three tiers ([core.py:5852](../../excel/core.py#L5852)); verification **off by default**, except for row-only edits; text report by default | `excel_save {mode: "overwrite" \| "save_as"}` | Explicit `mode` required; gates always on; structured report; readback from the written file; `assert`, `accept` (gaps) / `override` (G5 only), oracles |
 | `excel_save_as_copy(session_key, output_path, …)` | Same pipeline to another path; the path must differ from the source; the session's dirty state is cleared afterwards | `excel_save {mode: "copy"}` | The session stays on its source and **stays dirty**. Use `save_as` to move the session |
 
 ### B. Stateless (4)
@@ -223,7 +223,7 @@ Columns:
 |---|---|---|---|
 | `excel_validate_workbook(path)` | ZIP + XML well-formedness + feature report; `valid=true` for an undeclared `mc:Ignorable` prefix (EX-04) | `excel_verify {after_path}` | G1–G3 including schema and MC checks |
 | `excel_diff_package(before_path, after_path)` | ZIP manifest diff | `excel_verify {…, detail: "package"}` | — |
-| `excel_verify_preservation(after_path, before_path?, max_differences, requested_paths?, approved_normalizations?, fixture_gap_paths?, verifier_gap_paths?, fixture_id?)` | Two-way semantic diff in a worker; glob `requested_paths`; caller-supplied normalizations | `excel_verify` | `session` for intent; `accept` by id instead of patterns; fixture concepts move to the evidence CLI |
+| `excel_verify_preservation(after_path, before_path?, max_differences, requested_paths?, approved_normalizations?, fixture_gap_paths?, verifier_gap_paths?, fixture_id?)` | Two-way semantic diff in a worker; glob `requested_paths`; caller-supplied normalizations | `excel_verify` | `session`, `assert` or `declared` for intent (a two-file compare alone cannot see a lost edit); `accept` by gap id instead of patterns; fixture concepts move to the evidence CLI |
 | `excel_build_preservation_summary(coverage_reports, verification_reports, backup_checks, …)` | Aggregates evidence JSON | `tools/evidence` CLI | Not an agent tool |
 | `excel_capture(sheet, output_path, soffice_path?, timeout_seconds=120)` | Renders a sheet to PNG via LibreOffice; kills the process tree on cancel | `excel_render` | Ranges, providers (Excel COM preferred), image content returned to the agent |
 

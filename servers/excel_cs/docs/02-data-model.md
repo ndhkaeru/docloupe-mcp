@@ -172,7 +172,7 @@ text      = { char | "&lt;" | "&gt;" | "&amp;" | "&quot;" } ;
 
 ## 6. Semantic paths
 
-This is the shared language for effects, diffs, `accept`, and `assert`.
+This is the shared language for effects, diffs, `accept`, `override` and `assert`.
 
 ```
 path        = wb-path | doc-path | sheet-path | name-path | pkg-path
@@ -202,7 +202,7 @@ pkg-path    = "pkg:/" PartName | "rel:/" SourcePart "#" Id | "ct:default:" Ext |
 
 **Cell facets:** `value`, `type`, `formula`, `formula.kind`, `cache`, `rich`, `phonetic`, `style.<facet>.<field>`, `hyperlink`, `comment`, `present` (whether the cell element exists in the XML).
 
-**Diff ids:** `d_` + the first 10 hex chars of `sha256(path ‖ before ‖ after)`. Diff ids are stable across runs on the same data, so they can be used in `accept` (see 04 §4).
+**Diff ids:** `d_` + the first 10 hex chars of `sha256(path ‖ before ‖ after)`. Diff ids are stable across runs on the same data, so they can be used in `override`; gap ids (`g_…`) are used in `accept` (see 04 §4).
 
 ## 7. Hashes and identifiers
 

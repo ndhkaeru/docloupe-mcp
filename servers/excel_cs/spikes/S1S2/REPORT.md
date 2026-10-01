@@ -86,7 +86,7 @@ The binary completed the MCP `initialize` and `tools/call` handshake and returne
 
 | Metric | Observed |
 |---|---:|
-| `S1S2.exe` (single-file AOT) | 41,724,928 bytes (39.79 MiB); legacy PyInstaller `excel-tools.exe` is ~25.5 MB |
+| `S1S2.exe` (single-file AOT) | 41,724,928 bytes (39.79 MiB); legacy PyInstaller `excel-tools.exe` is 26,704,997 bytes (25.5 MiB) |
 | Optional debug-symbol `.pdb` (not needed at runtime) | 184,373,248 bytes |
 | Ten fresh processes, start → `initialize` reply | min 84.9 ms; median 87.8 ms; max 634.8 ms (first run) |
 | Ten fresh processes, start → read-tool reply | median 97.7 ms |

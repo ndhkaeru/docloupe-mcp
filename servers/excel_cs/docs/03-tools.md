@@ -74,7 +74,9 @@ Workflow: excel_open → excel_read/excel_find/excel_inspect → excel_apply (wi
 → excel_save → read the save report. Addresses are A1 with 1-based rows (e.g. Sheet1!B5, 5:7, C:D).
 Every op in one excel_apply call refers to the state you read (base_revision); the server handles
 shifting. Rich text: use markup (<r b color="FF0000">text</r>) and edit by "match", not by offsets.
-A save is only successful when status is "verified" (or "verified_with_gaps" and you accept the gaps).
+excel_save requires an explicit mode. A save is fully successful only when status is "verified";
+"verified_with_gaps" lists what could not be checked; "saved_with_overrides" means known differences
+were written on purpose: use override only with the user's explicit consent.
 SAVE_BLOCKED means nothing was written; read error.details.gates. Never assume an edit landed without
 checking the readback in the apply/save result.
 ```
@@ -398,12 +400,14 @@ Example: recolor one word in a three-run Vietnamese cell, guarded by the text th
 ```ts
 input {
   session: string,
-  path?: string,                                     // default: the session source
-  mode?: "overwrite" | "save_as" | "copy" = "overwrite",
-       // overwrite: path = source. save_as: new path, session follows it.
-       // copy: new path, session stays on the source and remains dirty.
+  mode: "overwrite" | "save_as" | "copy",            // REQUIRED, no default (decided 2026-10-01)
+       // overwrite: writes the session source; `path` omitted or equal to it.
+       // save_as: `path` required and different; the session follows it.
+       // copy: `path` required and different; the session stays on the source and remains dirty.
+  path?: string,
   assert?: Assertion[],
-  accept?: string[],                                 // diff ids / gap ids from a previous blocked report
+  accept?: { id: string, reason: string }[],         // gap ids (g_…) of required gaps only
+  override?: { id: string, reason: string }[],       // diff ids (d_…) of G5 `undeclared` differences only
   oracles?: { recalc?: "off" | "report" | "write_cache" = "off",
               render?: { targets: string[] } | false = false,
               open_check?: boolean = false },
@@ -419,7 +423,9 @@ Assertion = {
 }
 
 output data {
-  status: "verified" | "verified_with_gaps",
+  status: "verified" | "verified_with_gaps" | "saved_with_overrides",
+  accepted: { id: string, reason: string, gap: Gap }[],         // always listed, never hidden
+  overrides: { id: string, reason: string, failure: Failure }[],
   path: string, sha256: string, size: number,
   backup?: { path: string, sha256: string, expires_at: string },
   revision_saved: number,
@@ -438,7 +444,9 @@ Gap     = { gap_id: string, path: string, reason: string, required: boolean }
 
 - **Blocked save:** `SAVE_BLOCKED` comes back with `details = { gates, assertions, blocked_by: Failure[] | Gap[] }` and the file is not written.
 - **Gates** are defined in [04 §3](04-correctness.md#3-save-gates).
-- **`verified_with_gaps`** is only possible when every remaining gap is optional (an oracle that is not available), or was explicitly accepted.
+- **`verified_with_gaps`** is only possible when every remaining gap is optional (an oracle that is not available), or is a required gap accepted with a reason.
+- **`saved_with_overrides`** means G5 found undeclared differences and the caller chose to write them anyway, each with a reason. It is **never** reported as verified, and agents must only use it with the user's explicit consent.
+- **Not overridable:** failures of G1 (package integrity), G2 (new schema errors), G3 (namespaces, MC, prefix fidelity), G4 (intent), G6 (advanced parts) and G7 (the agent's own assertions). An `override` naming one of these fails with `NOT_OVERRIDABLE`. Rules: 04 §4.
 
 ## 6. Other tools
 
@@ -448,8 +456,14 @@ Gap     = { gap_id: string, path: string, reason: string, required: boolean }
 input {
   after_path: string,
   before_path?: string,            // default: newest unexpired backup of after_path, if any
-  session?: string,                // when given, its ledger supplies effects → intent check (G4)
-  accept?: string[],
+  session?: string,                // when given, its ledger supplies effects and transforms → G4
+  assert?: Assertion[],            // explicit expectations about after_path (same type as excel_save) → G7
+  declared?: {                     // explicit intent for files produced elsewhere
+    effects?: { path: string, after: any }[],                                   // → G4
+    transforms?: { sheet: string, kind: "insert_rows" | "delete_rows" | "insert_cols" | "delete_cols",
+                   at: string, count: number }[]                                 // → transform-aware G5
+  },
+  accept?: { id: string, reason: string }[],
   max_differences?: number = 200,
   detail?: "summary" | "full" | "package" = "summary"
 }
@@ -467,7 +481,11 @@ output data {
 |---|---|---|
 | `after_path` only, no backup found | G1–G3 | `excel_validate_workbook` |
 | `after_path` + `before_path` | G1–G3 on both files + G5 (every difference counts as undeclared) + G6 | `excel_verify_preservation`, `excel_diff_package` |
-| + `session` | adds G4 | — |
+| + `session`, or `declared.effects` | adds G4 | — |
+| + `assert` | adds G7 | — |
+| + `declared.transforms` | G5 maps O through the transforms before comparing | — |
+
+**What a two-file comparison cannot see.** If an edit never reached the file (V-06), W equals O and there is no difference to report. A lost edit is only detectable when the expectation is supplied: through `session`, `declared.effects` or `assert` (e.g. `{ "target": "S!B2", "equals": { "value": "đã sửa" } }`). Likewise, after a row/column insert or delete, every shifted cell differs from O; losses among them are only separable when the transforms are known.
 
 ### 6.2 `excel_render`
 
@@ -543,6 +561,7 @@ The legacy signature is kept so existing prompts keep working. The output format
 | `DESTINATION_CHANGED` | The destination changed during save | yes | Retry |
 | `SIGNATURE_WOULD_BREAK` | The save would invalidate digital signatures | no | `allow_signature_invalidation: true` |
 | `SAVE_BLOCKED` | One or more gates failed or are unverified and not accepted | no | Read `details.gates` |
+| `NOT_OVERRIDABLE` | `override` names a failure outside G5, or `accept` names a failure instead of a gap | no | Fix the cause; only G5 undeclared differences can be overridden |
 | `BACKUP_FAILED` | The backup could not be created or verified | yes | — |
 | `ORACLE_UNAVAILABLE` | The requested oracle is not installed | no | `excel_status` shows availability |
 | `LIMIT_EXCEEDED` | Size/count limit | no | Paginate, or narrow the target |

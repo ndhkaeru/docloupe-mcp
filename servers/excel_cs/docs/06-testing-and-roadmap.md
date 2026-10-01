@@ -184,13 +184,14 @@ The initial budgets are calibrated in spike S4. Benchmarks use BenchmarkDotNet, 
 | Phase | Scope | Exit criteria |
 |---|---|---|
 | **P0** Spikes | S1–S9, S2b | All spike exits met; this design updated with the results |
-| **P1** Read + verify | `excel_open` (read-only), `excel_peek`, `excel_read`, `excel_find`, `excel_inspect`, `convert_to_markdown`, `excel_verify` (G1–G3, G5, G6) | Corruption corpus 100% for the modeled facets; equivalence corpus passes; read parity with legacy. **Immediately useful:** run `excel_verify` on files saved by the Python server to catch V-04/V-06-class defects before the C# writer exists |
-| **P2** Cell editing | `excel_apply` with cell content, rich text and style ops; `excel_undo`; `excel_save` with G1–G7; `excel_status`, `excel_close`, `excel_create` | Op tests and mutation matrix green for these ops; agent-eval subset at 0 silent failures |
+| **P1** Read + verify | `excel_open` (read-only), `excel_peek`, `excel_read`, `excel_find`, `excel_inspect`, `convert_to_markdown`, `excel_verify` (G1–G3, G5, G6; plus G4/G7 when the caller supplies `declared.effects` or `assert`) | Corruption corpus 100% for the modeled facets; equivalence corpus passes; read parity with legacy. **Useful early, within limits:** on files saved by the Python server it finds undeclared losses (EX-01/EX-03/EX-05 class). A *lost* edit (V-06) leaves W equal to O, so a plain two-file comparison cannot see it; it is found only when the caller passes the expected values via `assert` or `declared.effects` (03 §6.1). V-04-class losses after structural edits need `declared.transforms` |
+| **P2a** Thin write slice | `excel_open`, `excel_read` (cells view), `excel_apply` with **only `set_value`**, `excel_save` (staging → G1–G5 → readback from the written file), `excel_close`. No rich text, no structural edits, no other ops | S2b passed; `set_value` mutation matrix green on all fixtures, including prefixed-namespace sheets (the V-06 shape) saved correctly; corruption corpus for G1–G5 at 100%, including a forced lost edit blocked by G4 |
+| **P2b** Cell editing | Remaining cell-content, rich-text and style ops; `excel_undo`; G6–G7; `excel_status`, `excel_create` | Op tests and mutation matrix green for these ops; agent-eval subset at 0 silent failures |
 | **P3** Structure | Rows, columns, merges, sheet ops; transforms; `Formula` module + independent shifter | Differential fuzzing clean after the agreed run budget; matrix green |
 | **P4** Features | Tables, CF, DV, names, hyperlinks, comments, printing, views, protection, workbook/document properties | Matrix green; EX-05/EX-07/EX-08/EX-10 scenarios pass |
 | **P5** Drawings + package | Drawing ops, expert package ops, `excel_export` | Matrix green; EX-01 scenario passes |
 | **P6** Oracles + hardening | `excel_render`, recalc, `open_check`; performance budgets; full agent eval; release as **`excelnext`** | §2.7 targets met; budgets met; smoke tests on 4 platforms |
-| **P7** Switch | `excel` points to the C# binary. The Python server stays available for one release under a launcher-compatible name (e.g. `excellegacy`), then is removed | Every row of the 05 mapping is implemented or explicitly dropped; no open critical defects |
+| **P7** Switch | `excel` points to the C# binary. The Python server stays available for one release under a launcher-compatible name (e.g. `excellegacy`), then is removed | Every row of the 05 mapping is implemented or explicitly dropped; no open critical defects; **S1 exit met on all four RIDs and the S9 clean-machine suite green**, measured on clean images rather than inferred from the Windows-host spike |
 
 ## 5. Risks
 
@@ -213,8 +214,8 @@ The initial budgets are calibrated in spike S4. Benchmarks use BenchmarkDotNet, 
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | Should `excel_save` default to `mode: "overwrite"`, or require an explicit mode? | Default `overwrite`; backups and gates make it safe |
-| Q2 | Should every `accept` item require a `reason` that is recorded in the report? | Yes |
+| Q1 | Should `excel_save` default to `mode: "overwrite"`, or require an explicit mode? | **Decided 2026-10-01 (design review): explicit `mode` required**, no default (03 §5) |
+| Q2 | Should every `accept` item require a `reason` that is recorded in the report? | **Decided 2026-10-01: yes**, for `accept` and `override`. `accept` is limited to gaps, `override` to G5 undeclared differences (04 §4) |
 | Q3 | Can the external fixtures in `D:\data-test\excel-preservation-fixtures` be committed (privacy/licensing)? | **Decided 2026-10-01: no.** Local extended suite only; CI uses fixtures we create (§2.9) |
 | Q4 | Is a self-hosted Windows runner with Office available? | **Decided 2026-10-01: no.** Excel oracle runs manually on the developer machine as a release gate (§2.10) |
 | Q5 | One `excel_apply`, or three apply tools? | Decide with S8 + evals |

@@ -14,7 +14,7 @@ After every edit the agent must be able to answer, from the tool's output alone:
 
 | ID | Invariant | Enforced by |
 |---|---|---|
-| I1 | Nothing in the written file differs from O except the declared effects (after transforms and registered normalizations) | G5, G6 |
+| I1 | Nothing in the written file differs from O except the declared effects (after transforms and registered normalizations). The only exception is G5 differences explicitly overridden with a reason, and the save then reports `saved_with_overrides` | G5, G6, 04 §4 |
 | I2 | Every declared effect is present in the written file with exactly its predicted value | G4 |
 | I3 | Every "verified" verdict comes from re-reading the **written file** with a reader that shares no code with the writer | Architecture rule (01 §3) + G4/G5 implementation |
 | I4 | A check that did not run, or cannot model something, is `unverified`, never `verified` | Gate status rules (§3.9) |
@@ -97,10 +97,12 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
 ### 3.9 Status rules
 
 ```
-overall = blocked             if any required gate is failed
-        = blocked             if any required gate has an unverified gap that is not in `accept`
-        = verified_with_gaps  if only optional gaps remain, or only accepted required gaps
-        = verified            otherwise
+overall = blocked               if G1, G2, G3, G4, G6 or G7 has any failure   (never overridable)
+        = blocked               if G5 has a failure that is not in `override`
+        = blocked               if a required gate has an unverified gap that is not in `accept`
+        = saved_with_overrides  if any G5 failure was overridden          (never "verified")
+        = verified_with_gaps    if only optional gaps remain, or required gaps accepted with a reason
+        = verified              otherwise
 ```
 
 ### 3.10 Comparison with the legacy classification
@@ -110,16 +112,24 @@ overall = blocked             if any required gate is failed
 | `REQUESTED` | `declared` | Stricter: the value must also equal the predicted after-value (G4) |
 | — | `intent_mismatch` / `intent_missing` | New: fails |
 | `APPROVED_NORMALIZATION` | `normalized` (rule id) | Rules live in code and tests, not caller input |
-| `UNAPPROVED_LOSS` | `undeclared` | Same meaning, fails |
-| `VERIFIER_GAP` | `unverified` (required gap) | Blocks unless accepted by gap id |
+| `UNAPPROVED_LOSS` | `undeclared` | Fails. Can only be written via `override`, which yields `saved_with_overrides`, never `verified` |
+| `VERIFIER_GAP` | `unverified` (required gap) | Blocks unless accepted by gap id with a reason |
 | `FIXTURE_GAP` | — | Test-harness concept only, moved to the evidence CLI |
 | `PACKAGE_INVALID` | G1/G2/G3 failure | Split by cause |
 
-## 4. Accepting a difference
+## 4. Accepting gaps and overriding differences
 
-- `accept` takes **exact ids** from a previous blocked report: diff ids (`d_…`) or gap ids (`g_…`). It never takes path patterns.
-- Ids are content hashes of path + before + after (02 §6). If the difference changes, the old id no longer matches, and the save blocks again.
-- Accepted items appear in the report as `accepted` with their full details, so they cannot disappear from view.
+The guiding rule: **a failure can never be turned into "verified".** Only what the verifier *could not check* can be accepted. A small class of *detected* differences can be written on purpose, but the result says so permanently.
+
+| Mechanism | Takes | Allowed for | Requires | Result |
+|---|---|---|---|---|
+| `accept` | Gap ids (`g_…`) | Required gaps: something the verifier cannot model, e.g. `unmodeled_reference` | A `reason` per item | `verified_with_gaps`; every accepted gap is listed with its reason |
+| `override` | Diff ids (`d_…`) | **Only** G5 `undeclared` differences | A `reason` per item, and the user's explicit consent (stated in the server instructions) | `saved_with_overrides`, **never** `verified`; listed in the report and recorded in the ledger |
+| — | — | Failures of G1 (package integrity), G2 (new schema errors), G3 (namespaces, MC, prefix fidelity), G4 (intent mismatch or missing), G6 (advanced-part loss), G7 (the agent's own assertions) | — | Always `blocked`. Fix the cause. A G7 failure means the edit or the assertion is wrong |
+
+- **Exact ids only.** `accept` and `override` take exact ids from a previous blocked report, never path patterns. Ids are content hashes of path + before + after (02 §6); if the difference changes, the old id no longer matches and the save blocks again.
+- **Signatures** are not an override: invalidating a digital signature is governed by `allow_signature_invalidation` and declared as an effect (G6).
+- **Visibility:** accepted gaps and overrides appear in the save report with their full details and reasons, so they cannot disappear from view.
 - *Legacy:* `approved_normalizations` took caller-supplied rules (path-only entries became `VERIFIER_GAP`), and `requested_paths` took glob patterns. Both let a broad pattern hide unrelated losses.
 
 ## 5. Normalization registry
@@ -200,7 +210,7 @@ excel_open
 excel_read  view=cells target=…            → note hash / text
 excel_apply base_revision=r ops=[{…, expect:{hash:…}}]
             → check results[].resolved, diff, readback
-excel_save  (assert … optional)
+excel_save  mode=overwrite|save_as|copy (assert … optional)
             → status must be "verified"; check readback
 ```
 
@@ -226,7 +236,9 @@ The plan lists the transform, every formula/name/CF/table rewrite, and moved obj
 
 1. Read `error.details.blocked_by`. Each entry has a gate, a path, expected and actual values, and possibly an explanation.
 2. When it is an engine/verifier disagreement (`intent_mismatch`, `rewrite_disagreement`), do **not** retry blindly. Report it.
-3. When it is a real but acceptable consequence (for example a required gap for an unmodeled construct), retry `excel_save` with `accept: ["g_…"]`, and tell the user what was accepted.
+3. When it is a required gap for something the verifier cannot model, the agent may retry `excel_save` with `accept: [{ "id": "g_…", "reason": "…" }]`, and must tell the user what was accepted.
+4. When it is a G5 `undeclared` difference that the user explicitly wants written anyway, the agent may retry with `override: [{ "id": "d_…", "reason": "…" }]`. The result is `saved_with_overrides`, and the agent must say so. Never override without the user's consent.
+5. Failures of G1, G2, G3, G4, G6 and G7 cannot be accepted or overridden. Report them.
 
 ## 9. Worked scenarios (legacy defects → new behavior)
 

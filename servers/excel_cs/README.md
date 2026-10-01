@@ -27,7 +27,7 @@ Confirmed defects (details in [docs/05-legacy-mapping.md](docs/05-legacy-mapping
 | D2 | **Open XML SDK** (`DocumentFormat.OpenXml`) for direct DOM edits. Untouched parts stay byte-identical | openpyxl rebuild, regex patching, `xml.etree` |
 | D3 | The verifier uses an **independent reader** (`ZipArchive` + `XmlReader`) that shares no code with the writer | Verifier built on ElementTree, sharing assumptions with the writer |
 | D4 | **Three-way check**: original (O), intent (I), written file (W) | Two-way, O vs W |
-| D5 | Verification is **always on**. A failing gate means nothing is written | `verify_preservation=False` by default |
+| D5 | Verification is **always on**. A failing gate means nothing is written. The single exception: G5 differences the user explicitly overrides, which produce `saved_with_overrides`, never "verified" | `verify_preservation=False` by default |
 | D6 | All mutations go through **one** tool, `excel_apply`. It is transactional (one failing op rolls back the whole batch) and supports `dry_run` and `expect` | About 70 separate mutation tools, not atomic across tools |
 | D7 | **A1 addressing only**, with 1-based Excel row numbers | A mix of 0-based `r1/c1`, A1, and exclusive `end_row` |
 | D8 | Rich text: a readable and writable markup, edits **by content `match`**, offsets counted in graphemes | Code-point offsets that split Vietnamese diacritics |

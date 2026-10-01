@@ -178,7 +178,7 @@ Any failure in steps 1–7 leaves the session **unchanged**. This fixes audit fi
 3. Run the gates on the staging file (details in 04 §3):
      G1 package  G2 schema  G3 markup-compat  G4 intent  G5 preservation
      G6 advanced parts  G7 agent assertions  G8 oracles (optional)
-4. Any gate failed, or a required gate unverified and not accepted → delete staging and return
+4. A non-overridable gate failed, a G5 failure was not overridden, or a required gap was not accepted (04 §4) → delete staging and return
    SAVE_BLOCKED with the report. The destination does NOT change.
 5. Commit: re-check the destination fingerprint → back up the old file (when overwriting)
            → verify the backup hash → File.Move(staging, destination, overwrite)
@@ -291,7 +291,7 @@ Kept from the legacy server, because this part of its design is sound: staging i
 
 | Concern | Note |
 |---|---|
-| Binary size | Current PyInstaller `excel-tools.exe` is about 26.7 MB. The Native AOT size is measured in S1. The single-file fallback will be noticeably larger; it is still acceptable, because the launcher caches per release |
+| Binary size | Current PyInstaller `excel-tools.exe` is 26.7 MB (25.5 MiB). The S1 spike's Native AOT binary (Open XML SDK + MCP SDK + Hosting, untuned) is 41.7 MB (39.8 MiB). Size tuning (`OptimizationPreference=Size`, dropping Hosting) is still to be tried. It is acceptable either way, because the launcher caches per release |
 | Startup | PyInstaller one-file extracts itself to a temp directory on every start. Measured to the `initialize` response (V-12): 2.4 s in a clean Windows Sandbox, but 18–20 s on the development machine, where scanning of the extracted files is the likely cause. It also fails where the temp directory is `noexec`. Native AOT starts in place; target < 150 ms to the first MCP response |
 | Code signing | Sign the Windows binary (Authenticode) and the macOS binary (Developer ID). Unsigned executables under `%LOCALAPPDATA%` are blocked by AppLocker/WDAC in some companies and attract antivirus false positives (a known problem with PyInstaller builds) |
 | Quarantine / Mark-of-the-Web | The launcher downloads with Node, which does not set the macOS quarantine attribute or MotW, so Gatekeeper and SmartScreen prompts do not apply. Re-check this if the download path changes |
