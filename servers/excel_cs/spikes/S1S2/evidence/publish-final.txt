@@ -1,0 +1,5 @@
+  Determining projects to restore...
+  Restored E:\Project\mcp-server\DocumentTools\docloupe-mcp\servers\excel_cs\spikes\S1S2\S1S2.csproj (in 532 ms).
+  S1S2 -> E:\Project\mcp-server\DocumentTools\docloupe-mcp\servers\excel_cs\spikes\S1S2\bin\Release\net10.0\win-x64\S1S2.dll
+  Generating native code
+  S1S2 -> E:\Project\mcp-server\DocumentTools\docloupe-mcp\servers\excel_cs\spikes\S1S2\out\aot\

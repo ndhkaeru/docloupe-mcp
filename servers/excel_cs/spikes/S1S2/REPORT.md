@@ -74,7 +74,7 @@ Under the G3 lexical-fidelity rule decided on 2026-10-01 (04 §3.3), touched par
 
 ## S1 — Windows host result
 
-`dotnet publish` with Native AOT `win-x64` succeeded with **zero trim/AOT warnings**. The source was re-published after the `probe-autosave` change, and still produced zero warnings (`evidence/publish-recheck.log`, 41,728,512-byte executable).
+`dotnet publish` with Native AOT `win-x64` succeeded with **zero trim/AOT warnings**. The source was re-published after the `probe-autosave` change, and still produced zero warnings (`evidence/publish-recheck.txt`, 41,728,512-byte executable).
 
 Build notes:
 
@@ -109,4 +109,4 @@ dotnet publish spikes/S1S2/S1S2.csproj -c Release -r win-x64 --self-contained tr
 & 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\dumpbin.exe' /dependents spikes/S1S2/out/aot/S1S2.exe
 ```
 
-Committed evidence lives in `evidence/`: `probe-results.txt`, `autosave-check.txt`, `smoke.txt`, `dumpbin.txt`, `publish-final.log`, `publish-recheck.log`. Generated workbooks stay untracked under `out/`.
+Committed evidence lives in `evidence/`: `probe-results.txt`, `autosave-check.txt`, `smoke.txt`, `dumpbin.txt`, `publish-final.txt`, `publish-recheck.txt`. Generated workbooks stay untracked under `out/`.
