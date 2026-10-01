@@ -402,6 +402,19 @@ def test_hyperlink_set_remove_and_partial_update_preserves_other_fields(tmp_path
 # Comments
 # ---------------------------------------------------------------------------
 
+def test_comment_set_on_loaded_workbook_without_existing_comments(tmp_path):
+    source = tmp_path / "commentless.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"] = "value"
+    workbook.save(source)
+
+    key = _load_key(M.excel_load(str(source)))
+    M.excel_set_comment(key, "Sheet", "A1", "new note", author="alice")
+
+    session = M._get_session(key)
+    assert session["sheets"][0]["comments"]["A1"] == {"text": "new note", "author": "alice"}
+
+
 def test_comment_set_remove_legacy_text_author_roundtrip(tmp_path):
     key = _new_session()
     out = tmp_path / "comments.xlsx"

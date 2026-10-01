@@ -8268,7 +8268,8 @@ def excel_set_comment(
         raise ValueError("Threaded comments are not converted to legacy comments; core/package support is required.")
     data = _get_session(session_key)
     sheet, _, _, cell_data = _cell_from_a1(data, sheet_name, cell, create=True)
-    comments = sheet.setdefault("comments", {})
+    comments = sheet.get("comments") or {}
+    sheet["comments"] = comments
     before = copy.deepcopy(comments.get(cell))
     item = {"text": text, "author": author, **copy.deepcopy(metadata or {})}
     comments[cell] = item
