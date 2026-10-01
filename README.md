@@ -336,8 +336,8 @@ Tool descriptions are written for agent routing: they state when to use the tool
 - Advanced Excel objects such as DrawingML, macros, external links, pivot tables, slicers, and VML are preserved best-effort. Height-only edits on existing unsigned workbooks patch the original OOXML worksheet without regenerating other package parts and run preservation verification automatically; signed workbooks are rejected because editing invalidates their signature. Saves that lose protected package parts are rejected even if verification was disabled explicitly. For other edits, use `verify_preservation=true`; a rejection leaves the original untouched.
 - Use limit parameters such as `sheet_name`, `range_ref`, `max_rows`, `max_cols`, `preview`, `max_chars`, and `include_body=false` when available to keep tool responses small.
 - `excel_capture` requires LibreOffice on the machine running the MCP server.
-- Markdown diagram validation/rendering depends on optional external CLIs such as Mermaid CLI.
-- Markdown edits preserve UTF-8 BOM, homogeneous CRLF/LF, and EOF newline state; mixed CRLF/LF files and unsupported complex YAML mutations are rejected rather than silently normalized. Generated `md_split`, `md_merge`, and `md_tangle` outputs use UTF-8/LF (reported in tool results). Diagram rendering is not yet bundled into the release binary.
+- Markdown diagram validation/rendering supports a bundled portable renderer for Mermaid and DOT.
+- Markdown edits preserve UTF-8 BOM, homogeneous CRLF/LF, and EOF newline state; mixed CRLF/LF files and unsupported complex YAML mutations are rejected rather than silently normalized. Generated `md_split`, `md_merge`, and `md_tangle` outputs use UTF-8/LF (reported in tool results). New release builds bundle SVG rendering for supported Mermaid and DOT syntax; `md_runtime_capabilities` reports the active backend. Mermaid PNG/PDF output requires a host-installed `mmdc`.
 - PDF conversion is best-effort text extraction, not pixel-perfect layout reconstruction.
 - Release binaries are native executables.
 

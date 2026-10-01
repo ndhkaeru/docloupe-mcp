@@ -65,13 +65,15 @@ Implemented and included in the completed DocLoupe MCP server set.
 | `md_split` | Split a Markdown document into files at headings of a chosen level. |
 | `md_merge` | Merge multiple Markdown files, optionally offsetting heading levels. |
 | `md_to_html` | Render a small Markdown subset to HTML without external dependencies. |
-| `md_validate_diagram` | Report whether diagram validation can run; returns skipped when the required external CLI is unavailable. |
-| `md_render_diagram` | Render a Mermaid diagram with mmdc when available; returns skipped if dependencies are missing. |
+| `md_runtime_capabilities` | Report active diagram backends and preservation capabilities. |
+| `md_validate_diagram` | Validate supported Mermaid and DOT syntax with the bundled renderer, or an optional host CLI. |
+| `md_render_diagram` | Render supported Mermaid or DOT diagrams to SVG; Mermaid PNG/PDF needs host `mmdc`. |
 
 
 ## Notes
 
 - ATX headings (`#` through `######`) are parsed; fenced code blocks are ignored when detecting headings.
 - GitHub-compatible heading slugs keep Unicode letters, including Vietnamese text.
-- Diagram validation/rendering is optional and returns `skipped` when external CLIs such as `mmdc` are not installed.
+- New release builds bundle the Mermaid/DOT SVG renderer; source checkouts require building it or installing a compatible CLI. PlantUML validation still requires a host CLI. Use `md_runtime_capabilities` to inspect the active backend.
+- To enable it from source, run `cargo build --locked --release --manifest-path servers/md/diagram_renderer/Cargo.toml --target-dir build/diagram-target` at the repository root. Set `DOCLOUPE_DIAGRAM_RENDERER` to an alternate renderer binary path if needed.
 - For raw arbitrary file reads, prefer `text-tools`.

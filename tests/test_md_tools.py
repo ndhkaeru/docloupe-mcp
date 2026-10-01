@@ -10,6 +10,8 @@ T.  The five kept tools work; the four removed tools are gone.
 """
 import importlib.util
 import sys
+import threading
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -267,7 +269,11 @@ def test_tangle_split_merge_and_diagram_skip(tmp_path):
     merged_path = tmp_path / "merged.md"
     assert M.md_merge([item["path"] for item in split["files"]], str(merged_path), heading_offset=1)["merged_count"] == 2
     diagram_path = _write(tmp_path, "# D\n\n```mermaid\ngraph TD; A-->B\n```\n", name="diagram.md")
-    assert "skipped" in M.md_validate_diagram(diagram_path)
+    result = M.md_validate_diagram(diagram_path)
+    if M.md_runtime_capabilities()["diagram"]["mermaid"]["validate"]:
+        assert result["ok"] is True
+    else:
+        assert result["skipped"] is True
 
 
 def test_mermaid_render_uses_staging_and_removes_workspace(tmp_path, monkeypatch):
@@ -280,6 +286,7 @@ def test_mermaid_render_uses_staging_and_removes_workspace(tmp_path, monkeypatch
     workspaces = []
 
     monkeypatch.setattr(M.shutil, "which", lambda _name: "fake-mmdc")
+    monkeypatch.setattr(M, "_bundled_diagram_renderer", lambda: None)
 
     def fake_run(command, **kwargs):
         assert kwargs["timeout_seconds"] == 5.0
@@ -383,9 +390,19 @@ def test_mixed_newlines_reject_mutation_without_writing(tmp_path):
     assert path.read_bytes() == original
 
 
+@pytest.mark.parametrize("source", [b"\xef\xbb\xbf\xff", b"\xff\xfe\x00", b"\xfe\xff\x00", b"\x81"])
+def test_invalid_encoding_rejects_mutation_without_replacement_characters(tmp_path, source):
+    path = tmp_path / "invalid.md"
+    path.write_bytes(source)
+    with pytest.raises(UnicodeError):
+        M.md_append_to_section(str(path), "new text")
+    assert path.read_bytes() == source
+
+
 def test_diagram_validation_runs_installed_cli(tmp_path, monkeypatch):
     path = _write(tmp_path, "```mermaid\ngraph TD; A-->B\n```\n")
     monkeypatch.setattr(M.shutil, "which", lambda _name: "fake-mmdc")
+    monkeypatch.setattr(M, "_bundled_diagram_renderer", lambda: None)
 
     def fake_run(command, **_kwargs):
         Path(command[command.index("-o") + 1]).write_text("<svg/>", encoding="utf-8")
@@ -400,6 +417,7 @@ def test_render_image_link_is_relative_to_document(tmp_path, monkeypatch):
     path = _write(tmp_path, "```mermaid\ngraph TD; A-->B\n```\n")
     output = tmp_path / "images" / "my chart.svg"
     monkeypatch.setattr(M.shutil, "which", lambda _name: "fake-mmdc")
+    monkeypatch.setattr(M, "_bundled_diagram_renderer", lambda: None)
 
     def fake_run(command, **_kwargs):
         Path(command[command.index("-o") + 1]).write_text("<svg/>", encoding="utf-8")
@@ -421,6 +439,7 @@ def test_mermaid_render_failure_keeps_existing_output(tmp_path, monkeypatch):
     workspaces = []
 
     monkeypatch.setattr(M.shutil, "which", lambda _name: "fake-mmdc")
+    monkeypatch.setattr(M, "_bundled_diagram_renderer", lambda: None)
 
     def fake_run(command, **_kwargs):
         staged_output = Path(command[command.index("-o") + 1])
@@ -441,3 +460,76 @@ def test_mermaid_render_failure_keeps_existing_output(tmp_path, monkeypatch):
     assert output_path.read_text(encoding="utf-8") == "existing"
     assert workspaces and all(not workspace.exists() for workspace in workspaces)
     assert not list(tmp_path.glob(".docloupe-mermaid-*"))
+
+
+@pytest.mark.parametrize("language,valid,invalid", [
+    ("mermaid", "flowchart TD\n A --> B", "flowchart TD\n A -->"),
+    ("dot", "digraph G { A -> B; }", "digraph G {"),
+])
+def test_bundled_diagram_validation_and_render(tmp_path, language, valid, invalid):
+    if not M._bundled_diagram_renderer():
+        pytest.skip("portable diagram renderer has not been built")
+
+    capabilities = M.md_runtime_capabilities()["diagram"][language]
+    assert capabilities == {"validate": True, "render_svg": True, "backend": "rust"}
+    path = _write(tmp_path, f"```{language}\n{valid}\n```\n")
+    assert M.md_validate_diagram(path)["ok"] is True
+    output = tmp_path / "diagram.svg"
+    assert M.md_render_diagram(path, str(output))["ok"] is True
+    assert "<svg" in output.read_text(encoding="utf-8")
+
+    Path(path).write_text(f"```{language}\n{invalid}\n```\n", encoding="utf-8")
+    assert M.md_validate_diagram(path)["ok"] is False
+    previous = output.read_bytes()
+    assert M.md_render_diagram(path, str(output))["ok"] is False
+    assert output.read_bytes() == previous
+
+
+@pytest.mark.parametrize("source", [
+    "flowchart LR\n A --> B",
+    "sequenceDiagram\n Alice->>Bob: Hello",
+    "classDiagram\n Animal <|-- Dog",
+    "stateDiagram-v2\n [*] --> Idle",
+    "erDiagram\n CUSTOMER ||--o{ ORDER : places",
+    'pie\n "Cats" : 42\n "Dogs" : 58',
+    "gantt\n title Demo\n section Build\n Task :a1, 2026-01-01, 2d",
+    "journey\n title Login\n section App\n Sign in: 5: User",
+])
+def test_bundled_mermaid_compatibility_corpus(tmp_path, source):
+    if not M._bundled_diagram_renderer():
+        pytest.skip("portable diagram renderer has not been built")
+    document = _write(tmp_path, f"```mermaid\n{source}\n```\n")
+    assert M.md_validate_diagram(document)["ok"] is True
+    output = tmp_path / "diagram.svg"
+    assert M.md_render_diagram(document, str(output))["ok"] is True
+    root = ET.parse(output).getroot()
+    assert root.tag == "{http://www.w3.org/2000/svg}svg"
+    assert root.findall(".//{http://www.w3.org/2000/svg}text")
+
+
+def test_dot_rejects_non_svg_before_writing(tmp_path):
+    path = _write(tmp_path, "```dot\ndigraph G { A -> B; }\n```\n")
+    with pytest.raises(ValueError, match="only .svg"):
+        M.md_render_diagram(path, str(tmp_path / "diagram.png"))
+    assert not (tmp_path / "diagram.png").exists()
+
+
+def test_diagram_cancelled_before_render_leaves_no_output(tmp_path, monkeypatch):
+    path = _write(tmp_path, "```mermaid\nflowchart TD\n A --> B\n```\n")
+    monkeypatch.setattr(M, "_bundled_diagram_renderer", lambda: "fake-renderer")
+    cancel_event = threading.Event()
+    cancel_event.set()
+    output = tmp_path / "diagram.svg"
+    with pytest.raises(M.ManagedProcessCancelled):
+        M._md_render_diagram_impl(path, str(output), 0, False, 1.0, cancel_event)
+    assert not output.exists()
+
+
+def test_diagram_link_preflight_rejects_different_drive_before_render(tmp_path, monkeypatch):
+    path = _write(tmp_path, "```mermaid\nflowchart TD\n A --> B\n```\n")
+    monkeypatch.setattr(M, "_bundled_diagram_renderer", lambda: "fake-renderer")
+    monkeypatch.setattr(M.os.path, "relpath", lambda *_args: (_ for _ in ()).throw(ValueError("different drive")))
+    output = tmp_path / "images" / "diagram.svg"
+    with pytest.raises(ValueError, match="same drive"):
+        M.md_render_diagram(path, str(output), replace_with_image=True)
+    assert not output.parent.exists()

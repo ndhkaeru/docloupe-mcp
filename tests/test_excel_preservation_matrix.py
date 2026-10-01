@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -169,3 +170,32 @@ def test_no_edit_public_roundtrip_has_no_unapproved_differences(tmp_path, source
     reloaded_evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert reloaded_evidence["verification"]["preservation_ok"] is True
     assert evidence_path.stat().st_size < 2_000_000
+
+
+@pytest.mark.parametrize("source_name", SOURCE_NAMES)
+def test_row_height_tool_preserves_real_fixture_package(tmp_path, source_name):
+    root, manifest = _manifest()
+    source, _ = _assert_manifest_hashes(root, _fixture_record(manifest, source_name), source_name)
+    output = tmp_path / source_name
+    session_key = _session_key(M.excel_load(str(source)))
+    try:
+        sheet_name = M._get_session(session_key)["sheets"][0]["name"]
+        M.excel_set_row_height(session_key, sheet_name, {"0": 29})
+        if source_name == "05-advanced-package-source.xlsm":
+            with pytest.raises(Exception, match="EXCEL_SAVE_REQUIRES_RESIGNING"):
+                M.excel_save_as_copy(session_key, str(output), verify_preservation=True)
+            assert not output.exists()
+            return
+        report = json.loads(M.excel_save_as_copy(
+            session_key, str(output), verify_preservation=True, report_format="json",
+        ))
+    finally:
+        M.excel_close(session_key)
+
+    assert report["verification"]["preservation_ok"] is True
+    assert json.loads(M.excel_validate_workbook(str(output)))["valid"] is True
+    with zipfile.ZipFile(source) as before, zipfile.ZipFile(output) as after:
+        assert set(before.namelist()) == set(after.namelist())
+        changed = {name for name in before.namelist() if before.read(name) != after.read(name)}
+        assert changed == {"xl/worksheets/sheet1.xml"}
+    assert _sha256(source) == _fixture_record(manifest, source_name)["source_sha256"]

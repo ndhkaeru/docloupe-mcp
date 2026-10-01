@@ -1,0 +1,13 @@
+[package]
+name = "docloupe-diagram-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+layout-rs = "=0.1.3"
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

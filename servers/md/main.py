@@ -40,10 +40,11 @@ mcp = FastMCP(
         "md_move_section, md_set_heading_level, md_normalize_headings, or md_rename_heading, "
         "then re-read the affected section. "
         "Use table, diagram, code-block, link/image, TOC, frontmatter, split/merge, and "
-        "stats tools for Markdown-native operations. Tools that return Markdown content "
+        "stats tools for Markdown-native operations. Use md_runtime_capabilities to discover "
+        "diagram backends. Tools that return Markdown content "
         "return raw Markdown text for direct rendering; whole-file arbitrary reads belong "
         "to text-tools. Diagram validation/rendering is best-effort and reports skipped "
-        "when optional external CLIs are unavailable."
+        "when neither the bundled renderer nor an optional external CLI is available."
     ),
 )
 
@@ -63,15 +64,15 @@ def _resolve_path(path: str) -> Path:
 
 def _decode_fuzzy(data: bytes) -> tuple[str, str]:
     if data.startswith(b"\xef\xbb\xbf"):
-        return data[3:].decode("utf-8", errors="replace"), "UTF-8-BOM"
+        return data[3:].decode("utf-8"), "UTF-8-BOM"
     if data.startswith(b"\xff\xfe"):
-        return data[2:].decode("utf-16-le", errors="replace"), "UTF-16LE"
+        return data[2:].decode("utf-16-le"), "UTF-16LE"
     if data.startswith(b"\xfe\xff"):
-        return data[2:].decode("utf-16-be", errors="replace"), "UTF-16BE"
+        return data[2:].decode("utf-16-be"), "UTF-16BE"
     try:
         return data.decode("utf-8"), "UTF-8"
     except UnicodeDecodeError:
-        return data.decode("cp1252", errors="replace"), "WINDOWS-1252"
+        return data.decode("cp1252"), "WINDOWS-1252"
 
 
 def _encode_fuzzy(content: str, encoding: str) -> bytes:
@@ -1555,26 +1556,63 @@ def md_to_html(path: str, body_only: bool = False) -> str:
     return body if body_only else "<!doctype html>\n<html><body>\n" + body + "\n</body></html>\n"
 
 
+def _bundled_diagram_renderer() -> str | None:
+    name = "docloupe-diagram-renderer" + (".exe" if os.name == "nt" else "")
+    override = os.environ.get("DOCLOUPE_DIAGRAM_RENDERER")
+    if override:
+        path = Path(override).expanduser().resolve()
+        return str(path) if path.is_file() else None
+    locations = [Path(getattr(sys, "_MEIPASS", "")) / name] if getattr(sys, "frozen", False) else [
+        Path(__file__).resolve().parents[2] / "build" / "diagram-target" / "release" / name,
+    ]
+    return next((str(path) for path in locations if path.is_file() and (os.name == "nt" or os.access(path, os.X_OK))), None)
+
+
+@mcp.tool()
+def md_runtime_capabilities() -> dict[str, Any]:
+    """Report actual diagram backends and document-preservation capabilities."""
+    bundled = _bundled_diagram_renderer()
+    mermaid = bundled or shutil.which("mmdc")
+    dot = bundled or shutil.which("dot")
+    plantuml = shutil.which("plantuml")
+    return {
+        "diagram": {
+            "mermaid": {"validate": bool(mermaid), "render_svg": bool(mermaid),
+                        "backend": "rust" if bundled else "mmdc" if mermaid else None},
+            "dot": {"validate": bool(dot), "render_svg": bool(bundled or dot),
+                    "backend": "rust" if bundled else "dot" if dot else None},
+            "plantuml": {"validate": bool(plantuml), "render_svg": False,
+                         "backend": "plantuml" if plantuml else None},
+        },
+        "preservation": {"encoding": True, "bom": True, "newline": True, "trailing_newline": True},
+    }
+
+
 @mcp.tool()
 def md_validate_diagram(path: str, diagram_index: int = 0) -> dict[str, Any]:
-    """Validate a diagram with an installed CLI, or report an unavailable capability."""
+    """Validate Mermaid/DOT with the bundled renderer or an optional host CLI."""
     diagram = md_read_diagram(path, diagram_index)
     lang = diagram["diagram"]["language"]
+    renderer = _bundled_diagram_renderer() if lang in {"mermaid", "dot", "graphviz"} else None
     cli = "mmdc" if lang == "mermaid" else "plantuml" if lang in {"plantuml", "puml"} else "dot" if lang in {"dot", "graphviz"} else None
-    if not cli or not shutil.which(cli):
-        return {"path": diagram["path"], "ok": None, "skipped": True, "reason": f"{cli or lang} CLI is not installed", "diagram": diagram["diagram"]}
+    fallback = shutil.which(cli) if cli else None
+    if not renderer and not fallback:
+        return {"path": diagram["path"], "ok": None, "skipped": True,
+                "reason": f"No renderer available for {lang}", "diagram": diagram["diagram"]}
     with tempfile.TemporaryDirectory(prefix=".docloupe-diagram-check-") as workspace:
         source = Path(workspace) / ("diagram.puml" if cli == "plantuml" else "diagram.mmd" if cli == "mmdc" else "diagram.dot")
         source.write_text(diagram["source"], encoding="utf-8")
         output = source.with_suffix(".svg")
-        command = ([shutil.which(cli), "-i", str(source), "-o", str(output)] if cli == "mmdc" else
-                   [shutil.which(cli), "-Tsvg", str(source), "-o", str(output)] if cli == "dot" else
-                   [shutil.which(cli), "-checkonly", str(source)])
+        command = ([renderer, "validate", "--language", "mermaid" if lang == "mermaid" else "dot", "--input", str(source)]
+                   if renderer else [fallback, "-i", str(source), "-o", str(output)] if cli == "mmdc" else
+                   [fallback, "-Tsvg", str(source), "-o", str(output)] if cli == "dot" else
+                   [fallback, "-checkonly", str(source)])
         result = run_managed_process(command, timeout_seconds=30, capture_output=True,
                                      text=True, encoding="utf-8", errors="replace")
-        valid = result.returncode == 0 and (cli == "plantuml" or output.is_file())
+        valid = result.returncode == 0 and (renderer is not None or cli == "plantuml" or output.is_file())
         return {"path": diagram["path"], "ok": valid, "skipped": False,
                 "exit_code": result.returncode, "stderr": result.stderr,
+                 "backend": "rust" if renderer else cli,
                 "diagram": diagram["diagram"]}
 
 
@@ -1588,19 +1626,33 @@ def _md_render_diagram_impl(
 ) -> dict[str, Any]:
     diagram = md_read_diagram(path, diagram_index)
     language = diagram["diagram"]["language"]
-    cli = shutil.which("mmdc")
-    if language != "mermaid" or not cli:
+    output = Path(output_path).expanduser().resolve()
+    if language in {"dot", "graphviz"} and output.suffix.lower() != ".svg":
+        raise ValueError("DOT rendering supports only .svg output")
+    if language == "mermaid" and output.suffix.lower() not in {".svg", ".png", ".pdf"}:
+        raise ValueError("Mermaid rendering supports .svg, .png, or .pdf output")
+    renderer = _bundled_diagram_renderer() if output.suffix.lower() == ".svg" and language in {"mermaid", "dot", "graphviz"} else None
+    cli = renderer or (shutil.which("mmdc") if language == "mermaid" else shutil.which("dot") if language in {"dot", "graphviz"} else None)
+    if not cli:
         return {
             "path": diagram["path"],
             "ok": None,
             "skipped": True,
-            "reason": "mmdc CLI is required for Mermaid rendering",
+            "reason": f"No renderer available for {language} and {output.suffix or 'unknown'} output",
             "output_path": output_path,
         }
 
-    output = Path(output_path).expanduser().resolve()
+    image_markdown = None
+    if replace_with_image:
+        resolved_path = _resolve_path(path)
+        try:
+            relative = os.path.relpath(output, resolved_path.parent)
+        except ValueError as exc:
+            raise ValueError("Diagram image must be on the same drive as its Markdown file") from exc
+        image_markdown = f"![diagram]({quote(relative.replace(os.sep, '/'), safe='/-._~')})\n"
+
     output.parent.mkdir(parents=True, exist_ok=True)
-    command_label = (cli, "-i", "<source>", "-o", str(output))
+    command_label = (cli, "render", "<source>", str(output))
     if cancel_event is not None and cancel_event.is_set():
         raise ManagedProcessCancelled(command_label, process_tree_stopped=True)
 
@@ -1609,10 +1661,13 @@ def _md_render_diagram_impl(
         dir=output.parent,
     ) as workspace_name:
         workspace = Path(workspace_name)
-        source_path = workspace / "diagram.mmd"
+        source_path = workspace / ("diagram.dot" if language in {"dot", "graphviz"} else "diagram.mmd")
         staged_output = workspace / output.name
         source_path.write_text(diagram["source"], encoding="utf-8")
-        command = [cli, "-i", str(source_path), "-o", str(staged_output)]
+        command = ([renderer, "render", "--language", "mermaid" if language == "mermaid" else "dot",
+                    "--input", str(source_path), "--output", str(staged_output)] if renderer else
+                   [cli, "-i", str(source_path), "-o", str(staged_output)] if language == "mermaid" else
+                   [cli, "-Tsvg", str(source_path), "-o", str(staged_output)])
         result = run_managed_process(
             command,
             timeout_seconds=timeout_seconds,
@@ -1642,7 +1697,7 @@ def _md_render_diagram_impl(
             return {
                 "path": diagram["path"],
                 "ok": False,
-                "stderr": "mmdc exited successfully but produced no output file",
+                "stderr": "Diagram renderer exited successfully but produced no output file",
                 "exit_code": result.returncode,
                 "process_tree_stopped": result.process_tree_stopped,
                 "output_path": str(output),
@@ -1657,11 +1712,6 @@ def _md_render_diagram_impl(
             content,
             {"mermaid", "plantuml", "puml", "dot", "graphviz"},
         )[diagram_index]
-        try:
-            relative = os.path.relpath(output, resolved_path.parent)
-        except ValueError as exc:
-            raise ValueError("Diagram image must be on the same drive as its Markdown file") from exc
-        image_markdown = f"![diagram]({quote(relative.replace(os.sep, '/'), safe='/-._~')})\n"
         updated = _replace_line_range(
             content,
             block["start_line"],
@@ -1672,6 +1722,7 @@ def _md_render_diagram_impl(
     return {
         "path": diagram["path"],
         "ok": True,
+        "backend": "rust" if renderer else "mmdc" if language == "mermaid" else "dot",
         "process_tree_stopped": True,
         "output_path": str(output),
     }
@@ -1684,7 +1735,7 @@ def md_render_diagram(
     replace_with_image: bool = False,
     timeout_seconds: float = 60.0,
 ) -> dict[str, Any]:
-    """Render Mermaid through a bounded mmdc/Chromium process tree."""
+    """Render Mermaid or DOT with the bundled renderer or an optional host CLI."""
     return _md_render_diagram_impl(
         path,
         output_path,
@@ -1703,7 +1754,7 @@ async def _md_render_diagram_tool(
     replace_with_image: bool = False,
     timeout_seconds: float = 60.0,
 ) -> dict[str, Any]:
-    """Render Mermaid; cancellation stops mmdc and browser descendants."""
+    """Render Mermaid or DOT; cancellation stops the renderer process tree."""
     return await run_cancellable_in_thread(
         lambda cancel_event: _md_render_diagram_impl(
             path,

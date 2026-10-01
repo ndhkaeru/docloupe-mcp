@@ -54,7 +54,21 @@ jobs:
       - name: Apply source overlay
         if: env.HAS_SOURCE_OVERLAY == 'true'
         shell: pwsh
-        run: Copy-Item -Recurse -Force source-overlay/servers/* servers/
+        run: |
+          $required = @(
+            'servers/excel/excel_converter.py', 'servers/pdf/converter.py',
+            'servers/docx/converter.py', 'servers/docx/markdownify_helper.py',
+            'servers/docx/converter_utils', 'servers/pptx/converter.py',
+            'servers/pptx/markdownify_helper.py', 'servers/csv/converter.py',
+            'servers/html/converter.py', 'servers/html/markdownify_helper.py',
+            'servers/text/converter.py', 'servers/json/converter.py'
+          )
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path 'source-overlay' $_)) })
+          if ($missing.Count) { throw "Source overlay is incomplete: $($missing -join ', ')" }
+          foreach ($path in $required) {
+            New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
+            Copy-Item -LiteralPath (Join-Path 'source-overlay' $path) -Destination $path -Recurse -Force
+          }
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -83,6 +97,12 @@ jobs:
           $py = if (Test-Path ".venv-build/Scripts/python.exe") { ".venv-build/Scripts/python.exe" } else { ".venv-build/bin/python" }
           $entries = Get-ChildItem servers -Recurse -Filter main.py | ForEach-Object { $_.FullName }
           & $py -m py_compile @entries
+
+      - name: Build portable diagram renderer
+        shell: pwsh
+        run: |
+          cargo build --locked --release --manifest-path servers/md/diagram_renderer/Cargo.toml --target-dir build/diagram-target
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run tests
         shell: pwsh

@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url';
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const npmWorkflowPath = join(repositoryRoot, '.github', 'workflows', 'npm.yml');
 const releaseWorkflowPath = join(repositoryRoot, '.github', 'workflows', 'release.yml');
+const pushWorkflowPath = join(repositoryRoot, '.github', 'workflows', 'push.yml');
 const npmWorkflow = readFileSync(npmWorkflowPath, 'utf8').replace(/\r\n?/g, '\n');
 const releaseWorkflow = readFileSync(releaseWorkflowPath, 'utf8').replace(/\r\n?/g, '\n');
+const pushWorkflow = readFileSync(pushWorkflowPath, 'utf8').replace(/\r\n?/g, '\n');
 const failures = [];
 
 function requireMatch(label, content, pattern) {
@@ -84,6 +86,42 @@ forbidMatch(
   'release.yml must not duplicate npm publish implementation',
   releaseWorkflow,
   /npm publish --access public/,
+);
+
+forbidMatch(
+  'release.yml must not overwrite audited server sources with a broad overlay',
+  releaseWorkflow,
+  /Copy-Item[^\n]*source-overlay\/servers\/\*/,
+);
+requireMatch(
+  'release.yml must restrict overlay copies to the converter allowlist',
+  releaseWorkflow,
+  /Copy-Item -LiteralPath \(Join-Path 'source-overlay' \$path\) -Destination \$path -Recurse -Force/,
+);
+requireMatch(
+  'release.yml must package the Rust diagram renderer',
+  releaseWorkflow,
+  /--add-binary", "\$renderer\$\(\[IO\.Path\]::PathSeparator\)\."/,
+);
+requireMatch(
+  'release.yml must smoke test packaged MCP servers',
+  releaseWorkflow,
+  /- name: Smoke test packaged MCP servers[\s\S]*?tests\/test_md_binary_smoke\.py tests\/test_excel_binary_smoke\.py/,
+);
+forbidMatch(
+  'push.yml must not overwrite audited server sources with a broad overlay',
+  pushWorkflow,
+  /Copy-Item[^\n]*source-overlay\/servers\/\*/,
+);
+requireMatch(
+  'push.yml must restrict overlay copies to the converter allowlist',
+  pushWorkflow,
+  /Copy-Item -LiteralPath \(Join-Path 'source-overlay' \$path\) -Destination \$path -Recurse -Force/,
+);
+requireMatch(
+  'push.yml must build the Rust renderer before testing Markdown',
+  pushWorkflow,
+  /- name: Build portable diagram renderer[\s\S]*?cargo build --locked --release --manifest-path servers\/md\/diagram_renderer\/Cargo\.toml[\s\S]*?- name: Run tests/,
 );
 
 if (failures.length) {

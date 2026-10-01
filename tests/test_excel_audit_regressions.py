@@ -1,4 +1,5 @@
 import json
+import hashlib
 import shutil
 import sys
 import zipfile
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 
 import openpyxl
 import pytest
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "servers" / "excel"))
@@ -64,6 +66,36 @@ def test_bulk_cell_edit_error_keeps_entire_session_unchanged(tmp_path):
                                            {"cell": "D1", "value": "plain"}])
     assert json.loads(M.excel_get_cell(key, "Sheet", 2, 1))["value"] == before
     assert list(data.get("_dirty_paths") or []) == dirty_paths
+
+
+def test_read_only_tools_and_reload_preserve_source(tmp_path):
+    source = tmp_path / "read-only.xlsx"
+    picture = tmp_path / "picture.png"
+    Image.new("RGB", (2, 2), (20, 30, 40)).save(picture)
+    workbook = openpyxl.Workbook()
+    workbook.active.title = "Sheet"
+    workbook.active["A1"] = "Header"
+    workbook.active["A2"] = "alpha"
+    workbook.active.add_image(openpyxl.drawing.image.Image(str(picture)), "B2")
+    workbook.save(source)
+    original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    session_key = _session_key(M.excel_load(str(source)))
+    try:
+        assert json.loads(M.excel_find_rows(session_key, "Sheet", 0, value="alpha"))[0]["row_index"] == 1
+        assert "alpha" in M.excel_to_markdown(session_key, "Sheet").text
+        result = M.excel_extract_images(session_key, "Sheet", str(tmp_path / "images"))
+        assert "image_01.png" in result
+        assert (tmp_path / "images" / "image_01.png").is_file()
+
+        M.excel_edit_cells(session_key, "Sheet", [{"cell": "A2", "value": "temporary"}])
+        assert json.loads(M.excel_find_rows(session_key, "Sheet", 0, value="temporary"))
+        assert "Reloaded:" in M.excel_reload(session_key)
+        assert json.loads(M.excel_find_rows(session_key, "Sheet", 0, value="alpha"))
+        assert not json.loads(M.excel_find_rows(session_key, "Sheet", 0, value="temporary"))
+    finally:
+        M.excel_close(session_key)
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
 
 
 @pytest.mark.parametrize("filename", [
