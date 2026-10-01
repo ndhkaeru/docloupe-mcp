@@ -35,3 +35,5 @@ jobs:
         run: dotnet test servers/excel_cs/DocLoupe.Excel.slnx --configuration Release --nologo
       - name: Check schema-derived element order
         run: dotnet run --project servers/excel_cs/tools/SchemaOrder/SchemaOrder.csproj --configuration Release
+      - name: Smoke test the MCP stdio transport
+        run: dotnet run --project servers/excel_cs/spikes/S3/S3.csproj --configuration Release -- servers/excel_cs/src/DocLoupe.Excel.Server/bin/Release/net10.0/DocLoupe.Excel.Server.dll
