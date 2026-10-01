@@ -44,3 +44,45 @@ public sealed class SetValueRequest
         return new SetValueOp(name, address, kind, scalar, RichPolicy, AsText);
     }
 }
+
+public sealed class SaveAssertionRequest
+{
+    [JsonPropertyName("target")]
+    public required string Target { get; init; }
+    [JsonPropertyName("equals")]
+    public required JsonElement Expected { get; init; }
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Other { get; init; }
+
+    public DocLoupe.Excel.Verify.ValueAssertion Normalize()
+    {
+        if (Other is { Count: > 0 }) throw new NotSupportedException("Only equals assertions are supported");
+        var sheet = CellAddress.SheetName(Target) ?? throw new ArgumentException("Assertion target must be sheet-qualified");
+        var address = CellAddress.Parse(Target).ToString();
+        if (Expected.ValueKind != JsonValueKind.Object) throw new ArgumentException("Assertion equals must be an object");
+        var properties = Expected.EnumerateObject().ToArray();
+        if (properties.Length == 0 || properties.GroupBy(property => property.Name).Any(group => group.Count() > 1) ||
+            properties.Any(property => property.Name is not ("value" or "formula")))
+            throw new NotSupportedException("Only equals.value and equals.formula assertions are supported");
+        var checkValue = Expected.TryGetProperty("value", out var value);
+        var (kind, scalar) = checkValue ? value.ValueKind switch
+        {
+            JsonValueKind.String => ("text", value.GetString()),
+            JsonValueKind.Number => ("number", value.GetRawText()),
+            JsonValueKind.True => ("boolean", "true"),
+            JsonValueKind.False => ("boolean", "false"),
+            JsonValueKind.Null => ("blank", (string?)null),
+            _ => throw new NotSupportedException("Unsupported assertion value")
+        } : ((string?)null, (string?)null);
+        if (kind == "number" && !DocLoupe.Excel.Verify.G7Assertions.IsSupportedNumber(scalar))
+            throw new NotSupportedException("Numeric assertion is outside the supported lexical range");
+        string? formula = null;
+        if (Expected.TryGetProperty("formula", out var expectedFormula))
+        {
+            if (expectedFormula.ValueKind != JsonValueKind.String ||
+                string.IsNullOrEmpty(formula = expectedFormula.GetString()?.TrimStart('=')))
+                throw new ArgumentException("Assertion formula must be a nonempty string");
+        }
+        return new DocLoupe.Excel.Verify.ValueAssertion(sheet, address, checkValue, kind, scalar, formula);
+    }
+}

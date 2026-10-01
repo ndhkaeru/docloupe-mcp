@@ -85,7 +85,7 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
 - **VBA:** if O has `vbaProject.bin`, then W has the part, its relationship, and the macroEnabled content type (EX-01).
 - **Digital signatures:** any change to a signed package invalidates the signatures. Without `allow_signature_invalidation` the gate fails (`SIGNATURE_WOULD_BREAK`). When allowed, it is reported as a declared effect.
 - **Other advanced parts must be present and semantically equal unless declared:** charts, media, drawings, printer settings, pivot caches/tables, slicers, timelines, external links, `customXml`, `customUI`, threaded comments/persons, `xl/model`, `xl/metadata.xml`. This catches EX-01.
-- **calcChain:** when any formula or value changed, the writer removes `xl/calcChain.xml` (Excel rebuilds it) and declares that removal as an effect. Otherwise the part must be unchanged.
+- **calcChain:** the writer removes `xl/calcChain.xml` only when an existing formula is replaced with non-formula content, and declares that removal as an effect. Otherwise the part must be unchanged. Value changes still set `fullCalcOnLoad` independently. Broader shared/array formula handling is deferred to P3.
 
 ### 3.7 G7 — Agent assertions
 

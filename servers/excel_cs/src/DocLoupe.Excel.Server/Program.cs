@@ -15,7 +15,7 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
     McpServerTool.Create((string? session = null) => Handle(() => sessions.Status(session)), new McpServerToolCreateOptions { Name = "excel_status" }),
     McpServerTool.Create((string session, string? sheet, string target) => Handle(() => sessions.Read(session, sheet, [target])), new McpServerToolCreateOptions { Name = "excel_read" }),
     McpServerTool.Create((string session, int base_revision, SetValueRequest[] ops, string? sheet) => Handle(() => sessions.Apply(session, base_revision, ops.Select(op => op.Normalize(sheet)).ToArray())), new McpServerToolCreateOptions { Name = "excel_apply" }),
-    McpServerTool.Create((string session, string mode, string path) => Handle(() => mode == "copy" ? sessions.Save(session, path) : throw new NotSupportedException("P2a save supports copy mode only")), new McpServerToolCreateOptions { Name = "excel_save" }),
+    McpServerTool.Create((string session, string mode, string path, SaveAssertionRequest[]? @assert = null) => Handle(() => mode == "copy" ? sessions.Save(session, path, @assert?.Select(item => item.Normalize()).ToArray()) : throw new NotSupportedException("P2a save supports copy mode only")), new McpServerToolCreateOptions { Name = "excel_save" }),
     McpServerTool.Create((string session, bool discard_unsaved) => Handle(() => sessions.Close(session, discard_unsaved)), new McpServerToolCreateOptions { Name = "excel_close" }),
     McpServerTool.Create((string session, int base_revision, int to_revision) => Handle(() =>
     {

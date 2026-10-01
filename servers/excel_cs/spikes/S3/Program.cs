@@ -38,13 +38,24 @@ try
     if (status.IsError == true || status.StructuredContent?.GetProperty("data").GetProperty("revision").GetInt32() != 1 ||
         status.StructuredContent?.GetProperty("data").GetProperty("ledger").GetArrayLength() != 1)
         throw new InvalidOperationException("Session status failed: " + status.StructuredContent?.GetRawText());
+    var invalidOutput = Path.Combine(directory, "invalid.xlsx");
+    var rejected = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["mode"] = "copy", ["path"] = invalidOutput,
+        ["assert"] = new[] { new { target = "Sheet1!B1", equals = new { display = "99" } } }
+    });
+    if (rejected.IsError != true || File.Exists(invalidOutput))
+        throw new InvalidOperationException("Unsupported assertion was not rejected");
     var output = Path.Combine(directory, "written.xlsx");
     var saved = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
     {
-        ["session"] = session, ["mode"] = "copy", ["path"] = output
+        ["session"] = session, ["mode"] = "copy", ["path"] = output,
+        ["assert"] = new[] { new { target = "Sheet1!B1", equals = new { value = 99 } } }
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());
+    if (!saved.StructuredContent.Value.GetProperty("data").GetProperty("gates").EnumerateArray()
+        .Any(gate => gate.GetString() == "G7")) throw new InvalidOperationException("G7 assertion was not checked");
     Console.WriteLine("saved_status=" + saved.StructuredContent.Value.GetProperty("data").GetProperty("status").GetString());
     var undone = await client.CallToolAsync("excel_undo", new Dictionary<string, object?>
     {
