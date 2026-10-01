@@ -1,0 +1,32 @@
+00-base.xlsx | detached=6/6 baseline_errors=0 written_errors=0 same_error_ids=True
+  injected worksheet-level | detected
+  injected sheetData-level | detected
+  injected inside-cell     | detected
+01-audit-87-source.xlsx | detached=6/6 baseline_errors=1 written_errors=1 same_error_ids=True
+  injected worksheet-level | MASKED (parent has a baseline content-model error)
+  injected sheetData-level | detected
+  injected inside-cell     | detected
+02-table-metadata-source.xlsx | detached=8/8 baseline_errors=0 written_errors=0 same_error_ids=True
+  injected worksheet-level | detected
+  injected sheetData-level | detected
+  injected inside-cell     | detected
+03-print-area-source.xlsx | detached=6/6 baseline_errors=0 written_errors=0 same_error_ids=True
+  injected worksheet-level | detected
+  injected sheetData-level | detected
+  injected inside-cell     | detected
+04-rich-text-phonetic-source.xlsx | detached=9/9 baseline_errors=0 written_errors=0 same_error_ids=True
+  injected worksheet-level | detected
+  injected sheetData-level | detected
+  injected inside-cell     | detected
+05-advanced-package-source.xlsm | detached=6/6 baseline_errors=0 written_errors=0 same_error_ids=True
+  injected worksheet-level | detected
+  injected sheetData-level | detected
+  injected inside-cell     | detected
+06-book1-richtext-source.xlsm | detached=1/1 baseline_errors=0 written_errors=0 same_error_ids=True
+  injected worksheet-level | detected
+  injected sheetData-level | detected
+  injected inside-cell     | detected
+07-real-package-source.xlsx | detached=10/10 baseline_errors=0 written_errors=0 same_error_ids=True
+  injected worksheet-level | detected
+  injected sheetData-level | detected
+  injected inside-cell     | detected

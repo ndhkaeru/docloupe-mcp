@@ -23,7 +23,8 @@
 |---|---|---|---|
 | Runtime | .NET 10 (LTS), C# 14 | Whole server | — |
 | MCP | `ModelContextProtocol` (official C# SDK), stdio transport | Tool registration, JSON-RPC, cancellation, `structuredContent` | Spike **S3**: `UseStructuredContent` API, `CancellationToken` plumbing, Native AOT with explicit tool registration |
-| OOXML DOM | `DocumentFormat.OpenXml` 3.x (Open XML SDK) | Typed DOM per part: worksheet, styles, sharedStrings, table, drawing… | Spike **S1** (AOT/trimming) and **S2** (prefixes, `mc:Ignorable`, and unknown elements preserved) |
+| OOXML edit core | `System.Xml.XmlDocument` plus source-byte-preserving splice | Sole mutation authority for touched parts; no whole-part serialization in P2a | S2b proved one first-cell edit; P2a generalization still required (S2b review finding 6) |
+| Schema adapter | `DocumentFormat.OpenXml` 3.x (`OpenXmlValidator`) | G2 checks on detached typed roots from O and W; never writes package bytes | P2a SDK-role spike: eight worksheet pairs loaded, detached invalid child detected; not complete G2 coverage |
 | Package (ZIP) | `System.IO.Compression.ZipArchive` plus a custom `PackageStore` | Per-entry ZIP read/write; relationship and content-type model | `System.IO.Packaging` is not used for writing because it regenerates `[Content_Types].xml` (see §5.1) |
 | Independent reader for the verifier | `XmlReader` + `ZipArchive` | Re-reads the written file without going through Open XML SDK | **Deliberately shares no code** with the writer |
 | JSON | `System.Text.Json` with the source generator | Input/output DTOs | Required for AOT |
@@ -46,9 +47,10 @@ servers/excel_cs/
     DocLoupe.Excel.Server/            # MCP host: tool declarations, DTOs, JSON source-gen, server instructions
     DocLoupe.Excel.Model/             # A1 addresses, values, effective style, rich-text markup, semantic paths, hashes
     DocLoupe.Excel.Package/           # PackageStore: ZIP, relationships, content types, byte-preserving writer
-    DocLoupe.Excel.Engine/            # Sessions, ledger, planner, ops, DOM and streaming editors
+    DocLoupe.Excel.Engine/            # Sessions, ledger, planner, ops, System.Xml edit core
     DocLoupe.Excel.Formula/           # Tokenizer, reference shifting, dependencies
     DocLoupe.Excel.Verify/            # Independent reader, snapshots, comparer, normalization rules, gates
+    DocLoupe.Excel.Schema/            # SDK adapter for G2 on detached typed roots; no package writes
     DocLoupe.Excel.Oracles/           # Oracle interfaces and clients (Excel, LibreOffice)
   oracle/
     excel-oracle.ps1                  # Windows COM helper (PowerShell 5.1), embedded into the binary as a resource
@@ -63,7 +65,7 @@ servers/excel_cs/
     evidence/                         # CLI that replaces excel_build_preservation_summary
 ```
 
-**Dependency rule:** `Verify` depends only on `Model` and `Package` (to open the ZIP). It **must not** depend on `Engine` or on Open XML SDK. An architecture test (NetArchTest) enforces this.
+**Dependency rule:** `Verify` depends only on `Model` and `Package` (to open the ZIP). It **must not** depend on `Engine`, `Schema`, or Open XML SDK. `Engine` and `Package` must not depend on Open XML SDK either. Save orchestration invokes the independent `Verify` gates and the separate `Schema` G2 adapter; an architecture test (NetArchTest) enforces these boundaries. S1/S2b spike projects are exempt, not production dependencies.
 
 ## 4. Session model
 
@@ -89,10 +91,10 @@ Session
 
 | Mode | When | How |
 |---|---|---|
-| DOM | Sheet part ≤ `DOCLOUPE_EXCEL_DOM_MAX_BYTES` (default 32 MB uncompressed) | Load `Worksheet` with Open XML SDK and edit the DOM |
-| Streaming | Larger than the threshold | `OpenXmlReader` → apply the change list keyed by row/cell → `OpenXmlWriter`. Memory scales with the number of changes, not the number of cells |
+| DOM | Sheet part ≤ `DOCLOUPE_EXCEL_DOM_MAX_BYTES` (provisional default 32 MB uncompressed) | Load the raw XML into `XmlDocument`, edit once, then replace only independently identified changed spans in the source bytes |
+| Streaming | Larger than the threshold, after S4 proves a lossless editor | Stream through source XML and replace only verified change spans while passing all other bytes through unchanged; never use `OpenXmlReader` → `OpenXmlWriter` on the output path |
 
-Both modes implement `ISheetEditor`. A parity test requires both modes to produce semantically identical results for the same ops.
+Both modes implement `ISheetEditor`. A parity test requires both modes to produce semantically identical results for the same ops **and** retain untouched bytes. Until streaming passes that test, P2a rejects over-limit sheets; it does not silently use whole-part serialization.
 
 ### 4.3 Ledger, revisions and undo
 
@@ -129,19 +131,21 @@ This replaces the legacy rule ("clone everything first, then insert bottom-to-to
 - **Overlay:** an edited part is held as a DOM or as new bytes. Added and deleted parts are recorded as package effects.
 - **Writing, entry by entry:**
   - Untouched part: **copy the decompressed content verbatim** from the source, keeping entry order and entry names.
-  - Edited part: preserve the original XML outside the declared edit region while serializing the edited subtree from the detached DOM; an XML-aware lexical splice demonstrated this for one cell in S2b. G3 checks namespace/prefix fidelity independently. A whole-part writer for other ops still needs an equivalent guarantee or a separately tested prefix-restoration pass.
+  - Edited part: `System.Xml` is the **only mutable DOM**. Locate the edit region by namespace URI and cell address, change the DOM once, and splice only serialized edited subtrees into the original bytes. A single first-cell splice passed S2b; arbitrary cells, multiple edits and cell-type conversions still require P2a tests. A separate `Verify` reader checks bytes outside the declared spans without using the writer's locator. Ambiguous/overlapping spans or unsupported encodings fail closed.
     - S2 found that Open XML SDK writes known namespaces with its own prefix: a default worksheet namespace becomes `x:` even when nothing is edited, and `OuterXml` drops the XML declaration.
     - It did keep `mc:Ignorable`, `x14ac:dyDescent` and an unknown `extLst` in the synthetic prefixed case.
-    - A plain `OuterXml` write is therefore not sufficient (spike S2b).
+    - A plain whole-part `OuterXml` write is therefore not sufficient. S2b's typed SDK cell edit was manually repeated in `XmlDocument`; it did **not** prove that SDK edits could be committed without loss.
   - Part DOMs are built from the raw part XML, **without** `System.IO.Packaging`, which cannot open some valid-looking packages (see the S2 decision below).
   - `[Content_Types].xml` and `.rels`: **edit only the affected entries**. Never regenerate them. This is why `System.IO.Packaging` is not used for writing: it regenerates content types from the part list.
 - ZIP-level differences (compression level, timestamps) carry no meaning. They are covered by normalization rule `N-ZIP` (see 04 §5).
+
+**Open XML SDK role (P2a decision):** only `Schema` uses detached typed roots and `OpenXmlValidator` to compare G2 errors from the source and staging files. It does not open/save the workbook package or produce any write fragments in P2a. Relationship checks, independent G3–G5 and the actual write/readback remain outside the SDK. A part that cannot be schema-checked in detached form is a required `unverified` gap, not a silent pass (04 §4). Evidence: `../spikes/P2aSdkRole/REPORT.md`.
 
 **S2 decision (2026-10-01): approach B, conditional on S2b.**
 
 - **Why not A:** approach A (`SpreadsheetDocument` editable) could not open three of the eight external fixtures, whose `[Content_Types].xml` uses a namespace prefix (`<ns0:Types>`). It also gives no control over content types and relationships.
 - **Correction:** the `xl/workbook.xml` rewrite first reported for A was caused by `AutoSave` (on by default) combined with reading the workbook DOM. With `AutoSave = false`, A left every untouched entry byte-identical on the five fixtures it could open. Untouched-part stability is therefore not a differentiator.
-- **B after S2b:** a direct ZIP/XML DOM prototype parsed all eight fixtures without `System.IO.Packaging`, preserved every byte outside one edited cell on the touched sheet and every decompressed byte of untouched parts, and rejected synthetic EX-04 using an independent G3. This is a single-cell proof, not the general writer.
+- **B after S2b:** a direct ZIP/XML DOM prototype parsed all eight fixtures without `System.IO.Packaging`, preserved every byte outside one edited cell on the touched sheet and every decompressed byte of untouched parts, and rejected synthetic EX-04 using an independent G3. This is a single-cell proof of the `System.Xml` writer, not the general writer or SDK-backed edits.
 - **Production PackageStore must:**
   - read prefixed content types without rewriting the originals;
   - build part DOMs without `System.IO.Packaging`;

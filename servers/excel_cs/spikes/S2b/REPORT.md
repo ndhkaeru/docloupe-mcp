@@ -54,7 +54,7 @@ This is **not P1 completion**. Remaining: full G1 graph/content-type/ZIP limits,
    - locate the element namespace-aware;
    - verify `r` and fail closed on any disagreement;
    - have unit tests for comments and CDATA inside a cell, `>` inside attribute values, self-closing cells, prefixed names, a BOM, CRLF, and same-named elements in other namespaces.
-6. **Decide the role of Open XML SDK at the start of P2a.** The S2b output is produced by System.Xml, not by the SDK (see S2b result 1). README decision D2 ("Open XML SDK for direct DOM edits") must be re-decided. One candidate: a System.Xml-based writer core, with the SDK used for G2 schema validation and typed fragment construction.
+6. **Decide the role of Open XML SDK at the start of P2a.** The S2b output is produced by System.Xml, not by the SDK (see S2b result 1). README decision D2 ("Open XML SDK for direct DOM edits") must be re-decided. **Resolved:** `../P2aSdkRole/REPORT.md` records a System.Xml writer core and an SDK-only detached G2 adapter. SDK-generated write fragments are not part of P2a.
 7. **Broaden edit coverage.** In six of eight fixtures the first cell is already an inline string (a 4-byte difference), so no conversion from shared-string, number or formula cells was exercised. The P2a matrix must cover:
    - arbitrary target cells;
    - several edits in one sheet;
@@ -63,7 +63,7 @@ This is **not P1 completion**. Remaining: full G1 graph/content-type/ZIP limits,
 **Notes:**
 
 8. **P1 G1 is incomplete.** It hard-codes `xl/workbook.xml` and an `xl` base for relative targets, looks entries up case-sensitively, and does not percent-decode. Before G1 can report `verified`, it must resolve the main part through `_rels/.rels` and follow OPC part-name rules (relative to the source part, case-insensitive).
-9. **Fixtures 02 and 05 are refused by Excel at baseline.** Record this alongside the local fixture manifest, so that no test expects Excel to open them.
+9. **Fixtures 02 and 05 are refused by Excel at baseline,** and fixture 01 is schema-invalid at baseline (`../P2aSdkRole/REPORT.md`). Record both alongside the local fixture manifest, so that no test expects Excel to open 02/05 or schema validation of 01 to start from zero errors.
 
 ## Reproduce
 

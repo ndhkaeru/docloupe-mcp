@@ -1,6 +1,6 @@
 # excel_cs — C# port of the Excel MCP server (design)
 
-**Status:** design only, no code yet. **Scope:** the Excel server only (`servers/excel`). This port replaces the current Python implementation (112 tools, `server_version` 1.1.2) incrementally.
+**Status:** design plus spikes and a partial P1 read/verify foundation; no production writer yet. **Scope:** the Excel server only (`servers/excel`). This port replaces the current Python implementation (112 tools, `server_version` 1.1.2) incrementally.
 
 These documents are for the engineers who will implement the C# server. Every decision is mapped back to the legacy server's behavior, so each one answers three questions: **how the old server does it, where it goes wrong, and what the new one must do.**
 
@@ -24,7 +24,7 @@ Confirmed defects (details in [docs/05-legacy-mapping.md](docs/05-legacy-mapping
 | # | Decision | Replaces (legacy) |
 |---|---|---|
 | D1 | .NET 10 (LTS), C#; the official MCP C# SDK over stdio | Python + FastMCP |
-| D2 | **Open XML SDK** (`DocumentFormat.OpenXml`) for direct DOM edits. Untouched parts stay byte-identical | openpyxl rebuild, regex patching, `xml.etree` |
+| D2 | **System.Xml part DOM + source-byte-preserving splice** is the P2a writer core. Untouched part contents and bytes outside declared edits stay identical. Open XML SDK is a separate detached G2 schema adapter, not the writer or package loader (01 §5.1; P2a SDK-role spike) | openpyxl rebuild, regex patching, `xml.etree` |
 | D3 | The verifier uses an **independent reader** (`ZipArchive` + `XmlReader`) that shares no code with the writer | Verifier built on ElementTree, sharing assumptions with the writer |
 | D4 | **Three-way check**: original (O), intent (I), written file (W) | Two-way, O vs W |
 | D5 | Verification is **always on**. A failing gate means nothing is written. The single exception: G5 differences the user explicitly overrides, which produce `saved_with_overrides`, never "verified" | `verify_preservation=False` by default |

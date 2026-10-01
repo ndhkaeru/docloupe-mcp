@@ -30,15 +30,22 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
 ### 3.1 G1 — Package integrity
 
 - The ZIP is valid, with no duplicate entries, and is within the limits of 01 §7.
-- Required parts are present: `[Content_Types].xml`, `xl/workbook.xml`, `xl/_rels/workbook.xml.rels`.
+- Required parts are present: `[Content_Types].xml`, `_rels/.rels`, the main workbook part **resolved through the `officeDocument` relationship in `_rels/.rels`** (usually `xl/workbook.xml`, but not necessarily), and that part's relationships part.
+- Part names follow OPC rules: targets are resolved relative to their source part, percent-decoded, and looked up case-insensitively.
 - Every internal relationship target exists. No part loses its last incoming relationship unless that removal was declared.
+- Every relationship reference **inside a touched part** (`r:id`, `r:embed`, `r:link`, `r:pict`…) resolves to an existing relationship of that part. Detached schema validation does not check this (P2a SDK-role review finding 2).
 - Every part has an effective content type, and the main part's content type matches the extension (`.xlsm` must be macroEnabled).
 - *Legacy:* `inspect_xlsx_package` / `_validate_package_xml` check ZIP and XML well-formedness only.
 
 ### 3.2 G2 — Schema validity
 
-- `OpenXmlValidator` (`FileFormatVersions.Microsoft365`) runs on every part that was **touched or added**.
-- The error set is compared with the baseline errors of the same parts in O. **New errors block the save**; pre-existing errors are reported as `baseline_errors` but do not block.
+- A separate `Schema` adapter runs `OpenXmlValidator` (`FileFormatVersions.Microsoft365`) on **detached typed roots** built from each touched/added part in staging, including semantic root attributes and the namespace bindings needed for validation, without calling `SpreadsheetDocument.Open` or allowing SDK serialization to write output. The source part in O is validated in the same way. Exact default-namespace declarations are checked by G3 on the raw XML; the SDK detached root cannot reproduce them lexically.
+- The error set is compared by stable location and diagnostic with the baseline errors of the same parts in O; matching only error IDs or counts is insufficient. **New errors block the save**; pre-existing errors are reported as `baseline_errors` but do not block. A part for which detached validation cannot establish coverage is a required `unverified` gap, never `verified` (see §4). The P2a SDK-role spike established only first-worksheet detached validation on eight fixtures, with injected errors at three depths, not full G2.
+- **Masking rule.** The validator reports only the first content-model error per parent element, so a baseline error hides any new error under the same parent. In the P2a SDK-role spike, fixture 01's baseline error on `<worksheet>` hid a new misplaced child of `<worksheet>`, while new errors under `<sheetData>` and inside a cell were still reported. Therefore:
+  - an edit that changes the child list of an element E (inserting, removing or reordering children of E) is covered by G2 only if E has **no** baseline content-model error in O;
+  - otherwise the edit is a required `unverified` gap (`reason: "g2_masked_by_baseline_error"`) and is not reported as covered.
+  - For `set_value`, E is the edited `<c>`, or the `<row>` that receives a new cell.
+- **Not covered by G2:** relationship references (`r:id` and similar) are not checked by detached validation and belong to G1 (§3.1). G2 is also the safety net for element order in hand-written System.Xml edits, but the engine must insert children in schema order to begin with.
 - *Legacy:* no schema validation.
 
 ### 3.3 G3 — Markup compatibility and namespaces
@@ -52,7 +59,7 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
 
   A difference fails with `kind: "prefix_rewritten"` or `"declaration_changed"`.
 
-  This is stricter than semantic equivalence on purpose. Downstream tools that read OOXML lexically break when a default namespace becomes `x:`: the legacy server's regex patch is one example (V-06). Spike S2 showed that Open XML SDK serialization makes exactly this change, so the writer needs a prefix-restoration step (spike S2b).
+  This is stricter than semantic equivalence on purpose. Downstream tools that read OOXML lexically break when a default namespace becomes `x:`: the legacy server's regex patch is one example (V-06). Spike S2 showed that Open XML SDK serialization makes exactly this change, so P2a uses the source-byte-preserving `System.Xml` subtree splice demonstrated on one cell in S2b, not a whole-sheet SDK serialization.
 - *Legacy:* `_markup_compatibility_errors` exists but missed EX-04; the root namespace context is not captured.
 
 ### 3.4 G4 — Intent
