@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using DocLoupe.Excel.Engine;
@@ -12,6 +13,14 @@ namespace DocLoupe.Excel.Server;
 public sealed class ExcelSessions : IDisposable
 {
     private readonly ConcurrentDictionary<string, Session> _sessions = new(StringComparer.Ordinal);
+    private static readonly object ServerInfo = new
+    {
+        version = typeof(ExcelSessions).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attribute => attribute.Key == "DOCLOUPE_SERVER_VERSION")?.Value ?? "development",
+        commit = typeof(ExcelSessions).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attribute => attribute.Key == "DOCLOUPE_COMMIT_SHA")?.Value ?? "unknown",
+        oracles = new { excel = "unavailable", libreoffice = "unavailable" }
+    };
 
     public object Open(string path)
     {
@@ -19,11 +28,32 @@ public sealed class ExcelSessions : IDisposable
         if (!File.Exists(full)) throw new FileNotFoundException("Workbook not found", full);
         if (Path.GetExtension(full).ToLowerInvariant() is not (".xlsx" or ".xlsm" or ".xltx" or ".xltm"))
             throw new NotSupportedException("Only OOXML workbooks are supported");
-        var store = new PackageStore(full);
+        using var store = new PackageStore(full);
+        var sheets = store.SheetNames();
         var id = "xs_" + Guid.NewGuid().ToString("N")[..16];
-        var session = new Session(id, full, Fingerprint(full), store);
+        var session = new Session(id, full, Fingerprint(full));
         if (!_sessions.TryAdd(id, session)) throw new InvalidOperationException("Session collision");
-        return new { session = id, revision = 0, path = full, sheets = store.SheetNames() };
+        return new { session = id, revision = 0, path = full, sheets };
+    }
+
+    public object Status(string? id = null)
+    {
+        if (id is null)
+            return new { sessions = _sessions.Values.Select(session =>
+            {
+                var snapshot = session.Snapshot;
+                return new { session = session.Id, path = session.Path, revision = snapshot.Revision,
+                    dirty = snapshot.Revision != 0 };
+            }).OrderBy(session => session.session, StringComparer.Ordinal).ToArray(), server = ServerInfo };
+
+        var selected = Get(id);
+        var state = selected.Snapshot;
+        return new { path = selected.Path, revision = state.Revision, saved_revision = 0,
+            dirty = state.Revision != 0, read_only = false,
+            source_changed_on_disk = selected.SourceChangedOnDisk(),
+            busy = selected.Busy is { } active ? new { operation = active.Operation, since = active.Since } : null,
+            ledger = state.Ledger.Select(entry => new { revision = entry.Revision, op_count = entry.OpCount,
+                summary = entry.Summary }).ToArray(), server = ServerInfo };
     }
 
     public object Read(string id, string? sheet, string[] addresses)
@@ -59,6 +89,9 @@ public sealed class ExcelSessions : IDisposable
             session.Operations.AddRange(operations);
             session.RevisionLengths.Add(operations.Length);
             session.Revision++;
+            session.Ledger.Add(new LedgerEntry(session.Revision, operations.Length,
+                string.Join(", ", operations.Select(operation => $"set_value {operation.Sheet}!{operation.Address}"))));
+            session.Publish();
             return new { session = id, revision = session.Revision, intent = result.Intent };
         }
     }
@@ -81,7 +114,9 @@ public sealed class ExcelSessions : IDisposable
             }
             session.Operations.RemoveRange(keptOperations, session.Operations.Count - keptOperations);
             session.RevisionLengths.RemoveRange(toRevision, session.RevisionLengths.Count - toRevision);
+            session.Ledger.RemoveRange(toRevision, session.Ledger.Count - toRevision);
             session.Revision = toRevision;
+            session.Publish();
             return new UndoResult(session.Revision, discarded);
         }
     }
@@ -93,8 +128,6 @@ public sealed class ExcelSessions : IDisposable
         {
             if (session.Revision == 0) throw new InvalidOperationException("No pending edits");
             session.CheckSource();
-            if (session.Store.Parts.Any(part => part.StartsWith("_xmlsignatures/", StringComparison.OrdinalIgnoreCase)))
-                throw new SaveBlockedException([new GateIssue("G6", "SIGNED_PACKAGE_UNSUPPORTED", "P2a cannot safely update signed workbooks")]);
             var destination = Path.GetFullPath(outputPath);
             if (destination == session.Path) throw new NotSupportedException("P2a requires a distinct output path; overwrite is not yet supported");
             if (!Path.GetExtension(destination).Equals(Path.GetExtension(session.Path), StringComparison.OrdinalIgnoreCase))
@@ -102,9 +135,12 @@ public sealed class ExcelSessions : IDisposable
             if (!Directory.Exists(Path.GetDirectoryName(destination))) throw new DirectoryNotFoundException(Path.GetDirectoryName(destination));
             if (File.Exists(destination)) throw new IOException("Destination already exists");
             var staging = Path.Combine(Path.GetDirectoryName(destination)!, "." + Path.GetFileName(destination) + "." + Guid.NewGuid().ToString("N") + ".staging");
+            session.SetBusy("save");
             try
             {
                 using var store = new PackageStore(session.Path);
+                if (store.Parts.Any(part => part.StartsWith("_xmlsignatures/", StringComparison.OrdinalIgnoreCase)))
+                    throw new SaveBlockedException([new GateIssue("G6", "SIGNED_PACKAGE_UNSUPPORTED", "P2a cannot safely update signed workbooks")]);
                 var result = SetValueEngine.Apply(store, Coalesce(session.Operations));
                 store.Save(staging);
                 var reports = new List<GateIssue>();
@@ -126,7 +162,11 @@ public sealed class ExcelSessions : IDisposable
                 return new { session = id, revision = session.Revision, path = destination, status = "verified",
                     gates = new[] { "G1", "G2", "G3", "G4", "G5" }, readback };
             }
-            finally { if (File.Exists(staging)) File.Delete(staging); }
+            finally
+            {
+                session.ClearBusy();
+                if (File.Exists(staging)) File.Delete(staging);
+            }
         }
     }
 
@@ -137,7 +177,6 @@ public sealed class ExcelSessions : IDisposable
         {
             if (session.Revision > 0 && !discardUnsaved) throw new InvalidOperationException("UNSAVED_CHANGES");
             _sessions.TryRemove(id, out _);
-            session.Store.Dispose();
             return new { closed = true, discarded_revisions = session.Revision };
         }
     }
@@ -162,20 +201,38 @@ public sealed class ExcelSessions : IDisposable
 
     public void Dispose()
     {
-        foreach (var session in _sessions.Values) session.Store.Dispose();
         _sessions.Clear();
     }
 
-    private sealed class Session(string id, string path, string fingerprint, PackageStore store)
+    private sealed class Session(string id, string path, string fingerprint)
     {
         public string Id { get; } = id;
         public string Path { get; } = path;
         public string Fingerprint { get; } = fingerprint;
-        public PackageStore Store { get; } = store;
         public object Sync { get; } = new();
         public List<SetValueOp> Operations { get; } = [];
         public List<int> RevisionLengths { get; } = [];
+        public List<LedgerEntry> Ledger { get; } = [];
         public int Revision { get; set; }
+        private SessionSnapshot _snapshot = new(0, []);
+        private BusyOperation? _busy;
+        public SessionSnapshot Snapshot => Volatile.Read(ref _snapshot);
+        public BusyOperation? Busy => Volatile.Read(ref _busy);
+
+        public void Publish() => Volatile.Write(ref _snapshot,
+            new SessionSnapshot(Revision, Ledger.TakeLast(20).ToArray()));
+
+        public void SetBusy(string operation) => Volatile.Write(ref _busy,
+            new BusyOperation(operation, DateTimeOffset.UtcNow.ToString("O")));
+
+        public void ClearBusy() => Volatile.Write(ref _busy, null);
+
+        public bool SourceChangedOnDisk()
+        {
+            try { return ExcelSessions.Fingerprint(Path) != Fingerprint; }
+            catch (IOException) { return true; }
+            catch (UnauthorizedAccessException) { return true; }
+        }
 
         public void CheckSource()
         {
@@ -196,6 +253,12 @@ public sealed class ExcelSessions : IDisposable
 }
 
 public sealed record UndoResult(int Revision, IReadOnlyList<int> Discarded);
+
+public sealed record LedgerEntry(int Revision, int OpCount, string Summary);
+
+public sealed record SessionSnapshot(int Revision, IReadOnlyList<LedgerEntry> Ledger);
+
+public sealed record BusyOperation(string Operation, string Since);
 
 public sealed class SaveBlockedException(IReadOnlyList<GateIssue> issues) : Exception("SAVE_BLOCKED: " + JsonSerializer.Serialize(issues))
 {

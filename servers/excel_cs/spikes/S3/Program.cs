@@ -16,6 +16,12 @@ try
     var tools = await client.ListToolsAsync();
     Console.WriteLine("tools=" + string.Join(',', tools.Select(tool => tool.Name)));
     if (!tools.Any(tool => tool.Name == "excel_undo")) throw new InvalidOperationException("Undo tool is missing");
+    if (!tools.Any(tool => tool.Name == "excel_status")) throw new InvalidOperationException("Status tool is missing");
+    var emptyStatus = await client.CallToolAsync("excel_status", new Dictionary<string, object?>());
+    if (emptyStatus.IsError == true || emptyStatus.StructuredContent?.GetProperty("data").GetProperty("sessions").GetArrayLength() != 0)
+        throw new InvalidOperationException("Empty status failed: " + emptyStatus.StructuredContent?.GetRawText()
+            + " text=" + emptyStatus.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text
+            + " schema=" + tools.Single(tool => tool.Name == "excel_status").ProtocolTool.InputSchema.GetRawText());
     var result = await client.CallToolAsync("excel_open", new Dictionary<string, object?> { ["path"] = source });
     Console.WriteLine("structured_content=" + result.StructuredContent?.GetRawText());
     Console.WriteLine("text_content=" + (result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? "<absent>"));
@@ -28,6 +34,10 @@ try
         ["ops"] = new[] { new { op = "set_value", sheet = "Sheet1", target = "B1", value = 99 } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
+    var status = await client.CallToolAsync("excel_status", new Dictionary<string, object?> { ["session"] = session });
+    if (status.IsError == true || status.StructuredContent?.GetProperty("data").GetProperty("revision").GetInt32() != 1 ||
+        status.StructuredContent?.GetProperty("data").GetProperty("ledger").GetArrayLength() != 1)
+        throw new InvalidOperationException("Session status failed: " + status.StructuredContent?.GetRawText());
     var output = Path.Combine(directory, "written.xlsx");
     var saved = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
     {

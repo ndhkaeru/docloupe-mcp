@@ -12,6 +12,7 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
     McpServerTool.Create((string path) => Handle(() => sessions.Open(path)), new McpServerToolCreateOptions { Name = "excel_open" }),
+    McpServerTool.Create((string? session = null) => Handle(() => sessions.Status(session)), new McpServerToolCreateOptions { Name = "excel_status" }),
     McpServerTool.Create((string session, string? sheet, string target) => Handle(() => sessions.Read(session, sheet, [target])), new McpServerToolCreateOptions { Name = "excel_read" }),
     McpServerTool.Create((string session, int base_revision, SetValueRequest[] ops, string? sheet) => Handle(() => sessions.Apply(session, base_revision, ops.Select(op => op.Normalize(sheet)).ToArray())), new McpServerToolCreateOptions { Name = "excel_apply" }),
     McpServerTool.Create((string session, string mode, string path) => Handle(() => mode == "copy" ? sessions.Save(session, path) : throw new NotSupportedException("P2a save supports copy mode only")), new McpServerToolCreateOptions { Name = "excel_save" }),
