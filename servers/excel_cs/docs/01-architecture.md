@@ -129,7 +129,7 @@ This replaces the legacy rule ("clone everything first, then insert bottom-to-to
 - **Overlay:** an edited part is held as a DOM or as new bytes. Added and deleted parts are recorded as package effects.
 - **Writing, entry by entry:**
   - Untouched part: **copy the decompressed content verbatim** from the source, keeping entry order and entry names.
-  - Edited part: serialize the detached DOM, then run a **prefix-restoration pass** (XmlReader → XmlWriter, mapping each namespace URI back to the prefix O used) that also restores O's root declarations and XML declaration. G3 checks the result.
+  - Edited part: preserve the original XML outside the declared edit region while serializing the edited subtree from the detached DOM; an XML-aware lexical splice demonstrated this for one cell in S2b. G3 checks namespace/prefix fidelity independently. A whole-part writer for other ops still needs an equivalent guarantee or a separately tested prefix-restoration pass.
     - S2 found that Open XML SDK writes known namespaces with its own prefix: a default worksheet namespace becomes `x:` even when nothing is edited, and `OuterXml` drops the XML declaration.
     - It did keep `mc:Ignorable`, `x14ac:dyDescent` and an unknown `extLst` in the synthetic prefixed case.
     - A plain `OuterXml` write is therefore not sufficient (spike S2b).
@@ -141,14 +141,14 @@ This replaces the legacy rule ("clone everything first, then insert bottom-to-to
 
 - **Why not A:** approach A (`SpreadsheetDocument` editable) could not open three of the eight external fixtures, whose `[Content_Types].xml` uses a namespace prefix (`<ns0:Types>`). It also gives no control over content types and relationships.
 - **Correction:** the `xl/workbook.xml` rewrite first reported for A was caused by `AutoSave` (on by default) combined with reading the workbook DOM. With `AutoSave = false`, A left every untouched entry byte-identical on the five fixtures it could open. Untouched-part stability is therefore not a differentiator.
-- **B so far:** the detached-DOM/ZIP prototype kept every untouched entry's decompressed bytes on all eight fixtures, but the touched sheet lost its original default-namespace prefix.
+- **B after S2b:** a direct ZIP/XML DOM prototype parsed all eight fixtures without `System.IO.Packaging`, preserved every byte outside one edited cell on the touched sheet and every decompressed byte of untouched parts, and rejected synthetic EX-04 using an independent G3. This is a single-cell proof, not the general writer.
 - **Production PackageStore must:**
   - read prefixed content types without rewriting the originals;
   - build part DOMs without `System.IO.Packaging`;
   - restore source prefixes and declarations;
   - enforce G3/G4/G5.
 
-Evidence and reproduction: `../spikes/S1S2/REPORT.md`.
+Evidence and reproduction: `../spikes/S1S2/REPORT.md`, `../spikes/S2b/REPORT.md`. Excel COM opened original and S2b-edited `07` read-only, but refused original and edited `02`/`05`; normalizing only their content-types prefix did not resolve the refusals. Do not treat an XML/package validator pass as proof that Excel opens a workbook.
 
 ### 5.2 `excel_apply` pipeline
 
