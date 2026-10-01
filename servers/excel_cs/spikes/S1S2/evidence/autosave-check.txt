@@ -1,0 +1,16 @@
+00-base.xlsx | A | autosave=True | other_bytes=xl/workbook.xml
+00-base.xlsx | A | autosave=False | other_bytes=same
+01-audit-87-source.xlsx | A | autosave=True | other_bytes=xl/workbook.xml
+01-audit-87-source.xlsx | A | autosave=False | other_bytes=same
+02-table-metadata-source.xlsx | A | autosave=True | ERROR XmlException: Required Types tag not found. Line 1, position 2.
+02-table-metadata-source.xlsx | A | autosave=False | ERROR XmlException: Required Types tag not found. Line 1, position 2.
+03-print-area-source.xlsx | A | autosave=True | other_bytes=xl/workbook.xml
+03-print-area-source.xlsx | A | autosave=False | other_bytes=same
+04-rich-text-phonetic-source.xlsx | A | autosave=True | other_bytes=xl/workbook.xml
+04-rich-text-phonetic-source.xlsx | A | autosave=False | other_bytes=same
+05-advanced-package-source.xlsm | A | autosave=True | ERROR XmlException: Required Types tag not found. Line 1, position 2.
+05-advanced-package-source.xlsm | A | autosave=False | ERROR XmlException: Required Types tag not found. Line 1, position 2.
+06-book1-richtext-source.xlsm | A | autosave=True | other_bytes=xl/workbook.xml
+06-book1-richtext-source.xlsm | A | autosave=False | other_bytes=same
+07-real-package-source.xlsx | A | autosave=True | ERROR XmlException: Required Types tag not found. Line 2, position 2.
+07-real-package-source.xlsx | A | autosave=False | ERROR XmlException: Required Types tag not found. Line 2, position 2.

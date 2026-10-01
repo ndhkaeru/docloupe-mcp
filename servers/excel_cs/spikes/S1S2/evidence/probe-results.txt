@@ -1,0 +1,40 @@
+00-base.xlsx | A | noop | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+00-base.xlsx | A | edit | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+00-base.xlsx | B | noop | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+00-base.xlsx | B | edit | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+01-audit-87-source.xlsx | A | noop | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+01-audit-87-source.xlsx | A | edit | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+01-audit-87-source.xlsx | B | noop | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+01-audit-87-source.xlsx | B | edit | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+02-table-metadata-source.xlsx | A | noop | ERROR XmlException: Required Types tag not found. Line 1, position 2.
+02-table-metadata-source.xlsx | A | edit | ERROR XmlException: Required Types tag not found. Line 1, position 2.
+02-table-metadata-source.xlsx | B | noop | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+02-table-metadata-source.xlsx | B | edit | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+03-print-area-source.xlsx | A | noop | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+03-print-area-source.xlsx | A | edit | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+03-print-area-source.xlsx | B | noop | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+03-print-area-source.xlsx | B | edit | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+04-rich-text-phonetic-source.xlsx | A | noop | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+04-rich-text-phonetic-source.xlsx | A | edit | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+04-rich-text-phonetic-source.xlsx | B | noop | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+04-rich-text-phonetic-source.xlsx | B | edit | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+05-advanced-package-source.xlsm | A | noop | ERROR XmlException: Required Types tag not found. Line 1, position 2.
+05-advanced-package-source.xlsm | A | edit | ERROR XmlException: Required Types tag not found. Line 1, position 2.
+05-advanced-package-source.xlsm | B | noop | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+05-advanced-package-source.xlsm | B | edit | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+06-book1-richtext-source.xlsm | A | noop | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+06-book1-richtext-source.xlsm | A | edit | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+06-book1-richtext-source.xlsm | B | noop | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+06-book1-richtext-source.xlsm | B | edit | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+07-real-package-source.xlsx | A | noop | ERROR XmlException: Required Types tag not found. Line 2, position 2.
+07-real-package-source.xlsx | A | edit | ERROR XmlException: Required Types tag not found. Line 2, position 2.
+07-real-package-source.xlsx | B | noop | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+07-real-package-source.xlsx | B | edit | other_bytes=same content_types=same other_xml=same root_ns=CHANGED mc=valid x_prefix=same cell=ok
+V06_EX03_valid.xlsx | A | noop | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=same mc=valid x_prefix=same cell=ok
+V06_EX03_valid.xlsx | A | edit | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=same mc=valid x_prefix=same cell=ok
+V06_EX03_valid.xlsx | B | noop | other_bytes=same content_types=same other_xml=same root_ns=same mc=valid x_prefix=same cell=ok
+V06_EX03_valid.xlsx | B | edit | other_bytes=same content_types=same other_xml=same root_ns=same mc=valid x_prefix=same cell=ok
+EX04_invalid.xlsx | A | noop | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=same mc=INVALID x_prefix=same cell=ok
+EX04_invalid.xlsx | A | edit | other_bytes=xl/workbook.xml content_types=same other_xml=same root_ns=same mc=INVALID x_prefix=same cell=ok
+EX04_invalid.xlsx | B | noop | other_bytes=same content_types=same other_xml=same root_ns=same mc=INVALID x_prefix=same cell=ok
+EX04_invalid.xlsx | B | edit | other_bytes=same content_types=same other_xml=same root_ns=same mc=INVALID x_prefix=same cell=ok

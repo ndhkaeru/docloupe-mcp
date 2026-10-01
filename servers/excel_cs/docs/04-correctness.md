@@ -45,7 +45,14 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
 
 - Every prefix listed in `mc:Ignorable`, `mc:ProcessContent` and `mc:MustUnderstand` is declared in scope. This catches EX-04.
 - Every element and attribute keeps its namespace URI. For example, `x14ac:dyDescent` must not become a bare `dyDescent` (EX-03).
-- The set of namespace declarations on each touched part's root is a superset of O's.
+- **Lexical fidelity of touched parts.** The C# writer keeps what the source part looked like (decided 2026-10-01):
+  - every namespace declaration on O's part root is present, **with the same prefix**, including the default namespace;
+  - every element and attribute uses the same prefix as in O;
+  - the XML declaration is identical to O's (present or absent, same `encoding`/`standalone`).
+
+  A difference fails with `kind: "prefix_rewritten"` or `"declaration_changed"`.
+
+  This is stricter than semantic equivalence on purpose. Downstream tools that read OOXML lexically break when a default namespace becomes `x:`: the legacy server's regex patch is one example (V-06). Spike S2 showed that Open XML SDK serialization makes exactly this change, so the writer needs a prefix-restoration step (spike S2b).
 - *Legacy:* `_markup_compatibility_errors` exists but missed EX-04; the root namespace context is not captured.
 
 ### 3.4 G4 — Intent
@@ -125,7 +132,7 @@ Rules are implemented in `Verify` and each one has a bidirectional fixture test 
 | N-NUM | Lexical forms of the same `xsd:double`/`decimal` value: `14` ≡ `14.0` ≡ `1.4E1` | Numeric-typed attributes per schema (`sz`, `ht`, `width`…), compared as parsed numbers | V-02 `sz`, V-07 `ht="30"` vs `"30.0"` |
 | N-ORDER | Child order is irrelevant | **Only** for content models that are unordered in the schema (e.g. run properties). Generated from the schema, not hand-listed | V-02: `<i/><sz/>` vs `<sz/><i/>` |
 | N-ATTR | Attribute order is irrelevant | All XML | — |
-| N-PREFIX | Different prefixes for the same namespace URI | All XML; G3 still requires MC tokens to resolve | — |
+| N-PREFIX | Different prefixes for the same namespace URI | **Only in `excel_verify` compare mode, for files written by other tools.** It never applies to parts written by the C# server, where G3 requires the original prefixes. MC tokens must still resolve | — |
 | N-XMLSPACE | `xml:space="preserve"` present or absent | Only when the text has no leading/trailing whitespace and no line breaks | EX-06: D3 gained `xml:space` |
 | N-DEFAULT | An attribute that is absent ≡ present with its schema default | Only when the value equals the schema default from the generated table | EX-08: `showButton="1"`, `hiddenButton="0"` |
 | N-COUNT | `count` / `uniqueCount` attributes | Derived attributes, compared against the actual collection size instead | — |

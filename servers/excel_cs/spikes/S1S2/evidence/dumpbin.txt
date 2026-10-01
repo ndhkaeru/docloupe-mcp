@@ -1,0 +1,34 @@
+Microsoft (R) COFF/PE Dumper Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Dump of file spikes\S1S2\out\aot\S1S2.exe
+
+File Type: EXECUTABLE IMAGE
+
+  Image has the following dependencies:
+
+    ADVAPI32.dll
+    bcrypt.dll
+    CRYPT32.dll
+    IPHLPAPI.DLL
+    KERNEL32.dll
+    ncrypt.dll
+    ole32.dll
+    WS2_32.dll
+    api-ms-win-crt-heap-l1-1-0.dll
+    api-ms-win-crt-math-l1-1-0.dll
+    api-ms-win-crt-string-l1-1-0.dll
+    api-ms-win-crt-convert-l1-1-0.dll
+    api-ms-win-crt-stdio-l1-1-0.dll
+    api-ms-win-crt-runtime-l1-1-0.dll
+    api-ms-win-crt-locale-l1-1-0.dll
+
+  Summary
+
+      23D000 .data
+      124000 .pdata
+     123C000 .rdata
+      1FA000 .reloc
+        1000 .rsrc
+     10BE000 .text

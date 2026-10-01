@@ -1,0 +1,2 @@
+{"initialize_ms":634.8,"tool_ms":659.9,"structured":{"Name":"Scores","FirstCell":"Name"}}
+{"runs":10,"initialize_min_ms":84.9,"initialize_median_ms":87.8,"initialize_max_ms":634.8,"tool_median_ms":97.7}

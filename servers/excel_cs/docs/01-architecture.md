@@ -129,9 +129,26 @@ This replaces the legacy rule ("clone everything first, then insert bottom-to-to
 - **Overlay:** an edited part is held as a DOM or as new bytes. Added and deleted parts are recorded as package effects.
 - **Writing, entry by entry:**
   - Untouched part: **copy the decompressed content verbatim** from the source, keeping entry order and entry names.
-  - Edited part: serialize the DOM. Open XML SDK keeps namespace declarations and unknown elements (spike S2 must confirm this).
+  - Edited part: serialize the detached DOM, then run a **prefix-restoration pass** (XmlReader → XmlWriter, mapping each namespace URI back to the prefix O used) that also restores O's root declarations and XML declaration. G3 checks the result.
+    - S2 found that Open XML SDK writes known namespaces with its own prefix: a default worksheet namespace becomes `x:` even when nothing is edited, and `OuterXml` drops the XML declaration.
+    - It did keep `mc:Ignorable`, `x14ac:dyDescent` and an unknown `extLst` in the synthetic prefixed case.
+    - A plain `OuterXml` write is therefore not sufficient (spike S2b).
+  - Part DOMs are built from the raw part XML, **without** `System.IO.Packaging`, which cannot open some valid-looking packages (see the S2 decision below).
   - `[Content_Types].xml` and `.rels`: **edit only the affected entries**. Never regenerate them. This is why `System.IO.Packaging` is not used for writing: it regenerates content types from the part list.
 - ZIP-level differences (compression level, timestamps) carry no meaning. They are covered by normalization rule `N-ZIP` (see 04 §5).
+
+**S2 decision (2026-10-01): approach B, conditional on S2b.**
+
+- **Why not A:** approach A (`SpreadsheetDocument` editable) could not open three of the eight external fixtures, whose `[Content_Types].xml` uses a namespace prefix (`<ns0:Types>`). It also gives no control over content types and relationships.
+- **Correction:** the `xl/workbook.xml` rewrite first reported for A was caused by `AutoSave` (on by default) combined with reading the workbook DOM. With `AutoSave = false`, A left every untouched entry byte-identical on the five fixtures it could open. Untouched-part stability is therefore not a differentiator.
+- **B so far:** the detached-DOM/ZIP prototype kept every untouched entry's decompressed bytes on all eight fixtures, but the touched sheet lost its original default-namespace prefix.
+- **Production PackageStore must:**
+  - read prefixed content types without rewriting the originals;
+  - build part DOMs without `System.IO.Packaging`;
+  - restore source prefixes and declarations;
+  - enforce G3/G4/G5.
+
+Evidence and reproduction: `../spikes/S1S2/REPORT.md`.
 
 ### 5.2 `excel_apply` pipeline
 
@@ -181,6 +198,7 @@ Kept from the legacy server, because this part of its design is sound: staging i
   - print settings, views, protection, workbook and document properties;
   - drawing anchors, relationships, content types.
 - **Nothing is left uncompared.** Whatever the snapshot does not model is compared as **canonical XML**: namespaces compared by URI rather than prefix, attribute order ignored, whitespace normalized except inside elements where whitespace is significant. Parts differ only in how detailed the report is.
+- **Prefix fidelity is a separate check.** This semantic comparison ignores prefixes. For parts written by this server, lexical prefix and declaration fidelity is enforced separately by G3 (04 §3.3).
 - Snapshots are taken in streaming fashion, without a DOM. For large sheets, the two files are compared as parallel streams, with transforms applied.
 
 ## 6. Concurrency, cancellation and timeouts
