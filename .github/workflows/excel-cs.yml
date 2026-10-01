@@ -1,0 +1,37 @@
+name: Excel C# P2a
+
+on:
+  push:
+    paths: ['servers/excel_cs/**', '.github/workflows/excel-cs.yml']
+  pull_request:
+    paths: ['servers/excel_cs/**', '.github/workflows/excel-cs.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: dotnet test (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-15-intel
+            rid: osx-x64
+          - os: macos-14
+            rid: osx-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Test P2a and committed synthetic fixture generator
+        run: dotnet test servers/excel_cs/DocLoupe.Excel.slnx --configuration Release --nologo
+      - name: Check schema-derived element order
+        run: dotnet run --project servers/excel_cs/tools/SchemaOrder/SchemaOrder.csproj --configuration Release

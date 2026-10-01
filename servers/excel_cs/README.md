@@ -63,3 +63,11 @@ Confirmed defects (details in [docs/05-legacy-mapping.md](docs/05-legacy-mapping
 | **Facet** | One aspect of a cell: `value`, `formula`, `rich`, `style.font.bold`… |
 | **Display value** | The string Excel shows in the cell after applying the number format |
 | **Effective style** | The formatting a user actually sees, after merging the xf, the cell font, the run `rPr`, and resolving theme colors to RGB |
+
+## P2a working slice
+
+The production `DocLoupe.Excel.slnx` now contains `Model`, `Package`, `Engine`, independent `Verify`, SDK-only `Schema`, `Server`, and their test projects. `dotnet test servers/excel_cs/DocLoupe.Excel.slnx` runs on the six repository-generated fixture shapes. Local, non-distributable sources can additionally be tested by setting `DOCLOUPE_P2A_LOCAL_FIXTURES` to `D:\data-test\excel-preservation-fixtures\sources` before `dotnet test`; CI never reads that path. Run `dotnet run --project servers/excel_cs/tools/SchemaOrder/SchemaOrder.csproj` to regenerate/check element-order evidence against the pinned Open XML SDK.
+
+The MCP server offers `excel_open`, `excel_read` (targeted cells), `excel_apply` (only `set_value`), `excel_save` (`mode: "copy"` only, new path), and `excel_close`. All edits are staged; G1–G5, including G4 readback, block output on failure. String cells use shared strings unless an existing inline-string cell retains inline storage. `fullCalcOnLoad` is enabled on value changes; `calcChain` is removed only when an existing ordinary formula is overwritten. Signed packages and formula-group edits need their later-phase policies and must be rejected rather than silently rewritten. P2a rejects unsupported encodings and worksheets above 32 MiB instead of falling back to full serialization.
+
+**Scope of evidence:** local Windows tests and the official C# SDK stdio spike passed; cross-platform CI is configured but not yet run remotely. The S3 report does not establish what Claude Code, Claude Desktop or VS Code forwards to a model. The current verifier's byte-span checks accept writer-declared spans, and the P2a G5 cell-facet check covers edited cells; broader semantic verification and the remaining gates/oracles are not implemented. Do not treat this as production-ready or as the complete 01 §3 roadmap.

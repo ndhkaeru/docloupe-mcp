@@ -1,0 +1,19 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DocLoupe.Excel.Model/DocLoupe.Excel.Model.csproj" />
+    <Project Path="src/DocLoupe.Excel.Package/DocLoupe.Excel.Package.csproj" />
+    <Project Path="src/DocLoupe.Excel.Engine/DocLoupe.Excel.Engine.csproj" />
+    <Project Path="src/DocLoupe.Excel.Verify/DocLoupe.Excel.Verify.csproj" />
+    <Project Path="src/DocLoupe.Excel.Schema/DocLoupe.Excel.Schema.csproj" />
+    <Project Path="src/DocLoupe.Excel.Server/DocLoupe.Excel.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DocLoupe.Excel.Model.Tests/DocLoupe.Excel.Model.Tests.csproj" />
+    <Project Path="tests/DocLoupe.Excel.Engine.Tests/DocLoupe.Excel.Engine.Tests.csproj" />
+    <Project Path="tests/DocLoupe.Excel.Verify.Tests/DocLoupe.Excel.Verify.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/SchemaOrder/SchemaOrder.csproj" />
+  </Folder>
+  <Project Path="fixtures/DocLoupe.Excel.Fixtures.csproj" />
+</Solution>
