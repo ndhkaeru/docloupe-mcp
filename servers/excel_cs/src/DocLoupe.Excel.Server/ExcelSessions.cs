@@ -26,14 +26,21 @@ public sealed class ExcelSessions : IDisposable
         return new { session = id, revision = 0, path = full, sheets = store.SheetNames() };
     }
 
-    public object Read(string id, string sheet, string[] addresses)
+    public object Read(string id, string? sheet, string[] addresses)
     {
         var session = Get(id);
         lock (session.Sync)
         {
             session.CheckSource();
+            if (addresses.Length == 0) throw new ArgumentException("At least one cell address is required");
+            var targets = addresses.Select(address => (Sheet: CellAddress.SheetName(address) ?? sheet
+                ?? throw new ArgumentException("Missing sheet name"), Address: CellAddress.Parse(address).ToString())).ToArray();
+            var selectedSheet = targets[0].Sheet;
+            if (targets.Any(target => target.Sheet != selectedSheet))
+                throw new ArgumentException("All cells in a read must belong to one sheet");
             var source = session.Preview();
-            try { return new { session = id, revision = session.Revision, sheet, view = "cells", cells = P2aGates.ReadCells(source, sheet, addresses) }; }
+            try { return new { session = id, revision = session.Revision, sheet = selectedSheet, view = "cells",
+                cells = P2aGates.ReadCells(source, selectedSheet, targets.Select(target => target.Address)) }; }
             finally { if (source != session.Path) File.Delete(source); }
         }
     }
@@ -50,8 +57,32 @@ public sealed class ExcelSessions : IDisposable
             var next = Coalesce(session.Operations.Concat(operations));
             var result = SetValueEngine.Apply(candidate, next);
             session.Operations.AddRange(operations);
+            session.RevisionLengths.Add(operations.Length);
             session.Revision++;
             return new { session = id, revision = session.Revision, intent = result.Intent };
+        }
+    }
+
+    public UndoResult Undo(string id, int baseRevision, int toRevision)
+    {
+        var session = Get(id);
+        lock (session.Sync)
+        {
+            session.CheckSource();
+            if (baseRevision != session.Revision) throw new InvalidOperationException("REVISION_CONFLICT");
+            if (toRevision < 0 || toRevision > session.Revision)
+                throw new ArgumentOutOfRangeException(nameof(toRevision));
+            var discarded = Enumerable.Range(toRevision + 1, session.Revision - toRevision).ToArray();
+            var keptOperations = session.RevisionLengths.Take(toRevision).Sum();
+            if (keptOperations > 0)
+            {
+                using var candidate = new PackageStore(session.Path);
+                SetValueEngine.Apply(candidate, Coalesce(session.Operations.Take(keptOperations)));
+            }
+            session.Operations.RemoveRange(keptOperations, session.Operations.Count - keptOperations);
+            session.RevisionLengths.RemoveRange(toRevision, session.RevisionLengths.Count - toRevision);
+            session.Revision = toRevision;
+            return new UndoResult(session.Revision, discarded);
         }
     }
 
@@ -143,6 +174,7 @@ public sealed class ExcelSessions : IDisposable
         public PackageStore Store { get; } = store;
         public object Sync { get; } = new();
         public List<SetValueOp> Operations { get; } = [];
+        public List<int> RevisionLengths { get; } = [];
         public int Revision { get; set; }
 
         public void CheckSource()
@@ -162,6 +194,8 @@ public sealed class ExcelSessions : IDisposable
         }
     }
 }
+
+public sealed record UndoResult(int Revision, IReadOnlyList<int> Discarded);
 
 public sealed class SaveBlockedException(IReadOnlyList<GateIssue> issues) : Exception("SAVE_BLOCKED: " + JsonSerializer.Serialize(issues))
 {

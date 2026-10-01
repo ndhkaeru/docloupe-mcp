@@ -7,7 +7,7 @@ using DocLoupe.Excel.Package;
 
 namespace DocLoupe.Excel.Engine;
 
-public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject");
+public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false);
 public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value);
 public sealed record ApplyResult(IReadOnlyList<ExpectedCell> Intent, IReadOnlyList<ByteEdit> Edits, IReadOnlyList<string> ChangedParts);
 
@@ -45,6 +45,7 @@ public static class SetValueEngine
             {
                 var operation = addressGroup.Single();
                 var address = addressGroup.Key;
+                ValidateMergedTarget(root, address);
                 if (CellAddress.SheetName(operation.Address) is { } qualifiedSheet && qualifiedSheet != operation.Sheet)
                     throw new InvalidDataException("Qualified target does not match sheet");
                 var row = rows.SingleOrDefault(candidate => int.Parse(candidate.GetAttribute("r"), CultureInfo.InvariantCulture) == address.Row);
@@ -110,6 +111,26 @@ public static class SetValueEngine
     private static XmlElement? Direct(XmlElement element, string name) => element.ChildNodes.OfType<XmlElement>()
         .FirstOrDefault(child => child.LocalName == name && child.NamespaceURI == PackageStore.Main);
 
+    private static void ValidateMergedTarget(XmlElement root, CellAddress address)
+    {
+        var merges = Direct(root, "mergeCells");
+        if (merges is null) return;
+        foreach (var merge in merges.ChildNodes.OfType<XmlElement>()
+            .Where(element => element.LocalName == "mergeCell" && element.NamespaceURI == PackageStore.Main))
+        {
+            var reference = merge.GetAttribute("ref");
+            var ends = reference.Split(':');
+            if (ends.Length != 2) throw new InvalidDataException($"Invalid merge range: {reference}");
+            var origin = CellAddress.Parse(ends[0]);
+            var end = CellAddress.Parse(ends[1]);
+            if (end.Row < origin.Row || end.Column < origin.Column)
+                throw new InvalidDataException($"Invalid merge range: {reference}");
+            if (address.Row >= origin.Row && address.Row <= end.Row
+                && address.Column >= origin.Column && address.Column <= end.Column && address != origin)
+                throw new InvalidDataException($"MERGED_NON_ORIGIN: {address} belongs to {reference}; edit {origin}");
+        }
+    }
+
     private static void ValidateRows(XmlElement[] rows)
     {
         var previousRow = 0;
@@ -139,7 +160,7 @@ public static class SetValueEngine
         var existing = original?.GetAttribute("t");
         var kind = operation.Kind;
         var value = operation.Value;
-        if (kind == "text" && value?.StartsWith('=') == true)
+        if (kind == "text" && value?.StartsWith('=') == true && !operation.AsText)
             throw new InvalidDataException("AMBIGUOUS_FORMULA_TEXT: use explicit kind formula or inline");
         if (kind is not ("text" or "inline" or "number" or "boolean" or "formula" or "blank"))
             throw new NotSupportedException($"Unsupported set_value kind: {kind}");

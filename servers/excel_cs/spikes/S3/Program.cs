@@ -15,6 +15,7 @@ try
     await using var client = await McpClient.CreateAsync(transport);
     var tools = await client.ListToolsAsync();
     Console.WriteLine("tools=" + string.Join(',', tools.Select(tool => tool.Name)));
+    if (!tools.Any(tool => tool.Name == "excel_undo")) throw new InvalidOperationException("Undo tool is missing");
     var result = await client.CallToolAsync("excel_open", new Dictionary<string, object?> { ["path"] = source });
     Console.WriteLine("structured_content=" + result.StructuredContent?.GetRawText());
     Console.WriteLine("text_content=" + (result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? "<absent>"));
@@ -35,9 +36,15 @@ try
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());
     Console.WriteLine("saved_status=" + saved.StructuredContent.Value.GetProperty("data").GetProperty("status").GetString());
+    var undone = await client.CallToolAsync("excel_undo", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 1, ["to_revision"] = 0
+    });
+    if (undone.IsError == true || undone.StructuredContent?.GetProperty("data").GetProperty("revision").GetInt32() != 0)
+        throw new InvalidOperationException("Undo failed: " + undone.StructuredContent?.GetRawText());
     var closed = await client.CallToolAsync("excel_close", new Dictionary<string, object?>
     {
-        ["session"] = session, ["discard_unsaved"] = true
+        ["session"] = session, ["discard_unsaved"] = false
     });
     if (closed.IsError == true) throw new InvalidOperationException("Close failed");
 }

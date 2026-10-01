@@ -16,6 +16,13 @@ public sealed class CellAddressTests
         Assert.Equal(input.Split('!')[^1].ToUpperInvariant(), address.ToString());
     }
 
+    [Fact]
+    public void ParsesQuotedSheetNameWithEscapedApostrophe()
+    {
+        Assert.Equal("O'Brien Q3", CellAddress.SheetName("'O''Brien Q3'!B5"));
+        Assert.Equal("B5", CellAddress.Parse("'O''Brien Q3'!B5").ToString());
+    }
+
     [Theory]
     [InlineData("A0")]
     [InlineData("A01")]

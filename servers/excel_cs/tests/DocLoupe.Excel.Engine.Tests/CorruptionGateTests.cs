@@ -60,6 +60,14 @@ public sealed class CorruptionGateTests
     }
 
     [Fact]
+    public void G4ReportsMissingTargetInsteadOfTreatingItAsBlank()
+    {
+        using var fixture = new Fixture();
+        Assert.Contains(P2aGates.CheckIntent(fixture.Source, [new CellExpectation("Sheet1", "B2", "number", "9")]),
+            issue => issue.Gate == "G4" && issue.Code == "INTENT_MISSING");
+    }
+
+    [Fact]
     public void G5RejectsUnrequestedStyleInsideEditedCell()
     {
         using var fixture = new Fixture();

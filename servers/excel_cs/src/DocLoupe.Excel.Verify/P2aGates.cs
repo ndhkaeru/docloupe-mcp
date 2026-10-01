@@ -187,7 +187,7 @@ public static class P2aGates
         var sst = relationships.Values.FirstOrDefault(item => item.Type.EndsWith("/sharedStrings", StringComparison.Ordinal));
         string[] shared = sst.Type is null ? [] : Load(entries[Resolve(main, sst.Target)])
             .GetElementsByTagName("si", Main).OfType<XmlElement>()
-            .Select(item => string.Concat(item.GetElementsByTagName("t", Main).OfType<XmlElement>().Select(text => text.InnerText))).ToArray();
+            .Select(TextValue).ToArray();
         var requested = addresses.ToHashSet(StringComparer.Ordinal);
         return document.GetElementsByTagName("c", Main).OfType<XmlElement>()
             .Where(item => requested.Contains(item.GetAttribute("r"))).Select(item =>
@@ -198,7 +198,7 @@ public static class P2aGates
                 var value = type switch
                 {
                     "s" when int.TryParse(scalar, out var index) && index >= 0 && index < shared.Length => shared[index],
-                    "inlineStr" => item.GetElementsByTagName("t", Main).OfType<XmlElement>().FirstOrDefault()?.InnerText,
+                    "inlineStr" => item.ChildNodes.OfType<XmlElement>().FirstOrDefault(child => child.LocalName == "is" && child.NamespaceURI == Main) is { } inline ? TextValue(inline) : null,
                     "b" => scalar == "1" ? "true" : "false",
                     _ => scalar
                 };
@@ -221,7 +221,7 @@ public static class P2aGates
         var sharedRelationship = sheetRels.Values.FirstOrDefault(relationship => relationship.Type.EndsWith("/sharedStrings", StringComparison.Ordinal));
         string[] shared = sharedRelationship.Type is null ? [] : Load(entries[Resolve(main, sharedRelationship.Target)])
             .GetElementsByTagName("si", Main).OfType<XmlElement>()
-            .Select(item => string.Concat(item.GetElementsByTagName("t", Main).OfType<XmlElement>().Select(text => text.InnerText))).ToArray();
+            .Select(TextValue).ToArray();
         foreach (var group in expected.GroupBy(item => item.Sheet))
         {
             var sheet = workbook.GetElementsByTagName("sheet", Main).OfType<XmlElement>().Single(element => element.GetAttribute("name") == group.Key);
@@ -232,13 +232,18 @@ public static class P2aGates
             {
                 var cell = document.GetElementsByTagName("c", Main).OfType<XmlElement>()
                     .SingleOrDefault(item => item.GetAttribute("r") == expectation.Address);
-                var formula = cell?.GetElementsByTagName("f", Main).OfType<XmlElement>().FirstOrDefault();
+                if (cell is null)
+                {
+                    issues.Add(new("G4", "INTENT_MISSING", $"{group.Key}!{expectation.Address}"));
+                    continue;
+                }
+                var formula = cell.GetElementsByTagName("f", Main).OfType<XmlElement>().FirstOrDefault();
                 var scalar = cell?.GetElementsByTagName("v", Main).OfType<XmlElement>().FirstOrDefault()?.InnerText;
                 var type = cell?.GetAttribute("t");
                 var actual = formula is not null ? ("formula", formula.InnerText) : type switch
                 {
                     "s" when int.TryParse(scalar, out var index) && index >= 0 && index < shared.Length => ("text", shared[index]),
-                    "inlineStr" => ("inline", cell!.GetElementsByTagName("t", Main).OfType<XmlElement>().FirstOrDefault()?.InnerText),
+                    "inlineStr" => ("inline", cell!.ChildNodes.OfType<XmlElement>().FirstOrDefault(child => child.LocalName == "is" && child.NamespaceURI == Main) is { } inline ? TextValue(inline) : null),
                     "b" => ("boolean", scalar == "1" ? "true" : "false"),
                     _ when cell is null || cell.GetElementsByTagName("v", Main).Count == 0 => ("blank", (string?)null),
                     _ => ("number", scalar)
@@ -250,6 +255,16 @@ public static class P2aGates
         }
         return issues;
     }
+
+    private static string TextValue(XmlElement container) => string.Concat(container.ChildNodes.OfType<XmlElement>()
+        .Where(child => child.NamespaceURI == Main)
+        .Select(child => child.LocalName switch
+        {
+            "t" => child.InnerText,
+            "r" => string.Concat(child.ChildNodes.OfType<XmlElement>()
+                .Where(text => text.LocalName == "t" && text.NamespaceURI == Main).Select(text => text.InnerText)),
+            _ => ""
+        }));
 
     private static XmlDocument Load(ZipArchiveEntry entry)
     {

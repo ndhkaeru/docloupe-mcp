@@ -23,8 +23,8 @@ public sealed class SetValueRequest
     public SetValueOp Normalize(string? defaultSheet)
     {
         if (Op != "set_value") throw new NotSupportedException("P2a supports only set_value");
-        var name = Sheet ?? CellAddress.SheetName(Target) ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
-        CellAddress.Parse(Target);
+        var name = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
+        var address = CellAddress.Parse(Target).ToString();
         var (kind, scalar) = Value.ValueKind switch
         {
             JsonValueKind.String => ("text", Value.GetString()),
@@ -38,9 +38,9 @@ public sealed class SetValueRequest
                 => ("inline", inline.GetString()),
             _ => throw new ArgumentException("Unsupported set_value value")
         };
+        if (AsText && kind != "text") throw new ArgumentException("as_text requires a string value");
         if (kind == "text" && scalar?.StartsWith('=') == true && !AsText)
             throw new ArgumentException("AMBIGUOUS_FORMULA_TEXT");
-        if (kind == "text" && AsText && scalar?.StartsWith('=') == true) kind = "inline";
-        return new SetValueOp(name, Target, kind, scalar, RichPolicy);
+        return new SetValueOp(name, address, kind, scalar, RichPolicy, AsText);
     }
 }

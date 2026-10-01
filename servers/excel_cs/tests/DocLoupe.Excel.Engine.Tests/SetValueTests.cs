@@ -75,6 +75,30 @@ public sealed class SetValueTests
     }
 
     [Fact]
+    public void RejectsEditingMergedNonOrigin()
+    {
+        using var fixture = new Fixture();
+        var source = fixture.Source("default");
+        using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
+            AddBeforeClose(archive, "xl/worksheets/sheet1.xml", "</worksheet>",
+                "<mergeCells count=\"1\"><mergeCell ref=\"A1:C1\"/></mergeCells>");
+        using var store = new PackageStore(source);
+        var error = Assert.Throws<InvalidDataException>(() => SetValueEngine.Apply(store,
+            [new SetValueOp("Sheet1", "B1", "number", "3")]));
+        Assert.Contains("MERGED_NON_ORIGIN", error.Message);
+        Assert.Empty(store.ChangedParts);
+    }
+
+    [Fact]
+    public void SharedStringReadbackExcludesPhoneticGuideText()
+    {
+        using var fixture = new Fixture();
+        var source = fixture.Source("default");
+        Assert.Equal("hello", Assert.Single(P2aGates.ReadCells(source, "Sheet1", ["A1"])).Value);
+        Assert.Empty(P2aGates.CheckIntent(source, [new CellExpectation("Sheet1", "A1", "text", "hello")]));
+    }
+
+    [Fact]
     public void RichOrPhoneticCellRequiresExplicitReplacement()
     {
         using var fixture = new Fixture();
