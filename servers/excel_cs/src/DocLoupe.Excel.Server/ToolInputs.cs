@@ -51,7 +51,7 @@ public sealed class SetValueRequest
                 What.ValueKind != JsonValueKind.Undefined &&
                 (What.ValueKind != JsonValueKind.Array || What.GetArrayLength() != 1 ||
                  What[0].ValueKind != JsonValueKind.String || What[0].GetString() != "values"))
-                throw new NotSupportedException("Only clear values with remove_cells: false is supported");
+                throw new NotSupportedException("Only clear values with optional remove_cells is supported");
             var clearSheet = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
             return new SetValueOp(clearSheet, CellAddress.Parse(Target).ToString(), "blank", null,
                 Operation: "clear", RemoveCell: RemoveCells.ValueKind == JsonValueKind.True);
@@ -66,13 +66,33 @@ public sealed class SetValueRequest
         {
             if (Value.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
                 FormulaKind is not (null or "normal") || Reference is not null ||
-                Cache is { } cache && (cache.ValueKind != JsonValueKind.String || cache.GetString() is not ("clear" or "keep")))
-                throw new NotSupportedException("Only normal set_formula with clear or keep cache is supported");
+                Cache is { } cache && cache.ValueKind != JsonValueKind.Object &&
+                (cache.ValueKind != JsonValueKind.String || cache.GetString() is not ("clear" or "keep")))
+                throw new NotSupportedException("Only normal set_formula with clear, keep, or an explicit cache is supported");
             var formula = Formula?.StartsWith('=') == true ? Formula[1..] : Formula;
             if (string.IsNullOrWhiteSpace(formula) || formula.StartsWith('='))
                 throw new ArgumentException("Formula must be a nonempty expression");
+            FormulaCache? explicitCache = null;
+            if (Cache is { ValueKind: JsonValueKind.Object } cacheObject)
+            {
+                if (cacheObject.EnumerateObject().Count() != 1 ||
+                    !cacheObject.TryGetProperty("value", out var cached))
+                    throw new ArgumentException("cache requires exactly one value field");
+                explicitCache = cached.ValueKind switch
+                {
+                    JsonValueKind.Number => new FormulaCache("n", cached.GetRawText()),
+                    JsonValueKind.String => new FormulaCache("str", cached.GetString()!),
+                    JsonValueKind.True => new FormulaCache("b", "1"),
+                    JsonValueKind.False => new FormulaCache("b", "0"),
+                    JsonValueKind.Object when cached.EnumerateObject().Count() == 1 &&
+                        cached.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String &&
+                        CellError.IsSupported(error.GetString()) => new FormulaCache("e", error.GetString()!),
+                    _ => throw new ArgumentException("Unsupported formula cache value")
+                };
+            }
             return new SetValueOp(name, address, "formula", formula, Operation: Op,
-                KeepCache: Cache is { } policy && policy.GetString() == "keep");
+                KeepCache: Cache is { ValueKind: JsonValueKind.String } policy && policy.GetString() == "keep",
+                ExplicitCache: explicitCache);
         }
         if (Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null)
             throw new NotSupportedException("Formula fields require set_formula");

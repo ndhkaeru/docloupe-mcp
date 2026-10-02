@@ -117,6 +117,144 @@ public sealed class SetFormulaTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Theory]
+    [InlineData("2.5", "", "2.5", "B1")]
+    [InlineData("true", "b", "true", "C1")]
+    [InlineData("false", "b", "false", "E5")]
+    [InlineData("\"done & ready\"", "str", "done & ready", "C1")]
+    [InlineData("{\"error\":\"#N/A\"}", "e", "#N/A", "C1")]
+    public void ExplicitCacheWritesTypedResultAndPassesSaveGates(string value, string type, string result, string address)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-explicit-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            var operation = Request($"{{\"op\":\"set_formula\",\"target\":\"{address}\",\"formula\":\"1+1\",\"cache\":{{\"value\":{value}}}}}").Normalize("Sheet1");
+            Assert.NotNull(operation.ExplicitCache);
+            sessions.Apply(id, 0, [operation]);
+            var output = Path.Combine(directory, "explicit.xlsx");
+            var report = JsonSerializer.SerializeToElement(sessions.Save(id, output));
+            Assert.Equal("verified", report.GetProperty("status").GetString());
+            var read = Assert.Single(P2aGates.ReadCells(output, "Sheet1", [address]));
+            Assert.Equal("1+1", read.Formula);
+            Assert.Equal(result, read.Value);
+            using var store = new PackageStore(output);
+            var sheet = PackageStore.Parse(store.Read(store.SheetPart("Sheet1")));
+            var cell = Assert.Single(sheet.GetElementsByTagName("c", PackageStore.Main).OfType<System.Xml.XmlElement>(),
+                element => element.GetAttribute("r") == address);
+            Assert.Equal(type, cell.GetAttribute("t"));
+            Assert.Single(cell.GetElementsByTagName("v", PackageStore.Main).OfType<System.Xml.XmlElement>());
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("new-shared-strings")]
+    public void ExplicitCacheHandlesWorksheetVariants(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-explicit-variant-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            sessions.Apply(id, 0, [Request("""{"op":"set_formula","target":"C1","formula":"1+3","cache":{"value":4}}""").Normalize("Sheet1")]);
+            var output = Path.Combine(directory, "explicit.xlsx");
+            Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(id, output)).GetProperty("status").GetString());
+            Assert.Equal("4", Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["C1"])).Value);
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void G4RejectsMissingOrIncorrectExplicitCache()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-explicit-corrupt-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            foreach (var expected in new[] { new FormulaCacheExpectation("n", "3"), new FormulaCacheExpectation("b", "2") })
+                Assert.Contains(P2aGates.CheckIntent(source,
+                    [new CellExpectation("Sheet1", "C1", "formula", "1+1", ExplicitCache: expected)]),
+                    issue => issue.Code == "INTENT_CACHE_MISMATCH");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void G5RejectsExplicitCacheCorruption()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-explicit-g5-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            var output = Path.Combine(directory, "explicit.xlsx");
+            using (var store = new PackageStore(source))
+            {
+                SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "C1", "formula", "1+3",
+                    Operation: "set_formula", ExplicitCache: new FormulaCache("n", "4"))]);
+                store.Save(output);
+            }
+            var intent = new CellExpectation("Sheet1", "C1", "formula", "1+3",
+                ExplicitCache: new FormulaCacheExpectation("n", "9"));
+            Assert.Contains(P2aGates.CheckTouchedCells(source, output, [intent]),
+                issue => issue.Code == "FORMULA_CACHE_MISMATCH");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void InvalidExplicitCacheDoesNotAdvanceRevision()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-explicit-invalid-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, "default.xlsx")))
+                .GetProperty("session").GetString()!;
+            var invalid = Request("""{"op":"set_formula","target":"E5","formula":"1+1","cache":{"value":1e999}}""").Normalize("Sheet1");
+            Assert.Throws<FormatException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"set_value","target":"B1","value":5}""").Normalize("Sheet1"), invalid]));
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            sessions.Close(id, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void G5RejectsExplicitCacheCorruptionOnNewCell()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-explicit-new-g5-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            var output = Path.Combine(directory, "explicit.xlsx");
+            using (var store = new PackageStore(source))
+            {
+                SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "E5", "formula", "1+3",
+                    Operation: "set_formula", ExplicitCache: new FormulaCache("n", "4"))]);
+                store.Save(output);
+            }
+            Assert.Contains(P2aGates.CheckTouchedCells(source, output,
+                [new CellExpectation("Sheet1", "E5", "formula", "1+3",
+                    ExplicitCache: new FormulaCacheExpectation("n", "5"))]),
+                issue => issue.Code == "FORMULA_CACHE_MISMATCH");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     [Fact]
     public void G4RejectsUnclearedFormulaCache()
     {
@@ -246,7 +384,10 @@ public sealed class SetFormulaTests
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"kind\":\"shared\"}")]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"kind\":\"array\"}")]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"cache\":\"fresh\"}")]
-    [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"cache\":{\"value\":2}}")]
+    [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"cache\":{\"value\":null}}")]
+    [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"cache\":{\"value\":{\"error\":\"bad\"}}}")]
+    [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"cache\":{\"value\":2,\"extra\":1}}")]
+    [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"cache\":{}}")]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"ref\":\"C1:C3\"}")]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"=\"}")]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"value\":5}")]

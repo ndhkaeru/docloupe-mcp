@@ -7,8 +7,9 @@ using DocLoupe.Excel.Package;
 
 namespace DocLoupe.Excel.Engine;
 
-public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false);
-public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false);
+public sealed record FormulaCache(string Type, string Value);
+public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false, FormulaCache? ExplicitCache = null);
+public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCache? ExplicitCache = null);
 public sealed record ApplyResult(IReadOnlyList<ExpectedCell> Intent, IReadOnlyList<ByteEdit> Edits, IReadOnlyList<string> ChangedParts);
 
 public static class SetValueEngine
@@ -22,6 +23,7 @@ public static class SetValueEngine
     {
         if (operations.Count == 0) throw new ArgumentException("At least one cell operation is required");
         if (operations.Any(operation => operation.KeepCache && (operation.Operation != "set_formula" || operation.Kind != "formula") ||
+            operation.ExplicitCache is not null && (operation.Operation != "set_formula" || operation.Kind != "formula" || operation.KeepCache) ||
             operation.RemoveCell && operation.Operation != "clear" ||
             operation.Operation == "clear" &&
             (operation.Kind != "blank" || operation.Value is not null || operation.RichPolicy != "reject" || operation.AsText)))
@@ -106,7 +108,7 @@ public static class SetValueEngine
                     }
                 }
                 intent.Add(new ExpectedCell(operation.Sheet, address.ToString(), operation.Kind, operation.Value,
-                    operation.Operation == "clear", operation.RemoveCell, operation.KeepCache));
+                    operation.Operation == "clear", operation.RemoveCell, operation.KeepCache, operation.ExplicitCache));
             }
             foreach (var (row, added) in newCells)
                 InsertCells(lexical, row, added);
@@ -179,6 +181,7 @@ public static class SetValueEngine
         cell.SetAttribute("r", address.ToString());
         var existing = original?.GetAttribute("t");
         var oldCache = operation.KeepCache ? Direct(original!, "v")?.CloneNode(true) : null;
+        var explicitCache = operation.ExplicitCache;
         var kind = operation.Kind;
         var value = operation.Value;
         if (kind == "text" && value?.StartsWith('=') == true && !operation.AsText)
@@ -198,6 +201,16 @@ public static class SetValueEngine
                 if (existing is not ("" or "n" or "b" or "e" or "str"))
                     throw new NotSupportedException("Unsupported formula cache type");
             }
+            else if (explicitCache is not null)
+            {
+                if (explicitCache.Type is not ("n" or "b" or "e" or "str") ||
+                    explicitCache.Type == "n" && (!double.TryParse(explicitCache.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var cachedNumber) || !double.IsFinite(cachedNumber)) ||
+                    explicitCache.Type == "b" && explicitCache.Value is not ("0" or "1") ||
+                    explicitCache.Type == "e" && !CellError.IsSupported(explicitCache.Value))
+                    throw new FormatException("Invalid formula cache value");
+                if (explicitCache.Type == "n") cell.RemoveAttribute("t");
+                else cell.SetAttribute("t", explicitCache.Type);
+            }
             else cell.RemoveAttribute("t");
             var formulaText = value?.TrimStart('=');
             if (string.IsNullOrWhiteSpace(formulaText)) throw new FormatException("Formula is required");
@@ -205,6 +218,12 @@ public static class SetValueEngine
             formula.InnerText = formulaText;
             cell.AppendChild(formula);
             if (oldCache is not null) cell.AppendChild(oldCache);
+            if (explicitCache is not null)
+            {
+                var cached = document.CreateElement(cell.Prefix, "v", PackageStore.Main);
+                cached.InnerText = explicitCache.Value;
+                cell.AppendChild(cached);
+            }
         }
         else if (kind == "inline" || kind == "text" && existing == "inlineStr")
         {
