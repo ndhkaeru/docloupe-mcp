@@ -4,7 +4,7 @@ using System.Xml;
 namespace DocLoupe.Excel.Verify;
 
 public sealed record DeclaredByteSpan(string Part, int Start, int End, byte[] Before, byte[] After);
-public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false);
+public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false);
 public sealed record CellRead(string Address, string Kind, string? Value, string? Formula);
 public sealed record GateIssue(string Gate, string Code, string Detail);
 
@@ -169,7 +169,16 @@ public static class P2aGates
                 if (before is null)
                 {
                     if (cell.AllowMissing) issues.Add(new("G5", "UNEXPECTED_CELL_CREATED", $"{group.Key}!{cell.Address}"));
+                    else if (cell.KeepCache) issues.Add(new("G5", "FORMULA_CACHE_SOURCE_MISSING", $"{group.Key}!{cell.Address}"));
                     continue;
+                }
+                if (cell.KeepCache)
+                {
+                    static string[] Cache(XmlElement element) => element.ChildNodes.OfType<XmlElement>()
+                        .Where(child => child.NamespaceURI == Main && child.LocalName == "v")
+                        .Select(child => child.OuterXml).ToArray();
+                    if (before.GetAttribute("t") != after.GetAttribute("t") || !Cache(before).SequenceEqual(Cache(after)))
+                        issues.Add(new("G5", "FORMULA_CACHE_CHANGED", $"{group.Key}!{cell.Address}"));
                 }
                 static string[] UnchangedAttributes(XmlElement element) => element.Attributes.OfType<XmlAttribute>()
                     .Where(attribute => attribute.NamespaceURI != "http://www.w3.org/2000/xmlns/"
@@ -266,8 +275,12 @@ public static class P2aGates
                     continue;
                 }
                 var formula = cell.GetElementsByTagName("f", Main).OfType<XmlElement>().FirstOrDefault();
-                var scalar = cell?.GetElementsByTagName("v", Main).OfType<XmlElement>().FirstOrDefault()?.InnerText;
-                var type = cell?.GetAttribute("t");
+                var cached = cell.GetElementsByTagName("v", Main).OfType<XmlElement>().FirstOrDefault();
+                if (expectation.Kind == "formula" && !expectation.KeepCache &&
+                    (cached is not null || cell.HasAttribute("t")))
+                    issues.Add(new("G4", "INTENT_CACHE_PRESENT", $"{group.Key}!{expectation.Address}"));
+                var scalar = cached?.InnerText;
+                var type = cell.GetAttribute("t");
                 var actual = formula is not null ? ("formula", formula.InnerText) : type switch
                 {
                     "s" when int.TryParse(scalar, out var index) && index >= 0 && index < shared.Length => ("text", shared[index]),

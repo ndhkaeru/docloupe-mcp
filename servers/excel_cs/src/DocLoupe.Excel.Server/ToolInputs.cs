@@ -66,12 +66,13 @@ public sealed class SetValueRequest
         {
             if (Value.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
                 FormulaKind is not (null or "normal") || Reference is not null ||
-                Cache is { } cache && (cache.ValueKind != JsonValueKind.String || cache.GetString() != "clear"))
-                throw new NotSupportedException("Only normal set_formula with cleared cache is supported");
+                Cache is { } cache && (cache.ValueKind != JsonValueKind.String || cache.GetString() is not ("clear" or "keep")))
+                throw new NotSupportedException("Only normal set_formula with clear or keep cache is supported");
             var formula = Formula?.StartsWith('=') == true ? Formula[1..] : Formula;
             if (string.IsNullOrWhiteSpace(formula) || formula.StartsWith('='))
                 throw new ArgumentException("Formula must be a nonempty expression");
-            return new SetValueOp(name, address, "formula", formula, Operation: Op);
+            return new SetValueOp(name, address, "formula", formula, Operation: Op,
+                KeepCache: Cache is { } policy && policy.GetString() == "keep");
         }
         if (Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null)
             throw new NotSupportedException("Formula fields require set_formula");

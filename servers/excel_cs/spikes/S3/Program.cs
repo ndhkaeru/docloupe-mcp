@@ -32,7 +32,7 @@ try
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
         ["ops"] = new object[] { new { op = "set_value", sheet = "Sheet1", target = "B1", value = 99 },
-            new { op = "set_formula", sheet = "Sheet1", target = "C1", formula = "=B1+2", cache = "clear" },
+            new { op = "set_formula", sheet = "Sheet1", target = "C1", formula = "=B1+2", cache = "keep" },
             new { op = "set_values", sheet = "Sheet1", target = "D4", values = new object?[][] { [4, "batch"] } },
             new { op = "set_value", sheet = "Sheet1", target = "F5:G5", value = 6 },
             new { op = "fill", sheet = "Sheet1", target = "H6:I6", value = 8 },
@@ -79,6 +79,13 @@ try
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());
+    var cachedFormula = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["sheet"] = "Sheet1", ["target"] = "C1"
+    });
+    if (cachedFormula.IsError == true || cachedFormula.StructuredContent?.GetProperty("data")
+            .GetProperty("cells")[0].GetProperty("Value").GetString() != "2")
+        throw new InvalidOperationException("Formula cache was not retained");
     var verifiedGates = saved.StructuredContent.Value.GetProperty("data").GetProperty("gates").EnumerateArray()
         .Select(gate => gate.GetString()).ToArray();
     if (!verifiedGates.Contains("G6") || !verifiedGates.Contains("G7"))

@@ -7,8 +7,8 @@ using DocLoupe.Excel.Package;
 
 namespace DocLoupe.Excel.Engine;
 
-public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false);
-public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false);
+public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false);
+public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false);
 public sealed record ApplyResult(IReadOnlyList<ExpectedCell> Intent, IReadOnlyList<ByteEdit> Edits, IReadOnlyList<string> ChangedParts);
 
 public static class SetValueEngine
@@ -21,7 +21,8 @@ public static class SetValueEngine
     public static ApplyResult Apply(PackageStore store, IReadOnlyList<SetValueOp> operations)
     {
         if (operations.Count == 0) throw new ArgumentException("At least one cell operation is required");
-        if (operations.Any(operation => operation.RemoveCell && operation.Operation != "clear" ||
+        if (operations.Any(operation => operation.KeepCache && (operation.Operation != "set_formula" || operation.Kind != "formula") ||
+            operation.RemoveCell && operation.Operation != "clear" ||
             operation.Operation == "clear" &&
             (operation.Kind != "blank" || operation.Value is not null || operation.RichPolicy != "reject" || operation.AsText)))
             throw new NotSupportedException("Only value-only clear is supported");
@@ -61,6 +62,8 @@ public static class SetValueEngine
                     if (cell.ChildNodes.OfType<XmlElement>().Any(child => child.NamespaceURI != PackageStore.Main || child.LocalName is not ("f" or "v" or "is")))
                         throw new NotSupportedException("Unsupported existing cell child; refusing to discard it");
                     var priorFormula = Direct(cell, "f");
+                    if (operation.KeepCache && priorFormula is null)
+                        throw new NotSupportedException("cache: keep requires an existing formula");
                     if (priorFormula is not null && priorFormula.GetAttribute("t") is "shared" or "array" or "dataTable")
                         throw new NotSupportedException("Formula group edits require P3 reference handling");
                     var match = Regex.Match(rawStart, "(?:^|\\s)r\\s*=\\s*(['\"])(?<reference>.*?)\\1", RegexOptions.CultureInvariant);
@@ -89,6 +92,7 @@ public static class SetValueEngine
                 }
                 else if (operation.Operation != "clear")
                 {
+                    if (operation.KeepCache) throw new NotSupportedException("cache: keep requires an existing formula");
                     var markup = MakeCell(lexical.Document, null, operation, address, strings);
                     if (row is null)
                     {
@@ -102,7 +106,7 @@ public static class SetValueEngine
                     }
                 }
                 intent.Add(new ExpectedCell(operation.Sheet, address.ToString(), operation.Kind, operation.Value,
-                    operation.Operation == "clear", operation.RemoveCell));
+                    operation.Operation == "clear", operation.RemoveCell, operation.KeepCache));
             }
             foreach (var (row, added) in newCells)
                 InsertCells(lexical, row, added);
@@ -174,6 +178,7 @@ public static class SetValueEngine
         var cell = original ?? document.CreateElement(document.DocumentElement!.Prefix, "c", PackageStore.Main);
         cell.SetAttribute("r", address.ToString());
         var existing = original?.GetAttribute("t");
+        var oldCache = operation.KeepCache ? Direct(original!, "v")?.CloneNode(true) : null;
         var kind = operation.Kind;
         var value = operation.Value;
         if (kind == "text" && value?.StartsWith('=') == true && !operation.AsText)
@@ -188,12 +193,18 @@ public static class SetValueEngine
         if (kind == "blank") cell.RemoveAttribute("t");
         else if (kind == "formula")
         {
-            cell.RemoveAttribute("t");
+            if (operation.KeepCache)
+            {
+                if (existing is not ("" or "n" or "b" or "e" or "str"))
+                    throw new NotSupportedException("Unsupported formula cache type");
+            }
+            else cell.RemoveAttribute("t");
             var formulaText = value?.TrimStart('=');
             if (string.IsNullOrWhiteSpace(formulaText)) throw new FormatException("Formula is required");
             var formula = document.CreateElement(cell.Prefix, "f", PackageStore.Main);
             formula.InnerText = formulaText;
             cell.AppendChild(formula);
+            if (oldCache is not null) cell.AppendChild(oldCache);
         }
         else if (kind == "inline" || kind == "text" && existing == "inlineStr")
         {

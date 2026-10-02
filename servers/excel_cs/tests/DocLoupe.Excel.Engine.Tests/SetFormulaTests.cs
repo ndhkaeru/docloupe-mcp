@@ -51,6 +51,142 @@ public sealed class SetFormulaTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void KeepCachePreservesExistingFormulaResultAndPassesSaveGates(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-keep-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, variant + ".xlsx");
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            var operation = Request("""{"op":"set_formula","target":"C1","formula":"=B1+2","cache":"keep"}""").Normalize("Sheet1");
+            Assert.True(operation.KeepCache);
+            sessions.Apply(id, 0, [operation]);
+            var output = Path.Combine(directory, "kept.xlsx");
+            sessions.Save(id, output, [new ValueAssertion("Sheet1", "C1", false, null, null, "B1+2")]);
+            var cell = Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["C1"]));
+            Assert.Equal("B1+2", cell.Formula);
+            Assert.Equal("2", cell.Value);
+            Assert.Empty(P2aGates.CheckTouchedCells(source, output,
+                [new CellExpectation("Sheet1", "C1", "formula", "B1+2", KeepCache: true)]));
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("b", "1", "true")]
+    [InlineData("e", "#N/A", "#N/A")]
+    [InlineData("str", "old", "old")]
+    public void KeepCacheRetainsExistingResultTypes(string type, string cached, string expectedValue)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-cache-types-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
+            {
+                var entry = archive.GetEntry("xl/worksheets/sheet1.xml")!;
+                string xml;
+                using (var reader = new StreamReader(entry.Open(), Encoding.UTF8)) xml = reader.ReadToEnd();
+                entry.Delete();
+                var changed = xml.Replace("<c r=\"C1\">", $"<c r=\"C1\" t=\"{type}\">", StringComparison.Ordinal)
+                    .Replace("<v>2</v>", $"<v>{cached}</v>", StringComparison.Ordinal);
+                Assert.NotEqual(xml, changed);
+                using var output = archive.CreateEntry("xl/worksheets/sheet1.xml").Open();
+                output.Write(Encoding.UTF8.GetBytes(changed));
+            }
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            sessions.Apply(id, 0, [Request("""{"op":"set_formula","target":"C1","formula":"B1+2","cache":"keep"}""")
+                .Normalize("Sheet1")]);
+            var outputPath = Path.Combine(directory, "kept.xlsx");
+            sessions.Save(id, outputPath);
+            Assert.Equal(expectedValue, Assert.Single(P2aGates.ReadCells(outputPath, "Sheet1", ["C1"])).Value);
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void G4RejectsUnclearedFormulaCache()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-clear-corrupt-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            Assert.Contains(P2aGates.CheckIntent(source,
+                [new CellExpectation("Sheet1", "C1", "formula", "1+1")]),
+                issue => issue.Code == "INTENT_CACHE_PRESENT");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void KeepCacheRejectsMissingOrNonFormulaSource()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-keep-guard-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, "default.xlsx")))
+                .GetProperty("session").GetString()!;
+            foreach (var target in new[] { "B1", "E5" })
+            {
+                var operation = Request($"{{\"op\":\"set_formula\",\"target\":\"{target}\",\"formula\":\"1+2\",\"cache\":\"keep\"}}").Normalize("Sheet1");
+                Assert.Throws<NotSupportedException>(() => sessions.Apply(id, 0, [operation]));
+                Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            }
+            sessions.Close(id, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void G5RejectsCacheLostAfterFormulaEdit()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-formula-keep-corrupt-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            var output = Path.Combine(directory, "corrupt.xlsx");
+            using (var store = new PackageStore(source))
+            {
+                SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "C1", "formula", "B1+2",
+                    Operation: "set_formula", KeepCache: true)]);
+                store.Save(output);
+            }
+            using (var archive = ZipFile.Open(output, ZipArchiveMode.Update))
+            {
+                var entry = archive.GetEntry("xl/worksheets/sheet1.xml")!;
+                string xml;
+                using (var reader = new StreamReader(entry.Open(), Encoding.UTF8)) xml = reader.ReadToEnd();
+                entry.Delete();
+                var changed = xml.Replace("<v>2</v>", "<v>9</v>", StringComparison.Ordinal);
+                Assert.NotEqual(xml, changed);
+                using var stream = archive.CreateEntry("xl/worksheets/sheet1.xml").Open();
+                stream.Write(Encoding.UTF8.GetBytes(changed));
+            }
+            var intent = new CellExpectation("Sheet1", "C1", "formula", "B1+2", KeepCache: true);
+            Assert.Empty(P2aGates.CheckIntent(output, [intent]));
+            Assert.Contains(P2aGates.CheckTouchedCells(source, output, [intent]),
+                issue => issue.Code == "FORMULA_CACHE_CHANGED");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     [Fact]
     public void MixedBatchAndUndoKeepRevisionAtomic()
     {
@@ -109,7 +245,7 @@ public sealed class SetFormulaTests
     [Theory]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"kind\":\"shared\"}")]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"kind\":\"array\"}")]
-    [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"cache\":\"keep\"}")]
+    [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"cache\":\"fresh\"}")]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"cache\":{\"value\":2}}")]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"1+1\",\"ref\":\"C1:C3\"}")]
     [InlineData("{\"op\":\"set_formula\",\"target\":\"C1\",\"formula\":\"=\"}")]
