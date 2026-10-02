@@ -131,10 +131,30 @@ public sealed class WorkbookReaderTests
         }
     }
 
+    [Theory]
+    [InlineData("worksheets/missing.xml", "worksheet", "MISSING_PART")]
+    [InlineData("../../../outside.xml", "worksheet", "INVALID_WORKBOOK_STRUCTURE")]
+    [InlineData("worksheets/sheet1.xml", "externalLink", "INVALID_WORKBOOK_STRUCTURE")]
+    public void ReportsMissingOrInvalidWorksheetRelationships(string sheetTarget, string relationshipType, string issueCode)
+    {
+        var path = CreateWorkbook("", sheetTarget: sheetTarget, sheetRelationshipType: relationshipType);
+        try
+        {
+            Assert.Throws<InvalidDataException>(() => WorkbookReader.Peek(path));
+            var result = WorkbookReader.VerifyPartial(path);
+            Assert.Equal("failed", result.Status);
+            Assert.Contains(result.PackageIssues, issue => issue.Code == issueCode);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private static string CreateWorkbook(string sheetDataContent, string workbookPart = "xl/workbook.xml",
         string? workbookTarget = null, string sheetTarget = "worksheets/sheet1.xml",
         string sheetPart = "xl/worksheets/sheet1.xml", bool includeRoot = true,
-        string rootRelationshipType = "officeDocument")
+        string rootRelationshipType = "officeDocument", string sheetRelationshipType = "worksheet")
     {
         var path = Path.Combine(AppContext.BaseDirectory, $"read-probe-{Guid.NewGuid():N}.xlsx");
         using var archive = new ZipArchive(File.Create(path), ZipArchiveMode.Create);
@@ -144,7 +164,7 @@ public sealed class WorkbookReaderTests
         Write(archive, workbookPart, "<x:workbook xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><x:sheets><x:sheet name='S' sheetId='1' r:id='rId1'/></x:sheets></x:workbook>");
         var slash = workbookPart.LastIndexOf('/');
         var relationshipPart = (slash < 0 ? "" : workbookPart[..(slash + 1)]) + "_rels/" + workbookPart[(slash + 1)..] + ".rels";
-        Write(archive, relationshipPart, $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Target='{sheetTarget}' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet'/></Relationships>");
+        Write(archive, relationshipPart, $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Target='{sheetTarget}' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/{sheetRelationshipType}'/></Relationships>");
         Write(archive, sheetPart, $"<x:worksheet xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><x:sheetData>{sheetDataContent}</x:sheetData></x:worksheet>");
         return path;
     }

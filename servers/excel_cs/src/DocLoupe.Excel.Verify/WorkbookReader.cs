@@ -49,10 +49,32 @@ public static class WorkbookReader
             try
             {
                 var workbookPart = LocateWorkbookPart(archive);
-                foreach (var required in new[] { workbookPart, RelationshipPart(workbookPart) })
+                var workbookEntry = FindEntry(archive, workbookPart);
+                var relationshipsEntry = FindEntry(archive, RelationshipPart(workbookPart));
+                if (workbookEntry is null)
+                    packageIssues.Add(new MarkupIssue("MISSING_PART", workbookPart));
+                if (relationshipsEntry is null)
+                    packageIssues.Add(new MarkupIssue("MISSING_PART", RelationshipPart(workbookPart)));
+                if (workbookEntry is not null && relationshipsEntry is not null)
                 {
-                    if (FindEntry(archive, required) is null)
-                        packageIssues.Add(new MarkupIssue("MISSING_PART", required));
+                    try
+                    {
+                        var relationships = ReadWorkbookRelationships(archive, workbookPart);
+                        var sheets = ReadSheets(archive, workbookPart, relationships);
+                        foreach (var sheet in sheets)
+                        {
+                            if (FindEntry(archive, sheet.Part) is null)
+                                packageIssues.Add(new MarkupIssue("MISSING_PART", sheet.Part));
+                        }
+                    }
+                    catch (XmlException exception)
+                    {
+                        packageIssues.Add(new MarkupIssue("INVALID_WORKBOOK_STRUCTURE", exception.Message));
+                    }
+                    catch (InvalidDataException exception)
+                    {
+                        packageIssues.Add(new MarkupIssue("INVALID_WORKBOOK_STRUCTURE", exception.Message));
+                    }
                 }
             }
             catch (XmlException exception)
