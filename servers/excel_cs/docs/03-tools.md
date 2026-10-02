@@ -273,6 +273,8 @@ output data {
 
 **Transactionality:** if any op fails, nothing is applied. The error names the op (`details.index`, `details.label`, `details.pointer` as a JSON pointer into the request), and for `PRECONDITION_FAILED` it includes `expected` and `actual`.
 
+**Current P2b precondition slice:** only `expect: {"value": …}` on a single-cell `set_value`, `set_formula` or `clear` is supported. It is checked against the session state at `base_revision` before any operation in the batch, with the independent cell reader and the same typed-value comparison as `excel_save.assert.equals.value` (including formula caches, not formula evaluation). A mismatch returns `PRECONDITION_FAILED` with `details.index`, `target`, `expected` and `actual`, leaving revision and cells unchanged. Other `expect` facets and bulk-op preconditions fail closed; hashes, `label`, full diff and `dry_run` remain future work.
+
 ### 4.2 Op catalog
 
 Effects listed per op are the semantic paths (02 §6) the op **declares**. G4 checks they changed exactly as predicted; G5 checks that nothing else changed.

@@ -83,6 +83,25 @@ public sealed class ExcelSessions : IDisposable
             session.CheckSource();
             if (operations.Length is < 1 or > 500) throw new ArgumentOutOfRangeException(nameof(operations));
             if (baseRevision != session.Revision) throw new InvalidOperationException("REVISION_CONFLICT");
+            if (operations.Any(operation => operation.Expect is not null))
+            {
+                var basePath = session.Preview();
+                try
+                {
+                    for (var index = 0; index < operations.Length; index++)
+                    {
+                        var operation = operations[index];
+                        if (operation.Expect is not { } expected) continue;
+                        var assertion = new ValueAssertion(operation.Sheet, operation.Address, true, expected.Kind, expected.Value, null);
+                        if (G7Assertions.Check(basePath, [assertion]).Count == 0) continue;
+                        CellRead? actual;
+                        try { actual = P2aGates.ReadCells(basePath, operation.Sheet, [operation.Address]).SingleOrDefault(); }
+                        catch (InvalidOperationException) { actual = null; }
+                        throw new PreconditionFailedException(index, operation.Sheet + "!" + operation.Address, expected, actual);
+                    }
+                }
+                finally { if (basePath != session.Path) File.Delete(basePath); }
+            }
             using var candidate = new PackageStore(session.Path);
             var next = Coalesce(session.Operations.Concat(operations));
             var result = SetValueEngine.Apply(candidate, next);
@@ -268,6 +287,15 @@ public sealed record LedgerEntry(int Revision, int OpCount, string Summary);
 public sealed record SessionSnapshot(int Revision, IReadOnlyList<LedgerEntry> Ledger);
 
 public sealed record BusyOperation(string Operation, string Since);
+
+public sealed class PreconditionFailedException(int index, string target, ExpectedValue expected, CellRead? actual)
+    : Exception("PRECONDITION_FAILED: " + target)
+{
+    public int Index { get; } = index;
+    public string Target { get; } = target;
+    public ExpectedValue Expected { get; } = expected;
+    public CellRead? Actual { get; } = actual;
+}
 
 public sealed class SaveBlockedException(IReadOnlyList<GateIssue> issues) : Exception("SAVE_BLOCKED: " + JsonSerializer.Serialize(issues))
 {

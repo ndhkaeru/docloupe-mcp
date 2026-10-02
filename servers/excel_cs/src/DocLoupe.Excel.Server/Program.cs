@@ -34,6 +34,12 @@ static CallToolResult Handle(Func<object> action)
         return Result(new { ok = false, error = new { code = "SAVE_BLOCKED", message = "Staging verification failed; no output was written",
             details = blocked.Issues, retryable = false } }, true);
     }
+    catch (PreconditionFailedException failed)
+    {
+        return Result(new { ok = false, error = new { code = "PRECONDITION_FAILED", message = failed.Message,
+            details = new { index = failed.Index, target = failed.Target, expected = failed.Expected,
+                actual = failed.Actual }, retryable = false } }, true);
+    }
     catch (Exception error)
     {
         return Result(new { ok = false, error = new { code = "P2A_ERROR", message = error.Message, retryable = false } }, true);

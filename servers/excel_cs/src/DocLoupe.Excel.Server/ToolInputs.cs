@@ -35,6 +35,8 @@ public sealed class SetValueRequest
     public JsonElement What { get; init; }
     [JsonPropertyName("remove_cells")]
     public JsonElement RemoveCells { get; init; }
+    [JsonPropertyName("expect")]
+    public JsonElement Expect { get; init; }
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Other { get; init; }
 
@@ -53,8 +55,10 @@ public sealed class SetValueRequest
                  What[0].ValueKind != JsonValueKind.String || What[0].GetString() != "values"))
                 throw new NotSupportedException("Only clear values with optional remove_cells is supported");
             var clearSheet = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
-            return new SetValueOp(clearSheet, CellAddress.Parse(Target).ToString(), "blank", null,
-                Operation: "clear", RemoveCell: RemoveCells.ValueKind == JsonValueKind.True);
+            var clearAddress = CellAddress.Parse(Target).ToString();
+            return new SetValueOp(clearSheet, clearAddress, "blank", null,
+                Operation: "clear", RemoveCell: RemoveCells.ValueKind == JsonValueKind.True,
+                Expect: NormalizeExpect(clearSheet, clearAddress));
         }
         if (What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
             throw new NotSupportedException("what and remove_cells require clear");
@@ -92,7 +96,7 @@ public sealed class SetValueRequest
             }
             return new SetValueOp(name, address, "formula", formula, Operation: Op,
                 KeepCache: Cache is { ValueKind: JsonValueKind.String } policy && policy.GetString() == "keep",
-                ExplicitCache: explicitCache);
+                ExplicitCache: explicitCache, Expect: NormalizeExpect(name, address));
         }
         if (Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null)
             throw new NotSupportedException("Formula fields require set_formula");
@@ -115,11 +119,24 @@ public sealed class SetValueRequest
         if (AsText && kind != "text") throw new ArgumentException("as_text requires a string value");
         if (kind == "text" && scalar?.StartsWith('=') == true && !AsText)
             throw new ArgumentException("AMBIGUOUS_FORMULA_TEXT");
-        return new SetValueOp(name, address, kind, scalar, RichPolicy, AsText, Op);
+        return new SetValueOp(name, address, kind, scalar, RichPolicy, AsText, Op,
+            Expect: NormalizeExpect(name, address));
+    }
+
+    private ExpectedValue? NormalizeExpect(string sheet, string address)
+    {
+        if (Expect.ValueKind == JsonValueKind.Undefined) return null;
+        if (Expect.ValueKind != JsonValueKind.Object || Expect.EnumerateObject().Count() != 1 ||
+            !Expect.TryGetProperty("value", out _))
+            throw new NotSupportedException("Only expect.value is supported");
+        var assertion = new SaveAssertionRequest { Target = sheet + "!" + address, Expected = Expect }.Normalize();
+        return new ExpectedValue(assertion.Kind!, assertion.Value);
     }
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)
     {
+        if (Expect.ValueKind != JsonValueKind.Undefined && (Op is not ("set_value" or "set_formula" or "clear") || Target.Contains(':')))
+            throw new NotSupportedException("expect.value requires a single-cell operation");
         var hasValue = Value.ValueKind != JsonValueKind.Undefined;
         var hasSeries = Series.ValueKind != JsonValueKind.Undefined;
         if (Op == "set_value" && hasSeries) throw new NotSupportedException("series requires fill");

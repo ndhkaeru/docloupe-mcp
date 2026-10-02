@@ -28,10 +28,18 @@ try
     if (result.IsError == true || result.StructuredContent is null || result.Content.OfType<TextContentBlock>().Count() != 1)
         throw new InvalidOperationException("Dual-channel MCP tool response not received by SDK client");
     var session = result.StructuredContent.Value.GetProperty("data").GetProperty("session").GetString()!;
+    var stale = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
+        ["ops"] = new[] { new { op = "set_value", target = "B1", value = 99, expect = new { value = 0 } } }
+    });
+    if (stale.IsError != true || stale.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PRECONDITION_FAILED" ||
+        stale.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("index").GetInt32() != 0)
+        throw new InvalidOperationException("MCP precondition failure was not structured: " + stale.StructuredContent?.GetRawText());
     var applied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
-        ["ops"] = new object[] { new { op = "set_value", sheet = "Sheet1", target = "B1", value = 99 },
+        ["ops"] = new object[] { new { op = "set_value", sheet = "Sheet1", target = "B1", value = 99, expect = new { value = 42 } },
             new { op = "set_formula", sheet = "Sheet1", target = "C1", formula = "=B1+2", cache = "keep" },
             new { op = "set_values", sheet = "Sheet1", target = "D4", values = new object?[][] { [4, "batch"] } },
             new { op = "set_value", sheet = "Sheet1", target = "F5:G5", value = 6 },
