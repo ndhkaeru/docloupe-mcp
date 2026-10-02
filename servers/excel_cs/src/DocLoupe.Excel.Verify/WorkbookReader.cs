@@ -120,6 +120,8 @@ public static class WorkbookReader
             }
         }
 
+        VerifyRelationships(archive, packageIssues);
+
         foreach (var entry in archive.Entries.Where(entry => entry.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
             || entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)))
         {
@@ -130,6 +132,85 @@ public static class WorkbookReader
 
         var status = packageIssues.Count + markupIssues.Count > 0 ? "failed" : "unverified";
         return new VerificationSummary(status, packageIssues, markupIssues, ["G1_REMAINING", "G2", "G4", "G5", "G6", "G7"]);
+    }
+
+    private static void VerifyRelationships(ZipArchive archive, List<MarkupIssue> issues)
+    {
+        foreach (var entry in archive.Entries.Where(part => part.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)))
+        {
+            var source = RelationshipSource(entry.FullName);
+            if (source is null)
+            {
+                issues.Add(new MarkupIssue("INVALID_RELATIONSHIP_PART", entry.FullName));
+                continue;
+            }
+            if (source.Length > 0 && FindEntry(archive, source) is null)
+                issues.Add(new MarkupIssue("MISSING_SOURCE_PART", source));
+            try
+            {
+                using var reader = CreateReader(entry);
+                reader.MoveToContent();
+                if (reader.LocalName != "Relationships" || reader.NamespaceURI != PackageRelationshipNamespace)
+                {
+                    issues.Add(new MarkupIssue("INVALID_RELATIONSHIPS_ROOT", entry.FullName));
+                    continue;
+                }
+                var ids = new HashSet<string>(StringComparer.Ordinal);
+                while (reader.Read())
+                {
+                    if (reader.NodeType != XmlNodeType.Element || reader.Depth != 1) continue;
+                    if (reader.LocalName != "Relationship" || reader.NamespaceURI != PackageRelationshipNamespace)
+                    {
+                        issues.Add(new MarkupIssue("INVALID_RELATIONSHIP", entry.FullName));
+                        continue;
+                    }
+                    var id = reader.GetAttribute("Id");
+                    var target = reader.GetAttribute("Target");
+                    if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(target) ||
+                        string.IsNullOrWhiteSpace(reader.GetAttribute("Type")))
+                    {
+                        issues.Add(new MarkupIssue("INVALID_RELATIONSHIP", entry.FullName));
+                        continue;
+                    }
+                    if (!ids.Add(id)) issues.Add(new MarkupIssue("DUPLICATE_RELATIONSHIP_ID", $"{entry.FullName}: {id}"));
+                    var mode = reader.GetAttribute("TargetMode");
+                    if (mode == "External") continue;
+                    if (mode is not null and not "Internal")
+                    {
+                        issues.Add(new MarkupIssue("INVALID_TARGET_MODE", $"{entry.FullName}: {id}"));
+                        continue;
+                    }
+                    try
+                    {
+                        var part = ResolvePartPath(source, target);
+                        if (FindEntry(archive, part) is null)
+                            issues.Add(new MarkupIssue("MISSING_RELATIONSHIP_TARGET", $"{entry.FullName}: {id} -> {part}"));
+                    }
+                    catch (InvalidDataException exception)
+                    {
+                        issues.Add(new MarkupIssue("INVALID_RELATIONSHIP_TARGET", $"{entry.FullName}: {id}: {exception.Message}"));
+                    }
+                }
+            }
+            catch (XmlException exception)
+            {
+                issues.Add(new MarkupIssue("INVALID_RELATIONSHIPS_XML", $"{entry.FullName}: {exception.Message}"));
+            }
+        }
+    }
+
+    private static string? RelationshipSource(string part)
+    {
+        if (part.Equals("_rels/.rels", StringComparison.OrdinalIgnoreCase)) return "";
+        var separator = part.LastIndexOf("/_rels/", StringComparison.OrdinalIgnoreCase);
+        if (separator >= 0)
+        {
+            var name = part[(separator + "/_rels/".Length)..^".rels".Length];
+            return name.Length == 0 ? null : part[..separator] + "/" + name;
+        }
+        if (!part.StartsWith("_rels/", StringComparison.OrdinalIgnoreCase)) return null;
+        var rootName = part["_rels/".Length..^".rels".Length];
+        return rootName.Length == 0 ? null : rootName;
     }
 
     private static string LocateWorkbookPart(ZipArchive archive)

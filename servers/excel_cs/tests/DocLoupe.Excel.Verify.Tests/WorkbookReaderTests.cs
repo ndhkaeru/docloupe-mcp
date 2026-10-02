@@ -252,6 +252,58 @@ public sealed class WorkbookReaderTests
         }
     }
 
+    [Theory]
+    [InlineData("../work%62ook.xml", null, null)]
+    [InlineData("../workbook.xml#fragment", "Internal", null)]
+    [InlineData("https://example.invalid/resource", "External", null)]
+    [InlineData("../missing.xml", null, "MISSING_RELATIONSHIP_TARGET")]
+    [InlineData("../../../escape.xml", null, "INVALID_RELATIONSHIP_TARGET")]
+    [InlineData("../workbook.xml", "Unknown", "INVALID_TARGET_MODE")]
+    public void ChecksUnmodifiedWorksheetRelationships(string target, string? mode, string? expectedCode)
+    {
+        var path = CreateWorkbook("");
+        try
+        {
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+                Write(archive, "xl/worksheets/_rels/sheet1.xml.rels",
+                    $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>" +
+                    $"<Relationship Id='rId1' Type='urn:custom' Target='{target}'" +
+                    (mode is null ? "" : $" TargetMode='{mode}'") + "/></Relationships>");
+            var result = WorkbookReader.VerifyPartial(path);
+            if (expectedCode is null)
+                Assert.Equal("unverified", result.Status);
+            else
+            {
+                Assert.Equal("failed", result.Status);
+                Assert.Contains(result.PackageIssues, issue => issue.Code == expectedCode);
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void RejectsDuplicateIdsAndOrphanRelationshipSources()
+    {
+        var path = CreateWorkbook("");
+        try
+        {
+            const string relationship = "<Relationship Id='dup' Type='urn:custom' Target='../workbook.xml'/>";
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+            {
+                Write(archive, "xl/worksheets/_rels/sheet1.xml.rels",
+                    "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>" +
+                    relationship + relationship + "</Relationships>");
+                Write(archive, "xl/worksheets/_rels/ghost.xml.rels",
+                    "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'/>");
+            }
+            var result = WorkbookReader.VerifyPartial(path);
+            Assert.Equal("failed", result.Status);
+            Assert.Contains(result.PackageIssues, issue => issue.Code == "DUPLICATE_RELATIONSHIP_ID");
+            Assert.Contains(result.PackageIssues, issue => issue.Code == "MISSING_SOURCE_PART");
+        }
+        finally { File.Delete(path); }
+    }
+
     private static string CreateWorkbook(string sheetDataContent, string workbookPart = "xl/workbook.xml",
         string? workbookTarget = null, string sheetTarget = "worksheets/sheet1.xml",
         string sheetPart = "xl/worksheets/sheet1.xml", bool includeRoot = true,
