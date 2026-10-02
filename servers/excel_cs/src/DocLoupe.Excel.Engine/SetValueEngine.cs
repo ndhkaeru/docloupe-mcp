@@ -7,7 +7,7 @@ using DocLoupe.Excel.Package;
 
 namespace DocLoupe.Excel.Engine;
 
-public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false);
+public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value");
 public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value);
 public sealed record ApplyResult(IReadOnlyList<ExpectedCell> Intent, IReadOnlyList<ByteEdit> Edits, IReadOnlyList<string> ChangedParts);
 
@@ -172,8 +172,10 @@ public static class SetValueEngine
         else if (kind == "formula")
         {
             cell.RemoveAttribute("t");
+            var formulaText = value?.TrimStart('=');
+            if (string.IsNullOrWhiteSpace(formulaText)) throw new FormatException("Formula is required");
             var formula = document.CreateElement(cell.Prefix, "f", PackageStore.Main);
-            formula.InnerText = value?.TrimStart('=') ?? throw new FormatException("Formula is required");
+            formula.InnerText = formulaText;
             cell.AppendChild(formula);
         }
         else if (kind == "inline" || kind == "text" && existing == "inlineStr")

@@ -19,12 +19,36 @@ public sealed class SetValueRequest
     public bool AsText { get; init; }
     [JsonPropertyName("rich_policy")]
     public string RichPolicy { get; init; } = "reject";
+    [JsonPropertyName("formula")]
+    public string? Formula { get; init; }
+    [JsonPropertyName("kind")]
+    public string? FormulaKind { get; init; }
+    [JsonPropertyName("ref")]
+    public string? Reference { get; init; }
+    [JsonPropertyName("cache")]
+    public JsonElement? Cache { get; init; }
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Other { get; init; }
 
     public SetValueOp Normalize(string? defaultSheet)
     {
-        if (Op != "set_value") throw new NotSupportedException("P2a supports only set_value");
+        if (Op is not ("set_value" or "set_formula")) throw new NotSupportedException("Only set_value and normal set_formula are supported");
+        if (Other is { Count: > 0 }) throw new NotSupportedException("Unsupported cell operation fields");
         var name = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
         var address = CellAddress.Parse(Target).ToString();
+        if (Op == "set_formula")
+        {
+            if (Value.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
+                FormulaKind is not (null or "normal") || Reference is not null ||
+                Cache is { } cache && (cache.ValueKind != JsonValueKind.String || cache.GetString() != "clear"))
+                throw new NotSupportedException("Only normal set_formula with cleared cache is supported");
+            var formula = Formula?.StartsWith('=') == true ? Formula[1..] : Formula;
+            if (string.IsNullOrWhiteSpace(formula) || formula.StartsWith('='))
+                throw new ArgumentException("Formula must be a nonempty expression");
+            return new SetValueOp(name, address, "formula", formula, Operation: Op);
+        }
+        if (Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null)
+            throw new NotSupportedException("Formula fields require set_formula");
         var (kind, scalar) = Value.ValueKind switch
         {
             JsonValueKind.String => ("text", Value.GetString()),
@@ -41,7 +65,7 @@ public sealed class SetValueRequest
         if (AsText && kind != "text") throw new ArgumentException("as_text requires a string value");
         if (kind == "text" && scalar?.StartsWith('=') == true && !AsText)
             throw new ArgumentException("AMBIGUOUS_FORMULA_TEXT");
-        return new SetValueOp(name, address, kind, scalar, RichPolicy, AsText);
+        return new SetValueOp(name, address, kind, scalar, RichPolicy, AsText, Op);
     }
 }
 

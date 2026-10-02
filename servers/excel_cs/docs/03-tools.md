@@ -293,6 +293,8 @@ Effects listed per op are the semantic paths (02 §6) the op **declares**. G4 ch
 | `rich_delete` | `target`, `at: Span` | `.rich`, `.value` |
 | `phonetic_set` | `target`, `runs`, `properties?` | `.phonetic` |
 
+**Current P2b slice:** `set_formula` accepts only `kind: "normal"` (or omitted) with `cache: "clear"` (or omitted). It rejects formula-group edits, non-clearing cache modes, and unsupported fields before mutating the session. Existing `set_value` formula objects remain compatible with P2a.
+
 `Span = { match: string, occurrence?: number | "all" = 1, normalize?: "nfc" | "none" } | { range: [number, number] } | "all"`. Ranges count graphemes (02 §4.2).
 
 Example: recolor one word in a three-run Vietnamese cell, guarded by the text the agent read.

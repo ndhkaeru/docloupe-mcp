@@ -31,7 +31,8 @@ try
     var applied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
-        ["ops"] = new[] { new { op = "set_value", sheet = "Sheet1", target = "B1", value = 99 } }
+        ["ops"] = new object[] { new { op = "set_value", sheet = "Sheet1", target = "B1", value = 99 },
+            new { op = "set_formula", sheet = "Sheet1", target = "C1", formula = "=B1+2", cache = "clear" } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
     var status = await client.CallToolAsync("excel_status", new Dictionary<string, object?> { ["session"] = session });
@@ -50,7 +51,8 @@ try
     var saved = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
     {
         ["session"] = session, ["mode"] = "copy", ["path"] = output,
-        ["assert"] = new[] { new { target = "Sheet1!B1", equals = new { value = 99 } } }
+        ["assert"] = new object[] { new { target = "Sheet1!B1", equals = new { value = 99 } },
+            new { target = "Sheet1!C1", equals = new { formula = "B1+2" } } }
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());

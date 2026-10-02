@@ -90,7 +90,7 @@ public sealed class ExcelSessions : IDisposable
             session.RevisionLengths.Add(operations.Length);
             session.Revision++;
             session.Ledger.Add(new LedgerEntry(session.Revision, operations.Length,
-                string.Join(", ", operations.Select(operation => $"set_value {operation.Sheet}!{operation.Address}"))));
+                string.Join(", ", operations.Select(operation => $"{operation.Operation} {operation.Sheet}!{operation.Address}"))));
             session.Publish();
             return new { session = id, revision = session.Revision, intent = result.Intent };
         }

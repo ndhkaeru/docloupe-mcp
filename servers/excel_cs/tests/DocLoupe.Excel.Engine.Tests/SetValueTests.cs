@@ -141,11 +141,12 @@ public sealed class SetValueTests
             using var stream = archive.CreateEntry("xl/calcChain.xml").Open();
             stream.Write(Encoding.UTF8.GetBytes("<calcChain xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><c r=\"C1\" i=\"1\"/></calcChain>"));
         }
-        foreach (var (address, expectedRemoval) in new[] { ("B1", false), ("C1", true) })
+        foreach (var (address, kind, value, expectedRemoval) in new[]
+            { ("B1", "number", "9", false), ("C1", "number", "9", true), ("C1", "formula", "1+3", false) })
         {
-            var output = Path.Combine(fixture.Directory, address + ".xlsx");
+            var output = Path.Combine(fixture.Directory, address + "-" + kind + ".xlsx");
             using var store = new PackageStore(source);
-            var result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", address, "number", "9")]);
+            var result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", address, kind, value)]);
             store.Save(output);
             using var zip = ZipFile.OpenRead(output);
             Assert.Equal(!expectedRemoval, zip.GetEntry("xl/calcChain.xml") is not null);
