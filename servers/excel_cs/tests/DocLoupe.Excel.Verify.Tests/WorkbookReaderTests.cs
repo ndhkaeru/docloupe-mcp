@@ -46,7 +46,9 @@ public sealed class WorkbookReaderTests
         var path = CreateWorkbook("<x:row r='1'><x:c r='A1' t='inlineStr'><x:is><x:r><x:t>漢字</x:t></x:r><x:rPh sb='0' eb='2'><x:t>かんじ</x:t></x:rPh><x:phoneticPr fontId='1'/></x:is></x:c></x:row>");
         try
         {
-            Assert.Equal("漢字", Assert.Single(WorkbookReader.Peek(path).FirstSheetCells).RawValue);
+            var cell = Assert.Single(WorkbookReader.Peek(path).FirstSheetCells);
+            Assert.Equal("漢字", cell.RawValue);
+            Assert.Equal("漢字", cell.Value);
         }
         finally
         {
@@ -64,6 +66,7 @@ public sealed class WorkbookReaderTests
             Assert.Equal("10", cells[0].RawValue);
             Assert.Equal("A1*2", cells[1].Formula);
             Assert.Equal("20", cells[1].RawValue);
+            Assert.Equal("20", cells[1].Value);
         }
         finally
         {
@@ -151,10 +154,51 @@ public sealed class WorkbookReaderTests
         }
     }
 
+    [Theory]
+    [InlineData("0", "漢字")]
+    [InlineData("1", "Other")]
+    public void ResolvesSharedStringsWithoutIncludingPhoneticGuide(string index, string expected)
+    {
+        var strings = "<x:sst xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>"
+            + "<x:si><x:r><x:t>漢字</x:t></x:r><x:rPh sb='0' eb='2'><x:t>かんじ</x:t></x:rPh></x:si>"
+            + "<x:si><x:t>Other</x:t></x:si></x:sst>";
+        var path = CreateWorkbook($"<x:row r='1'><x:c r='A1' t='s'><x:v>{index}</x:v></x:c></x:row>",
+            workbookPart: "xl/nested/workbook.xml", sheetTarget: "/xl/worksheets/sheet1.xml", sharedStringsXml: strings);
+        try
+        {
+            var cell = Assert.Single(WorkbookReader.Peek(path).FirstSheetCells);
+            Assert.Equal(index, cell.RawValue);
+            Assert.Equal(expected, cell.Value);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData("2")]
+    [InlineData("-1")]
+    public void RejectsInvalidSharedStringIndices(string index)
+    {
+        var strings = "<x:sst xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><x:si><x:t>One</x:t></x:si></x:sst>";
+        var path = CreateWorkbook($"<x:row r='1'><x:c r='A1' t='s'><x:v>{index}</x:v></x:c></x:row>",
+            sharedStringsXml: strings);
+        try
+        {
+            Assert.Throws<InvalidDataException>(() => WorkbookReader.Peek(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private static string CreateWorkbook(string sheetDataContent, string workbookPart = "xl/workbook.xml",
         string? workbookTarget = null, string sheetTarget = "worksheets/sheet1.xml",
         string sheetPart = "xl/worksheets/sheet1.xml", bool includeRoot = true,
-        string rootRelationshipType = "officeDocument", string sheetRelationshipType = "worksheet")
+        string rootRelationshipType = "officeDocument", string sheetRelationshipType = "worksheet",
+        string? sharedStringsXml = null)
     {
         var path = Path.Combine(AppContext.BaseDirectory, $"read-probe-{Guid.NewGuid():N}.xlsx");
         using var archive = new ZipArchive(File.Create(path), ZipArchiveMode.Create);
@@ -164,7 +208,10 @@ public sealed class WorkbookReaderTests
         Write(archive, workbookPart, "<x:workbook xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><x:sheets><x:sheet name='S' sheetId='1' r:id='rId1'/></x:sheets></x:workbook>");
         var slash = workbookPart.LastIndexOf('/');
         var relationshipPart = (slash < 0 ? "" : workbookPart[..(slash + 1)]) + "_rels/" + workbookPart[(slash + 1)..] + ".rels";
-        Write(archive, relationshipPart, $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Target='{sheetTarget}' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/{sheetRelationshipType}'/></Relationships>");
+        var sharedRelationship = sharedStringsXml is null ? "" : "<Relationship Id='rId2' Target='sharedStrings.xml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings'/>";
+        Write(archive, relationshipPart, $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Target='{sheetTarget}' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/{sheetRelationshipType}'/>{sharedRelationship}</Relationships>");
+        if (sharedStringsXml is not null)
+            Write(archive, (slash < 0 ? "" : workbookPart[..(slash + 1)]) + "sharedStrings.xml", sharedStringsXml);
         Write(archive, sheetPart, $"<x:worksheet xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><x:sheetData>{sheetDataContent}</x:sheetData></x:worksheet>");
         return path;
     }

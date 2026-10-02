@@ -1,10 +1,11 @@
+using System.Globalization;
 using System.IO.Compression;
 using System.Xml;
 
 namespace DocLoupe.Excel.Verify;
 
 public sealed record SheetSummary(string Name, string Part, string State);
-public sealed record CellSummary(string Address, string Type, string? RawValue, string? Formula);
+public sealed record CellSummary(string Address, string Type, string? RawValue, string? Formula, string? Value = null);
 public sealed record WorkbookSummary(string Path, IReadOnlyList<SheetSummary> Sheets, IReadOnlyList<CellSummary> FirstSheetCells);
 public sealed record VerificationSummary(string Status, IReadOnlyList<MarkupIssue> PackageIssues,
     IReadOnlyList<MarkupIssue> MarkupIssues, IReadOnlyList<string> UnverifiedGates);
@@ -25,7 +26,7 @@ public static class WorkbookReader
         var workbookPart = LocateWorkbookPart(archive);
         var relationships = ReadWorkbookRelationships(archive, workbookPart);
         var sheets = ReadSheets(archive, workbookPart, relationships);
-        var cells = sheets.Count == 0 ? [] : ReadCells(archive, sheets[0].Part, maxCells);
+        var cells = sheets.Count == 0 ? [] : ReadCells(archive, workbookPart, sheets[0].Part, maxCells);
         return new WorkbookSummary(path, sheets, cells);
     }
 
@@ -186,10 +187,11 @@ public static class WorkbookReader
         return sheets;
     }
 
-    private static List<CellSummary> ReadCells(ZipArchive archive, string part, int maxCells)
+    private static List<CellSummary> ReadCells(ZipArchive archive, string workbookPart, string part, int maxCells)
     {
         var entry = FindEntry(archive, part) ?? throw new InvalidDataException($"Missing sheet part {part}");
         var cells = new List<CellSummary>();
+        IReadOnlyList<string>? sharedStrings = null;
         using var reader = CreateReader(entry);
         reader.MoveToContent();
         if (reader.LocalName != "worksheet" || reader.NamespaceURI != SpreadsheetNamespace)
@@ -235,9 +237,76 @@ public static class WorkbookReader
                 }
             }
             if (value is null && text.Length > 0) value = text.ToString();
-            cells.Add(new CellSummary(address, type, value, formula));
+            string? resolved = value;
+            if (type == "s")
+            {
+                sharedStrings ??= ReadSharedStrings(archive, workbookPart);
+                if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var index)
+                    || index < 0 || index >= sharedStrings.Count)
+                    throw new InvalidDataException($"Invalid shared string index at {address}: {value}");
+                resolved = sharedStrings[index];
+            }
+            cells.Add(new CellSummary(address, type, value, formula, resolved));
         }
         return cells;
+    }
+
+    private static IReadOnlyList<string> ReadSharedStrings(ZipArchive archive, string workbookPart)
+    {
+        var relationshipsPart = FindEntry(archive, RelationshipPart(workbookPart))
+            ?? throw new InvalidDataException("Missing workbook relationships");
+        string? target = null;
+        using (var reader = CreateReader(relationshipsPart))
+        {
+            while (reader.Read())
+            {
+                if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "Relationship"
+                    || reader.NamespaceURI != PackageRelationshipNamespace
+                    || reader.GetAttribute("Type") != RelationshipNamespace + "/sharedStrings")
+                    continue;
+                if (reader.GetAttribute("TargetMode") == "External" || target is not null)
+                    throw new InvalidDataException("Invalid shared strings relationship");
+                target = reader.GetAttribute("Target") ?? throw new InvalidDataException("Missing shared strings target");
+            }
+        }
+        if (target is null) throw new InvalidDataException("Missing shared strings relationship");
+        var part = ResolvePartPath(workbookPart, target);
+        var entry = FindEntry(archive, part) ?? throw new InvalidDataException($"Missing shared strings part {part}");
+        var values = new List<string>();
+        using var stringsReader = CreateReader(entry);
+        stringsReader.MoveToContent();
+        if (stringsReader.LocalName != "sst" || stringsReader.NamespaceURI != SpreadsheetNamespace)
+            throw new InvalidDataException("Invalid shared strings root");
+        while (stringsReader.Read())
+        {
+            if (stringsReader.NodeType != XmlNodeType.Element || stringsReader.LocalName != "si"
+                || stringsReader.NamespaceURI != SpreadsheetNamespace)
+                continue;
+            var text = new System.Text.StringBuilder();
+            using (var item = stringsReader.ReadSubtree())
+            {
+                item.Read();
+                while (!item.EOF)
+                {
+                    if (item.NodeType == XmlNodeType.Element && item.NamespaceURI == SpreadsheetNamespace)
+                    {
+                        if (item.LocalName is "rPh" or "phoneticPr")
+                        {
+                            item.Skip();
+                            continue;
+                        }
+                        if (item.LocalName == "t")
+                        {
+                            text.Append(item.ReadElementContentAsString());
+                            continue;
+                        }
+                    }
+                    item.Read();
+                }
+            }
+            values.Add(text.ToString());
+        }
+        return values;
     }
 
     private static ZipArchiveEntry? FindEntry(ZipArchive archive, string part) => archive.Entries
