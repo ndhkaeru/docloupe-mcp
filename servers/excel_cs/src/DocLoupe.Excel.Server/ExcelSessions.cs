@@ -139,8 +139,8 @@ public sealed class ExcelSessions : IDisposable
             try
             {
                 using var store = new PackageStore(session.Path);
-                if (store.Parts.Any(part => part.StartsWith("_xmlsignatures/", StringComparison.OrdinalIgnoreCase)))
-                    throw new SaveBlockedException([new GateIssue("G6", "SIGNED_PACKAGE_UNSUPPORTED", "P2a cannot safely update signed workbooks")]);
+                if (AdvancedPartGate.CheckSignedSource(session.Path) is { Count: > 0 } signed)
+                    throw new SaveBlockedException(signed);
                 var result = SetValueEngine.Apply(store, Coalesce(session.Operations));
                 store.Save(staging);
                 var reports = new List<GateIssue>();
@@ -154,13 +154,15 @@ public sealed class ExcelSessions : IDisposable
                     result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)), addedOrRemoved));
                 reports.AddRange(P2aGates.CheckTouchedCells(session.Path, staging,
                     result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value))));
+                reports.AddRange(AdvancedPartGate.Check(session.Path, staging,
+                    result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value))));
                 if (reports.Count == 0) reports.AddRange(G7Assertions.Check(staging, assertions ?? []));
                 if (reports.Count > 0) throw new SaveBlockedException(reports);
                 if (schema.Gaps.Count > 0) throw new SaveBlockedException(schema.Gaps.Select(issue => new GateIssue("G2", issue.Code, issue.Detail)).ToArray());
                 var readback = result.Intent.GroupBy(item => item.Sheet).ToDictionary(group => group.Key,
                     group => P2aGates.ReadCells(staging, group.Key, group.Select(item => item.Address)));
                 var response = new { session = id, revision = session.Revision, path = destination, status = "verified",
-                    gates = new[] { "G1", "G2", "G3", "G4", "G5", "G7" },
+                    gates = new[] { "G1", "G2", "G3", "G4", "G5", "G6", "G7" },
                     assertions = (assertions ?? []).Select((item, index) => new { index, status = "verified",
                         expected = item }).ToArray(), readback };
                 File.Move(staging, destination);

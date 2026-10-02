@@ -68,8 +68,10 @@ try
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());
-    if (!saved.StructuredContent.Value.GetProperty("data").GetProperty("gates").EnumerateArray()
-        .Any(gate => gate.GetString() == "G7")) throw new InvalidOperationException("G7 assertion was not checked");
+    var verifiedGates = saved.StructuredContent.Value.GetProperty("data").GetProperty("gates").EnumerateArray()
+        .Select(gate => gate.GetString()).ToArray();
+    if (!verifiedGates.Contains("G6") || !verifiedGates.Contains("G7"))
+        throw new InvalidOperationException("G6 or G7 was not checked");
     Console.WriteLine("saved_status=" + saved.StructuredContent.Value.GetProperty("data").GetProperty("status").GetString());
     var undone = await client.CallToolAsync("excel_undo", new Dictionary<string, object?>
     {

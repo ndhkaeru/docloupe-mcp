@@ -87,6 +87,8 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
 - **Other advanced parts must be present and semantically equal unless declared:** charts, media, drawings, printer settings, pivot caches/tables, slicers, timelines, external links, `customXml`, `customUI`, threaded comments/persons, `xl/model`, `xl/metadata.xml`. This catches EX-01.
 - **calcChain:** the writer removes `xl/calcChain.xml` only when an existing formula is replaced with non-formula content, and declares that removal as an effect. Otherwise the part must be unchanged. Value changes still set `fullCalcOnLoad` independently. Broader shared/array formula handling is deferred to P3.
 
+**Current P2b subset:** the independent Verify gate fails closed on signed sources, compares every non-core part byte-for-byte (stronger than semantic equivalence), checks unchanged relationship and effective content-type mappings, and allows only the addition of shared strings or the justified removal of `calcChain`. Deliberate advanced-part edits, semantic normalizations, and signature-invalidation consent are not supported yet.
+
 ### 3.7 G7 — Agent assertions
 
 - Each `assert` item in `excel_save` is evaluated on W:
