@@ -70,9 +70,72 @@ public sealed class FillTests
     }
 
     [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void IntegerSeriesFillsInRowMajorOrderAndPassesSaveGates(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-fill-series-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var session = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            var operations = Request("""{"op":"fill","target":"Sheet1!B1:C2","series":{"start":-3,"step":2}}""")
+                .NormalizeMany("WrongDefault");
+            Assert.Equal(["B1", "C1", "B2", "C2"], operations.Select(operation => operation.Address).ToArray());
+            Assert.Equal(["-3", "-1", "1", "3"], operations.Select(operation => operation.Value!).ToArray());
+            Assert.All(operations, operation => Assert.Equal("fill", operation.Operation));
+            sessions.Apply(session, 0, operations);
+            var output = Path.Combine(directory, "series.xlsx");
+            var saved = JsonSerializer.SerializeToElement(sessions.Save(session, output,
+                [new ValueAssertion("Sheet1", "C2", true, "number", "3", null)]));
+            Assert.Equal("verified", saved.GetProperty("status").GetString());
+            var cells = P2aGates.ReadCells(output, "Sheet1", ["B1", "C1", "B2", "C2"])
+                .ToDictionary(cell => cell.Address);
+            Assert.Equal(4, cells.Count);
+            Assert.Equal("-3", cells["B1"].Value);
+            Assert.Equal("-1", cells["C1"].Value);
+            Assert.Equal("1", cells["B2"].Value);
+            Assert.Equal("3", cells["C2"].Value);
+            sessions.Undo(session, 1, 0);
+            sessions.Close(session, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void BoundedIntegerSeriesAllowsZeroStep()
+    {
+        var operations = Request("""{"op":"fill","target":"Sheet1!B1:C1","series":{"start":999999999999999,"step":0}}""")
+            .NormalizeMany(null);
+        Assert.Equal(["999999999999999", "999999999999999"], operations.Select(operation => operation.Value!).ToArray());
+    }
+
+    [Theory]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1.5,\"step\":1}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1,\"step\":0.1}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1,\"step\":1,\"extra\":0}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1,\"start\":2,\"step\":1}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":9223372036854775807,\"step\":1}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":999999999999999,\"step\":1}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1,\"step\":9223372036854775807}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"value\":1,\"series\":{\"start\":1,\"step\":1}}")]
+    [InlineData("{\"op\":\"set_value\",\"target\":\"B1:C1\",\"value\":1,\"series\":{\"start\":1,\"step\":1}}")]
+    [InlineData("{\"op\":\"set_values\",\"target\":\"B1:C1\",\"values\":[[1,2]],\"series\":{\"start\":1,\"step\":1}}")]
+    public void InvalidIntegerSeriesIsRejectedBeforeMutation(string json)
+    {
+        var error = Record.Exception(() => Request(json).NormalizeMany("Sheet1"));
+        Assert.True(error is ArgumentException or FormatException or NotSupportedException, error?.ToString());
+    }
+
+    [Theory]
     [InlineData("{\"op\":\"fill\",\"target\":\"B1\",\"value\":1}")]
     [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\"}")]
-    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1,\"step\":2}}")]
     [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"pattern_from\":\"A1\"}")]
     [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"value\":1,\"series\":{\"start\":1,\"step\":2}}")]
     [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"value\":1,\"as_text\":true}")]
