@@ -120,7 +120,8 @@ public static class WorkbookReader
             }
         }
 
-        VerifyRelationships(archive, packageIssues);
+        var relationshipIds = VerifyRelationships(archive, packageIssues);
+        VerifyXmlRelationshipIds(archive, relationshipIds, packageIssues);
 
         foreach (var entry in archive.Entries.Where(entry => entry.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
             || entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)))
@@ -134,8 +135,9 @@ public static class WorkbookReader
         return new VerificationSummary(status, packageIssues, markupIssues, ["G1_REMAINING", "G2", "G4", "G5", "G6", "G7"]);
     }
 
-    private static void VerifyRelationships(ZipArchive archive, List<MarkupIssue> issues)
+    private static Dictionary<string, HashSet<string>> VerifyRelationships(ZipArchive archive, List<MarkupIssue> issues)
     {
+        var relationshipIds = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in archive.Entries.Where(part => part.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)))
         {
             var source = RelationshipSource(entry.FullName);
@@ -156,6 +158,7 @@ public static class WorkbookReader
                     continue;
                 }
                 var ids = new HashSet<string>(StringComparer.Ordinal);
+                relationshipIds.TryAdd(source, ids);
                 while (reader.Read())
                 {
                     if (reader.NodeType != XmlNodeType.Element || reader.Depth != 1) continue;
@@ -195,6 +198,31 @@ public static class WorkbookReader
             catch (XmlException exception)
             {
                 issues.Add(new MarkupIssue("INVALID_RELATIONSHIPS_XML", $"{entry.FullName}: {exception.Message}"));
+            }
+        }
+        return relationshipIds;
+    }
+
+    private static void VerifyXmlRelationshipIds(ZipArchive archive,
+        Dictionary<string, HashSet<string>> relationshipIds, List<MarkupIssue> issues)
+    {
+        foreach (var entry in archive.Entries.Where(part => part.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
+            && !part.FullName.Equals("[Content_Types].xml", StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                using var reader = CreateReader(entry);
+                while (reader.Read())
+                {
+                    if (reader.NodeType != XmlNodeType.Element) continue;
+                    var id = reader.GetAttribute("id", RelationshipNamespace);
+                    if (id is not null && (!relationshipIds.TryGetValue(entry.FullName, out var ids) || !ids.Contains(id)))
+                        issues.Add(new MarkupIssue("UNRESOLVED_RELATIONSHIP_ID", $"{entry.FullName}: {id}"));
+                }
+            }
+            catch (XmlException exception)
+            {
+                issues.Add(new MarkupIssue("INVALID_XML", $"{entry.FullName}: {exception.Message}"));
             }
         }
     }

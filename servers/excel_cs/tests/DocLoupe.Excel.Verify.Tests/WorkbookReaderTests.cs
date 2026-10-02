@@ -304,6 +304,46 @@ public sealed class WorkbookReaderTests
         finally { File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData(false, false, "UNRESOLVED_RELATIONSHIP_ID")]
+    [InlineData(true, false, "MISSING_RELATIONSHIP_TARGET")]
+    [InlineData(true, true, null)]
+    public void ResolvesRelationshipIdsInUnmodifiedXmlParts(bool includeRelationship, bool includeTarget, string? expectedCode)
+    {
+        var path = CreateWorkbook("", worksheetTrailing:
+            "<x:drawing xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships' r:id='rId8'/>");
+        try
+        {
+            if (includeRelationship)
+            {
+                using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
+                Write(archive, "xl/worksheets/_rels/sheet1.xml.rels",
+                    "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>" +
+                    "<Relationship Id='rId8' Type='urn:drawing' Target='../drawings/drawing1.xml'/>" +
+                    "</Relationships>");
+                if (includeTarget)
+                    Write(archive, "xl/drawings/drawing1.xml", "<drawing xmlns='urn:drawing'/>");
+            }
+            var result = WorkbookReader.VerifyPartial(path);
+            if (expectedCode is null)
+                Assert.Equal("unverified", result.Status);
+            else
+            {
+                Assert.Equal("failed", result.Status);
+                Assert.Contains(result.PackageIssues, issue => issue.Code == expectedCode);
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void DoesNotTreatOtherIdNamespacesAsRelationships()
+    {
+        var path = CreateWorkbook("", worksheetTrailing: "<x:drawing xmlns:custom='urn:custom' custom:id='not-a-rel'/>");
+        try { Assert.Equal("unverified", WorkbookReader.VerifyPartial(path).Status); }
+        finally { File.Delete(path); }
+    }
+
     private static string CreateWorkbook(string sheetDataContent, string workbookPart = "xl/workbook.xml",
         string? workbookTarget = null, string sheetTarget = "worksheets/sheet1.xml",
         string sheetPart = "xl/worksheets/sheet1.xml", bool includeRoot = true,
