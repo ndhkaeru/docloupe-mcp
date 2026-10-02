@@ -40,7 +40,8 @@ try
             new { op = "clear", sheet = "Sheet1", target = "A1", what = new[] { "values" }, remove_cells = false },
             new { op = "clear", sheet = "Sheet1", target = "L8" },
             new { op = "clear", sheet = "Sheet1", target = "D3", remove_cells = true },
-            new { op = "set_value", sheet = "Sheet1", target = "M9", value = new { error = "#N/A" } } }
+            new { op = "set_value", sheet = "Sheet1", target = "M9", value = new { error = "#N/A" } },
+            new { op = "fill", sheet = "Sheet1", target = "N10:O10", series = new { start = 0.1, step = 0.2 } } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
     var status = await client.CallToolAsync("excel_status", new Dictionary<string, object?> { ["session"] = session });
@@ -72,7 +73,9 @@ try
             new { target = "Sheet1!A1", equals = new { value = System.Text.Json.JsonSerializer.SerializeToElement<object?>(null) } },
             new { target = "Sheet1!L8", equals = new { value = System.Text.Json.JsonSerializer.SerializeToElement<object?>(null) } },
             new { target = "Sheet1!D3", equals = new { value = System.Text.Json.JsonSerializer.SerializeToElement<object?>(null) } },
-            new { target = "Sheet1!M9", equals = new { value = new { error = "#N/A" } } } }
+            new { target = "Sheet1!M9", equals = new { value = new { error = "#N/A" } } },
+            new { target = "Sheet1!N10", equals = new { value = 0.1 } },
+            new { target = "Sheet1!O10", equals = new { value = 0.3 } } }
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());

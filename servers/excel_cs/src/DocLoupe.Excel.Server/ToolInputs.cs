@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DocLoupe.Excel.Engine;
@@ -108,13 +107,13 @@ public sealed class SetValueRequest
             Values.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
             Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null ||
             Other is { Count: > 0 }))
-            throw new NotSupportedException("fill requires exactly one of value or an integer series on a rectangular range");
+            throw new NotSupportedException("fill requires exactly one of value or a numeric series on a rectangular range");
         if ((Op is "set_value" or "fill" or "clear") && Target.Contains(':'))
         {
             var (sheet, rangeStart, rangeEnd, _) = ParseTargetRange(defaultSheet);
             var count = (long)(rangeEnd.Row - rangeStart.Row + 1) * (rangeEnd.Column - rangeStart.Column + 1);
             if (count > 500) throw new ArgumentException($"{Op} range exceeds 500 cells");
-            var (seriesStart, seriesStep) = hasSeries ? ParseIntegerSeries() : (0L, 0L);
+            var series = hasSeries ? ExactSeries.Parse(Series) : null;
             var broadcast = new List<SetValueOp>((int)count);
             for (var row = rangeStart.Row; row <= rangeEnd.Row; row++)
                 for (var column = rangeStart.Column; column <= rangeEnd.Column; column++)
@@ -126,21 +125,10 @@ public sealed class SetValueRequest
                             Op = "clear", Sheet = sheet, Target = address, What = What,
                             RemoveCells = RemoveCells, Other = Other
                         }.Normalize(sheet));
-                    else if (hasSeries)
+                    else if (series is not null)
                     {
-                        long number;
-                        try
-                        {
-                            var index = (row - rangeStart.Row) * (rangeEnd.Column - rangeStart.Column + 1) + column - rangeStart.Column;
-                            number = checked(seriesStart + checked(seriesStep * index));
-                        }
-                        catch (OverflowException)
-                        {
-                            throw new ArgumentOutOfRangeException(nameof(Series), "Series exceeds supported integer range");
-                        }
-                        if (number is < -999_999_999_999_999L or > 999_999_999_999_999L)
-                            throw new ArgumentOutOfRangeException(nameof(Series), "Series exceeds 15 decimal digits");
-                        broadcast.Add(new SetValueOp(sheet, address, "number", number.ToString(CultureInfo.InvariantCulture), Operation: "fill"));
+                        var index = (row - rangeStart.Row) * (rangeEnd.Column - rangeStart.Column + 1) + column - rangeStart.Column;
+                        broadcast.Add(new SetValueOp(sheet, address, "number", series.At(index), Operation: "fill"));
                     }
                     else
                         broadcast.Add(new SetValueRequest
@@ -184,19 +172,6 @@ public sealed class SetValueRequest
                     Value = rows[row][column]
                 }.Normalize(name) with { Operation = "set_values" });
         return operations.ToArray();
-    }
-
-    private (long Start, long Step) ParseIntegerSeries()
-    {
-        if (Series.ValueKind != JsonValueKind.Object) throw new NotSupportedException("fill series must be an object");
-        var fields = Series.EnumerateObject().ToArray();
-        if (fields.Length != 2 || fields.Any(field => field.Name is not ("start" or "step")) ||
-            !Series.TryGetProperty("start", out var start) || !Series.TryGetProperty("step", out var step) ||
-            start.ValueKind != JsonValueKind.Number || step.ValueKind != JsonValueKind.Number ||
-            !long.TryParse(start.GetRawText(), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var first) ||
-            !long.TryParse(step.GetRawText(), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var increment))
-            throw new NotSupportedException("fill series requires integer start and step");
-        return (first, increment);
     }
 
     private (string Sheet, CellAddress First, CellAddress Last, bool HasRange) ParseTargetRange(string? defaultSheet)

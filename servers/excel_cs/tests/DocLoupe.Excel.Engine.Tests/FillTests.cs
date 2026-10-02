@@ -108,6 +108,60 @@ public sealed class FillTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void DecimalSeriesIsExactAndPassesSaveGates(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-fill-decimal-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var session = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            var operations = Request("""{"op":"fill","target":"Sheet1!B1:C2","series":{"start":0.1,"step":0.2}}""")
+                .NormalizeMany(null);
+            Assert.Equal(["0.1", "0.3", "0.5", "0.7"], operations.Select(operation => operation.Value!).ToArray());
+            sessions.Apply(session, 0, operations);
+            var output = Path.Combine(directory, "decimal.xlsx");
+            sessions.Save(session, output, [new ValueAssertion("Sheet1", "C2", true, "number", "0.7", null)]);
+            Assert.Equal(["0.1", "0.3", "0.5", "0.7"], P2aGates.ReadCells(output, "Sheet1", ["B1", "C1", "B2", "C2"])
+                .Select(cell => cell.Value!).ToArray());
+            sessions.Close(session, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void ScientificAndNegativeDecimalSeriesStayExact()
+    {
+        var operations = Request("""{"op":"fill","target":"B1:C2","series":{"start":3e2,"step":-0.1}}""")
+            .NormalizeMany("Sheet1");
+        Assert.Equal(["300", "299.9", "299.8", "299.7"], operations.Select(operation => operation.Value!).ToArray());
+        var tiny = Request("""{"op":"fill","target":"B1:C1","series":{"start":1e-30,"step":1e-30}}""")
+            .NormalizeMany("Sheet1");
+        Assert.Equal("0." + new string('0', 29) + "1", tiny[0].Value);
+        Assert.Equal("0." + new string('0', 29) + "2", tiny[1].Value);
+    }
+
+    [Theory]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1.000000000000001,\"step\":0}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1e-31,\"step\":0}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1e30,\"step\":0}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1e-30,\"step\":1}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":999999999999999.9,\"step\":0}}")]
+    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1e999,\"step\":1}}")]
+    public void UnsafeDecimalSeriesIsRejectedBeforeMutation(string json)
+    {
+        var error = Record.Exception(() => Request(json).NormalizeMany("Sheet1"));
+        Assert.True(error is ArgumentException or FormatException or NotSupportedException, error?.ToString());
+    }
+
     [Fact]
     public void BoundedIntegerSeriesAllowsZeroStep()
     {
@@ -117,8 +171,6 @@ public sealed class FillTests
     }
 
     [Theory]
-    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1.5,\"step\":1}}")]
-    [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1,\"step\":0.1}}")]
     [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1,\"step\":1,\"extra\":0}}")]
     [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":1,\"start\":2,\"step\":1}}")]
     [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"series\":{\"start\":9223372036854775807,\"step\":1}}")]
@@ -127,7 +179,7 @@ public sealed class FillTests
     [InlineData("{\"op\":\"fill\",\"target\":\"B1:C1\",\"value\":1,\"series\":{\"start\":1,\"step\":1}}")]
     [InlineData("{\"op\":\"set_value\",\"target\":\"B1:C1\",\"value\":1,\"series\":{\"start\":1,\"step\":1}}")]
     [InlineData("{\"op\":\"set_values\",\"target\":\"B1:C1\",\"values\":[[1,2]],\"series\":{\"start\":1,\"step\":1}}")]
-    public void InvalidIntegerSeriesIsRejectedBeforeMutation(string json)
+    public void InvalidSeriesIsRejectedBeforeMutation(string json)
     {
         var error = Record.Exception(() => Request(json).NormalizeMany("Sheet1"));
         Assert.True(error is ArgumentException or FormatException or NotSupportedException, error?.ToString());

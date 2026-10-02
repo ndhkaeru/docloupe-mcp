@@ -128,6 +128,46 @@ public sealed class LocalFixtureTests
         }
     }
 
+    [Fact]
+    public void LocalSourcesAcceptExactDecimalFill()
+    {
+        var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
+        if (string.IsNullOrWhiteSpace(directory)) return;
+        var sources = Directory.GetFiles(directory, "*.*")
+            .Where(path => Path.GetExtension(path) is ".xlsx" or ".xlsm")
+            .Where(path => !Path.GetFileName(path).StartsWith("07-external-", StringComparison.Ordinal))
+            .OrderBy(path => path).ToArray();
+        Assert.Equal(8, sources.Length);
+        foreach (var source in sources)
+        {
+            var output = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(source));
+            try
+            {
+                using var store = new PackageStore(source);
+                var sheet = store.SheetNames()[0];
+                var unusual = Path.GetFileName(source).StartsWith("06", StringComparison.Ordinal) ||
+                    Path.GetFileName(source).StartsWith("07", StringComparison.Ordinal);
+                var target = unusual ? "A1:B1" : "A4:B4";
+                var request = System.Text.Json.JsonSerializer.Deserialize<SetValueRequest>(
+                    System.Text.Json.JsonSerializer.Serialize(new { op = "fill", sheet, target,
+                        series = new { start = 0.1, step = 0.2 } }))!;
+                var result = SetValueEngine.Apply(store, request.NormalizeMany(null));
+                store.Save(output);
+                var expected = result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind,
+                    item.Value)).ToArray();
+                Assert.Empty(P2aGates.CheckPackage(output, result.ChangedParts));
+                Assert.Empty(P2aGates.CheckIntent(output, expected));
+                Assert.Empty(P2aGates.CheckTouchedCells(source, output, expected));
+                Assert.Empty(P2aGates.CheckPreservation(source, output, result.Edits.Select(edit =>
+                    new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)),
+                    AddedOrRemoved(source, store, result.ChangedParts)));
+                Assert.Empty(P2aMarkupGate.Check(source, output, result.ChangedParts));
+                Assert.Empty(DetachedValidator.Check(source, output, result.ChangedParts).Issues);
+            }
+            finally { if (File.Exists(output)) File.Delete(output); }
+        }
+    }
+
     private static IEnumerable<string> AddedOrRemoved(string source, PackageStore store, IEnumerable<string> changedParts)
     {
         using var archive = ZipFile.OpenRead(source);
