@@ -41,7 +41,9 @@ try
             new { op = "clear", sheet = "Sheet1", target = "L8" },
             new { op = "clear", sheet = "Sheet1", target = "D3", remove_cells = true },
             new { op = "set_value", sheet = "Sheet1", target = "M9", value = new { error = "#N/A" } },
-            new { op = "fill", sheet = "Sheet1", target = "N10:O10", series = new { start = 0.1, step = 0.2 } } }
+            new { op = "fill", sheet = "Sheet1", target = "N10:O10", series = new { start = 0.1, step = 0.2 } },
+            new { op = "set_formula", sheet = "Sheet1", target = "P11", formula = "2+3", cache = (object)new { value = 5 } },
+            new { op = "set_formula", sheet = "Sheet1", target = "Q11", formula = "1/0", cache = (object)new { value = new { error = "#DIV/0!" } } } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
     var status = await client.CallToolAsync("excel_status", new Dictionary<string, object?> { ["session"] = session });
@@ -75,7 +77,9 @@ try
             new { target = "Sheet1!D3", equals = new { value = System.Text.Json.JsonSerializer.SerializeToElement<object?>(null) } },
             new { target = "Sheet1!M9", equals = new { value = new { error = "#N/A" } } },
             new { target = "Sheet1!N10", equals = new { value = 0.1 } },
-            new { target = "Sheet1!O10", equals = new { value = 0.3 } } }
+            new { target = "Sheet1!O10", equals = new { value = 0.3 } },
+            new { target = "Sheet1!P11", equals = new { formula = "2+3" } },
+            new { target = "Sheet1!Q11", equals = new { formula = "1/0" } } }
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());
@@ -86,6 +90,24 @@ try
     if (cachedFormula.IsError == true || cachedFormula.StructuredContent?.GetProperty("data")
             .GetProperty("cells")[0].GetProperty("Value").GetString() != "2")
         throw new InvalidOperationException("Formula cache was not retained");
+    var savedSession = await client.CallToolAsync("excel_open", new Dictionary<string, object?> { ["path"] = output });
+    if (savedSession.IsError == true) throw new InvalidOperationException("Saved file could not be reopened");
+    var savedId = savedSession.StructuredContent!.Value.GetProperty("data").GetProperty("session").GetString()!;
+    foreach (var (address, expected) in new[] { ("P11", "5"), ("Q11", "#DIV/0!") })
+    {
+        var read = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
+        {
+            ["session"] = savedId, ["sheet"] = "Sheet1", ["target"] = address
+        });
+        if (read.IsError == true || read.StructuredContent?.GetProperty("data")
+                .GetProperty("cells")[0].GetProperty("Value").GetString() != expected)
+            throw new InvalidOperationException("Typed formula cache was not retained at " + address);
+    }
+    var savedClosed = await client.CallToolAsync("excel_close", new Dictionary<string, object?>
+    {
+        ["session"] = savedId, ["discard_unsaved"] = false
+    });
+    if (savedClosed.IsError == true) throw new InvalidOperationException("Saved session close failed");
     var verifiedGates = saved.StructuredContent.Value.GetProperty("data").GetProperty("gates").EnumerateArray()
         .Select(gate => gate.GetString()).ToArray();
     if (!verifiedGates.Contains("G6") || !verifiedGates.Contains("G7"))
