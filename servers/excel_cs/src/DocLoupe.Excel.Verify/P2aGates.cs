@@ -214,11 +214,13 @@ public static class P2aGates
                     "s" when int.TryParse(scalar, out var index) && index >= 0 && index < shared.Length => shared[index],
                     "inlineStr" => item.ChildNodes.OfType<XmlElement>().FirstOrDefault(child => child.LocalName == "is" && child.NamespaceURI == Main) is { } inline ? TextValue(inline) : null,
                     "b" => scalar == "1" ? "true" : "false",
+                    "e" => scalar,
                     _ => scalar
                 };
                 return new CellRead(item.GetAttribute("r"), formula is not null ? "formula" : type switch
                 {
-                    "s" => "text", "inlineStr" => "inline", "b" => "boolean", _ when value is null => "blank", _ => "number"
+                    "s" => "text", "inlineStr" => "inline", "b" => "boolean", "e" => "error",
+                    _ when value is null => "blank", _ => "number"
                 }, value, formula);
             }).ToArray();
     }
@@ -271,6 +273,7 @@ public static class P2aGates
                     "s" when int.TryParse(scalar, out var index) && index >= 0 && index < shared.Length => ("text", shared[index]),
                     "inlineStr" => ("inline", cell!.ChildNodes.OfType<XmlElement>().FirstOrDefault(child => child.LocalName == "is" && child.NamespaceURI == Main) is { } inline ? TextValue(inline) : null),
                     "b" => ("boolean", scalar == "1" ? "true" : "false"),
+                    "e" => ("error", scalar),
                     _ when cell is null || cell.GetElementsByTagName("v", Main).Count == 0 => ("blank", (string?)null),
                     _ => ("number", scalar)
                 };

@@ -295,6 +295,8 @@ Effects listed per op are the semantic paths (02 §6) the op **declares**. G4 ch
 
 **Current `clear` slice:** only `what: ["values"]` (or omitted) is supported, for a cell or rectangular range of at most 500 cells. With `remove_cells: false` (default), existing cells retain their style; with `remove_cells: true`, existing `<c>` elements are removed while their rows remain. Absent cells remain absent in both modes. Clearing an existing formula invalidates its `calcChain` entry; a no-op clear leaves all package part bytes unchanged. Other facets fail closed.
 
+**Current error-value slice:** `set_value` and `set_values` accept `{"error":"#N/A"}` and the canonical error tokens recognized by the legacy formula-cache writer. A new or existing cell stores `t="e"`; unsupported tokens fail before mutation. `excel_save.assert` accepts `equals.value: {"error":"#N/A"}` with exact readback.
+
 **Current P2b slice:** `set_formula` accepts only `kind: "normal"` (or omitted) with `cache: "clear"` (or omitted). It rejects formula-group edits, non-clearing cache modes, and unsupported fields before mutating the session. Existing `set_value` formula objects remain compatible with P2a. `set_value` also broadcasts to a rectangular range (maximum 500 cells); existing per-cell rich-text and merged-cell guards still apply to the whole batch. `set_values` accepts a rectangular matrix (maximum 500 cells) with an exactly matching range or a top-left anchor, and expands to cell edits in one revision. `fill` accepts `value` or row-major integer `series: {start, step}` on a rectangular range of at most 500 cells. Each series result must fit 15 decimal digits; decimal series, `pattern_from`, and additional fill fields fail closed. Bulk formatting/rich-text options are not supported yet; invalid shapes fail before applying any cells.
 
 `Span = { match: string, occurrence?: number | "all" = 1, normalize?: "nfc" | "none" } | { range: [number, number] } | "all"`. Ranges count graphemes (02 §4.2).
@@ -446,7 +448,7 @@ Failure = { diff_id: string, path: string, expected: any, actual: any, kind: str
 Gap     = { gap_id: string, path: string, reason: string, required: boolean }
 ```
 
-- **Current P2b slice:** `assert` accepts only sheet-qualified cell `equals.value` (blank, string, boolean, bounded numeric lexemes) and `equals.formula`. Other assertion facets fail closed; formula-cache values are not yet assertable.
+- **Current P2b slice:** `assert` accepts only sheet-qualified cell `equals.value` (blank, string, boolean, supported error tokens, bounded numeric lexemes) and `equals.formula`. Other assertion facets fail closed; formula-cache values are not yet assertable.
 - **Blocked save:** `SAVE_BLOCKED` comes back with `details = { gates, assertions, blocked_by: Failure[] | Gap[] }` and the file is not written.
 - **Gates** are defined in [04 §3](04-correctness.md#3-save-gates).
 - **`verified_with_gaps`** is only possible when every remaining gap is optional (an oracle that is not available), or is a required gap accepted with a reason.

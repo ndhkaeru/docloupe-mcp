@@ -178,11 +178,12 @@ public static class SetValueEngine
         var value = operation.Value;
         if (kind == "text" && value?.StartsWith('=') == true && !operation.AsText)
             throw new InvalidDataException("AMBIGUOUS_FORMULA_TEXT: use explicit kind formula or inline");
-        if (kind is not ("text" or "inline" or "number" or "boolean" or "formula" or "blank"))
+        if (kind is not ("text" or "inline" or "number" or "boolean" or "formula" or "blank" or "error"))
             throw new NotSupportedException($"Unsupported set_value kind: {kind}");
         if (kind == "number" && (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) || !double.IsFinite(number)))
             throw new FormatException("Invalid finite number");
         if (kind == "boolean" && value is not ("true" or "false")) throw new FormatException("Boolean must be true or false");
+        if (kind == "error" && !CellError.IsSupported(value)) throw new FormatException("Unsupported Excel error token");
         while (cell.FirstChild is { } child) cell.RemoveChild(child);
         if (kind == "blank") cell.RemoveAttribute("t");
         else if (kind == "formula")
@@ -207,7 +208,7 @@ public static class SetValueEngine
         }
         else
         {
-            cell.SetAttribute("t", kind switch { "text" => "s", "boolean" => "b", _ => "n" });
+            cell.SetAttribute("t", kind switch { "text" => "s", "boolean" => "b", "error" => "e", _ => "n" });
             var scalar = document.CreateElement(cell.Prefix, "v", PackageStore.Main);
             scalar.InnerText = kind switch { "text" => strings.Index(value ?? "", existing != "s").ToString(CultureInfo.InvariantCulture), "boolean" => value == "true" ? "1" : "0", _ => value! };
             cell.AppendChild(scalar);

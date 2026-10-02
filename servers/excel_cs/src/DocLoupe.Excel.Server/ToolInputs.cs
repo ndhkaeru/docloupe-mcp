@@ -87,6 +87,9 @@ public sealed class SetValueRequest
                 => ("formula", formula.GetString()),
             JsonValueKind.Object when Value.TryGetProperty("inline", out var inline) && inline.ValueKind == JsonValueKind.String
                 => ("inline", inline.GetString()),
+            JsonValueKind.Object when Value.EnumerateObject().Count() == 1 &&
+                Value.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String &&
+                CellError.IsSupported(error.GetString()) => ("error", error.GetString()),
             _ => throw new ArgumentException("Unsupported set_value value")
         };
         if (AsText && kind != "text") throw new ArgumentException("as_text requires a string value");
@@ -236,6 +239,9 @@ public sealed class SaveAssertionRequest
             JsonValueKind.True => ("boolean", "true"),
             JsonValueKind.False => ("boolean", "false"),
             JsonValueKind.Null => ("blank", (string?)null),
+            JsonValueKind.Object when value.EnumerateObject().Count() == 1 &&
+                value.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String &&
+                CellError.IsSupported(error.GetString()) => ("error", error.GetString()),
             _ => throw new NotSupportedException("Unsupported assertion value")
         } : ((string?)null, (string?)null);
         if (kind == "number" && !DocLoupe.Excel.Verify.G7Assertions.IsSupportedNumber(scalar))
