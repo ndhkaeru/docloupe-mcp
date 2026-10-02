@@ -46,6 +46,7 @@ Confirmed defects (details in [docs/05-legacy-mapping.md](docs/05-legacy-mapping
 | [docs/04-correctness.md](docs/04-correctness.md) | The correctness contract with the agent: invariants, save gates, normalization rules, structural edits, oracles, worked scenarios |
 | [docs/05-legacy-mapping.md](docs/05-legacy-mapping.md) | All 112 legacy tools mapped to new tools/ops; conventions, error codes, environment variables; known defect register |
 | [docs/06-testing-and-roadmap.md](docs/06-testing-and-roadmap.md) | Test strategy (including verifier sensitivity testing and agent-level evals), spikes, phased roadmap, risks, open questions |
+| [docs/PORTING-CHECKLIST.md](docs/PORTING-CHECKLIST.md) | Checklist tiến độ thực hiện, bằng chứng đã chạy và các mốc còn thiếu trước khi thay server Python |
 
 **Suggested reading order:** README → 04 (why) → 03 (what) → 02 (representation) → 01 (how) → 05 (legacy mapping) → 06 (order of work).
 
