@@ -36,7 +36,7 @@
 - [x] `expect.value`, `expect.formula` (riêng hoặc cùng nhau) cho `set_value`/`set_formula`/`clear` **một cell** kiểm trước batch trên revision hiện tại; mismatch trả `PRECONDITION_FAILED` có index của **op gốc** (kể cả sau range expansion), expected/actual, không đổi revision.
 - [ ] Hoàn tất rich-text/phonetic và style ops, các facet `expect` còn lại (kể cả bulk/hash), `dry_run`, readback/diff đầy đủ; không coi các op `set_value` hiện có là parity của toàn bộ 03 §4.
 - [ ] `excel_create`, các chế độ save `overwrite`/`save_as`, persistent ledger/redo (nếu quyết định hỗ trợ) và các option session còn thiếu; hiện **chỉ** cho copy-save.
-- [ ] Chạy ma trận op × fixture, parity Python/C# có danh sách sai khác được duyệt, và agent-eval subset đạt **0 silent failure** theo [06 §2.7](06-testing-and-roadmap.md#27-agent-level-evals). Đã có [kịch bản parity hẹp](../tools/PARITY.md) qua 6 fixture cho scalar edits; 1 Python output tương đương, 5 divergence được kiểm đúng theo fixture; chưa phải ma trận đầy đủ.
+- [ ] Chạy ma trận op × fixture, parity Python/C# có danh sách sai khác được duyệt, và agent-eval subset đạt **0 silent failure** theo [06 §2.7](06-testing-and-roadmap.md#27-agent-level-evals). Đã có [kịch bản parity hẹp](../tools/PARITY.md) qua 6 fixture cho scalar edits, formula/cache, value-only clear; 1 Python output tương đương, 5 divergence được kiểm đúng theo fixture trên Windows và Docker Linux; chưa phải ma trận đầy đủ.
 
 ## 3. Phần còn lại của mục tiêu port
 
@@ -49,7 +49,7 @@
 
 ## 4. Bằng chứng và cách cập nhật checklist
 
-- [x] Ở mốc `9b385dc`, local Windows và Docker Linux chạy **315/315** test. Lát cắt `expect.value` qua **330/330**, sau khi thêm `expect.formula` qua **339/339** test trên cả Windows và Docker Linux (có nguồn fixture local). Sửa index sau range expansion đạt **345/345** test trên Windows và Docker Linux, MCP stdio smoke; parity hẹp chạy trên Windows cho 6 fixture (1 Python tương đương, 5 khác biệt đã ghi). Schema-order check đã qua ở lát cắt trước. Đây chỉ là bằng chứng cho các lát cắt hiện có, không chứng minh P2b/P3–P7.
+- [x] Ở mốc `9b385dc`, local Windows và Docker Linux chạy **315/315** test. Lát cắt `expect.value` qua **330/330**, sau khi thêm `expect.formula` qua **339/339** test trên cả Windows và Docker Linux (có nguồn fixture local). Sửa index sau range expansion đạt **345/345** test trên Windows và Docker Linux, MCP stdio smoke; parity hẹp chạy trên Windows và Docker Linux cho 6 fixture (1 Python tương đương, 5 khác biệt đã ghi). Schema-order check đã qua ở lát cắt trước. Đây chỉ là bằng chứng cho các lát cắt hiện có, không chứng minh P2b/P3–P7.
 - [ ] Chạy CI trên **cả bốn runner** cho commit mới (workflow đã cấu hình, nhưng các commit local này chưa push); macOS local được hoãn theo yêu cầu, không đánh dấu đã kiểm chứng.
 - [ ] S3: đo **model thực nhận** `structuredContent` hay `TextContent` trên từng client đích; smoke SDK chỉ chứng minh giao thức tới client, không chứng minh forwarding vào model.
 - [ ] Ma trận `set_value` với corpus cục bộ `D:\data-test\excel-preservation-fixtures\sources` và bộ tổng hợp: lưu báo cáo pass/fail theo từng fixture/gate trước khi đóng tiêu chí release; ghi rõ 01 lỗi schema baseline, 02/05 Excel từ chối ngay file gốc ([S2b](../spikes/S2b/REPORT.md)).

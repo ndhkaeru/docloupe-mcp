@@ -1,6 +1,6 @@
 # Bounded cell-edit parity (P2a/P2b)
 
-Run from the repository root on a machine with .NET 10 and `uv`:
+Run from the repository root on a machine with .NET 10 and `uv` (Windows or Linux):
 
 ```powershell
 uv run --no-project --with 'mcp==1.28.1' --with 'openpyxl==3.1.5' --with 'lxml==6.1.1' python servers/excel_cs/tools/parity.py
@@ -10,7 +10,7 @@ The runner builds the C# server and six synthetic workbooks in a temporary direc
 
 `parity.py` opens each output ZIP independently, resolves workbook, sheet, and shared-string parts via OPC relationships, and checks all edited cell values/formulas and every other cell's value/formula against the source. It does not trust either server's readback or save report. It is a bounded semantic comparison, **not** full package preservation, formula recalculation, rich/style parity, or an oracle of Excel's rendering. The source remains untouched; `verify_preservation=False` is used only for the legacy copy-save because its independent verification is not equivalent to C# G1–G7.
 
-Observed locally on Windows, 2026-10-02:
+Observed locally on Windows and Docker Ubuntu 24.04 with .NET 10 / Python 3.12, 2026-10-02. The Linux run installs `python3-venv` and the three pinned Python dependencies into an ephemeral container; it does not modify the working tree:
 
 | Synthetic source | C# output | Legacy Python output |
 |---|---|---|
