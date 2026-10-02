@@ -5,7 +5,7 @@ using DocLoupe.Excel.Model;
 
 namespace DocLoupe.Excel.Verify;
 
-public sealed record SheetSummary(string Name, string Part, string State);
+public sealed record SheetSummary(string Name, string Part, string State, string? UsedRange = null);
 public sealed record CellSummary(string Address, string Type, string? RawValue, string? Formula, string? Value = null);
 public sealed record WorkbookSummary(string Path, IReadOnlyList<SheetSummary> Sheets, IReadOnlyList<CellSummary> FirstSheetCells);
 public sealed record VerificationSummary(string Status, IReadOnlyList<MarkupIssue> PackageIssues,
@@ -29,7 +29,8 @@ public static class WorkbookReader
             throw new InvalidDataException("Duplicate OPC part");
         var workbookPart = LocateWorkbookPart(archive);
         var relationships = ReadWorkbookRelationships(archive, workbookPart);
-        var sheets = ReadSheets(archive, workbookPart, relationships);
+        var sheets = ReadSheets(archive, workbookPart, relationships)
+            .Select(sheet => sheet with { UsedRange = ReadUsedRange(archive, sheet.Part) }).ToArray();
         var selectedSheet = sheetName is null ? sheets.FirstOrDefault() : sheets.SingleOrDefault(sheet => sheet.Name == sheetName)
             ?? throw new KeyNotFoundException($"Sheet not found: {sheetName}");
         var cells = selectedSheet is null ? [] : ReadCells(archive, workbookPart, selectedSheet.Part, maxCells, maxRows, maxColumns);
@@ -193,6 +194,67 @@ public static class WorkbookReader
         return sheets;
     }
 
+    private static string? ReadUsedRange(ZipArchive archive, string part)
+    {
+        var entry = FindEntry(archive, part) ?? throw new InvalidDataException($"Missing sheet part {part}");
+        using var reader = CreateReader(entry);
+        reader.MoveToContent();
+        if (reader.LocalName != "worksheet" || reader.NamespaceURI != SpreadsheetNamespace)
+            throw new InvalidDataException($"Invalid worksheet root: {part}");
+        var sheetDataDepth = -1;
+        var rowDepth = -1;
+        int? rowNumber = null;
+        var minRow = int.MaxValue;
+        var minColumn = int.MaxValue;
+        var maxRow = 0;
+        var maxColumn = 0;
+        while (reader.Read())
+        {
+            if (reader.NodeType == XmlNodeType.EndElement)
+            {
+                if (reader.Depth == rowDepth) { rowDepth = -1; rowNumber = null; }
+                if (reader.Depth == sheetDataDepth) sheetDataDepth = -1;
+                continue;
+            }
+            if (reader.NodeType != XmlNodeType.Element || reader.NamespaceURI != SpreadsheetNamespace) continue;
+            if (reader.LocalName == "sheetData" && reader.Depth == 1)
+            {
+                sheetDataDepth = reader.IsEmptyElement ? -1 : reader.Depth;
+                continue;
+            }
+            if (sheetDataDepth < 0) continue;
+            if (reader.LocalName == "row" && reader.Depth == sheetDataDepth + 1)
+            {
+                rowDepth = reader.IsEmptyElement ? -1 : reader.Depth;
+                var reference = reader.GetAttribute("r");
+                rowNumber = null;
+                if (reference is not null)
+                {
+                    if (!int.TryParse(reference, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedRow)
+                        || parsedRow is < 1 or > 1048576)
+                        throw new InvalidDataException($"Invalid row reference: {reference}");
+                    rowNumber = parsedRow;
+                }
+                continue;
+            }
+            if (reader.LocalName != "c" || reader.Depth != rowDepth + 1 || rowDepth < 0) continue;
+            var address = reader.GetAttribute("r") ?? throw new InvalidDataException("Cell has no address");
+            CellAddress coordinate;
+            try { coordinate = CellAddress.Parse(address); }
+            catch (FormatException exception) { throw new InvalidDataException($"Invalid cell address: {address}", exception); }
+            if (rowNumber is not null && coordinate.Row != rowNumber)
+                throw new InvalidDataException($"Cell {address} does not belong to row {rowNumber}");
+            minRow = Math.Min(minRow, coordinate.Row);
+            minColumn = Math.Min(minColumn, coordinate.Column);
+            maxRow = Math.Max(maxRow, coordinate.Row);
+            maxColumn = Math.Max(maxColumn, coordinate.Column);
+        }
+        if (maxRow == 0) return null;
+        var first = new CellAddress(minRow, minColumn).ToString();
+        var last = new CellAddress(maxRow, maxColumn).ToString();
+        return first == last ? first : first + ":" + last;
+    }
+
     private static List<CellSummary> ReadCells(ZipArchive archive, string workbookPart, string part,
         int maxCells, int maxRows, int maxColumns)
     {
@@ -203,11 +265,28 @@ public static class WorkbookReader
         reader.MoveToContent();
         if (reader.LocalName != "worksheet" || reader.NamespaceURI != SpreadsheetNamespace)
             throw new InvalidDataException("Invalid worksheet root");
+        var sheetDataDepth = -1;
+        var rowDepth = -1;
         while (cells.Count < maxCells && reader.Read())
         {
-            if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "c"
-                || reader.NamespaceURI != SpreadsheetNamespace)
+            if (reader.NodeType == XmlNodeType.EndElement)
+            {
+                if (reader.Depth == rowDepth) rowDepth = -1;
+                if (reader.Depth == sheetDataDepth) sheetDataDepth = -1;
                 continue;
+            }
+            if (reader.NodeType != XmlNodeType.Element || reader.NamespaceURI != SpreadsheetNamespace) continue;
+            if (reader.LocalName == "sheetData" && reader.Depth == 1)
+            {
+                sheetDataDepth = reader.IsEmptyElement ? -1 : reader.Depth;
+                continue;
+            }
+            if (reader.LocalName == "row" && sheetDataDepth >= 0 && reader.Depth == sheetDataDepth + 1)
+            {
+                rowDepth = reader.IsEmptyElement ? -1 : reader.Depth;
+                continue;
+            }
+            if (reader.LocalName != "c" || rowDepth < 0 || reader.Depth != rowDepth + 1) continue;
             var address = reader.GetAttribute("r") ?? throw new InvalidDataException("Cell has no address");
             CellAddress coordinate;
             try { coordinate = CellAddress.Parse(address); }

@@ -23,7 +23,10 @@ try
         ["path"] = source, ["detail"] = "preview", ["sheet"] = "Sheet1", ["max_rows"] = 3, ["max_cols"] = 4
     });
     if (peek.IsError == true || peek.StructuredContent?.GetProperty("data").GetProperty("preview")[0]
-        .GetProperty("markdown").GetString()?.Contains("hello", StringComparison.Ordinal) != true)
+        .GetProperty("markdown").GetString()?.Contains("hello", StringComparison.Ordinal) != true ||
+        peek.StructuredContent?.GetProperty("data").GetProperty("sheets")[0]
+            .GetProperty("used_range").GetString() != "A1:D3" ||
+        peek.StructuredContent?.GetProperty("data").GetProperty("used_range_basis").GetString() != "explicit_cells")
         throw new InvalidOperationException("Sessionless peek failed: " + peek.StructuredContent?.GetRawText());
     var emptyStatus = await client.CallToolAsync("excel_status", new Dictionary<string, object?>());
     if (emptyStatus.IsError == true || emptyStatus.StructuredContent?.GetProperty("data").GetProperty("sessions").GetArrayLength() != 0)

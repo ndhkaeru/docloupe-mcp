@@ -11,6 +11,24 @@ namespace DocLoupe.Excel.Engine.Tests;
 public sealed class LocalFixtureTests
 {
     [Fact]
+    public void LocalSourcesSupportSessionlessPeek()
+    {
+        var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
+        if (string.IsNullOrWhiteSpace(directory)) return;
+        var sources = Directory.GetFiles(directory, "*.*")
+            .Where(path => Path.GetExtension(path) is ".xlsx" or ".xlsm")
+            .Where(path => !Path.GetFileName(path).StartsWith("07-external-", StringComparison.Ordinal))
+            .OrderBy(path => path).ToArray();
+        Assert.Equal(8, sources.Length);
+        foreach (var source in sources)
+        {
+            var preview = WorkbookReader.Peek(source, maxCells: 0);
+            Assert.NotEmpty(preview.Sheets);
+            Assert.NotNull(preview.Sheets[0].UsedRange);
+        }
+    }
+
+    [Fact]
     public void LocalSourcesAcceptMultiCellSetValueMatrix()
     {
         var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");

@@ -174,6 +174,44 @@ public sealed class WorkbookReaderTests
         }
     }
 
+    [Fact]
+    public void ComputesUsedRangeFromCellsRatherThanStaleDimension()
+    {
+        var path = CreateWorkbook("<x:row r='4'><x:c r='D4'><x:v>1</x:v></x:c></x:row>"
+            + "<x:row r='8'><x:c r='G8'><x:v>2</x:v></x:c></x:row>"
+            + "<x:row r='20' s='2' customFormat='1'/>",
+            secondSheetContent: "", worksheetDimension: "A1:Z999",
+            worksheetTrailing: "<x:extLst><x:ext><x:c r='Z99'><x:v>ghost</x:v></x:c></x:ext></x:extLst>");
+        try
+        {
+            var sheets = WorkbookReader.Peek(path, maxCells: 0).Sheets;
+            Assert.Equal("D4:G8", sheets[0].UsedRange);
+            Assert.Null(sheets[1].UsedRange);
+            Assert.Equal(new[] { "D4", "G8" }, WorkbookReader.Peek(path).FirstSheetCells.Select(cell => cell.Address));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData("<x:row r='2'><x:c r='A3'><x:v>1</x:v></x:c></x:row>")]
+    [InlineData("<x:row r='0'><x:c r='A1'><x:v>1</x:v></x:c></x:row>")]
+    [InlineData("<x:row r='1'><x:c r='XFE1'><x:v>1</x:v></x:c></x:row>")]
+    public void RejectsInvalidCellCoordinatesWhenComputingUsedRange(string row)
+    {
+        var path = CreateWorkbook(row);
+        try
+        {
+            Assert.Throws<InvalidDataException>(() => WorkbookReader.Peek(path, maxCells: 0));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData("0", "漢字")]
     [InlineData("1", "Other")]
@@ -218,7 +256,8 @@ public sealed class WorkbookReaderTests
         string? workbookTarget = null, string sheetTarget = "worksheets/sheet1.xml",
         string sheetPart = "xl/worksheets/sheet1.xml", bool includeRoot = true,
         string rootRelationshipType = "officeDocument", string sheetRelationshipType = "worksheet",
-        string? sharedStringsXml = null, string? secondSheetContent = null)
+        string? sharedStringsXml = null, string? secondSheetContent = null, string? worksheetDimension = null,
+        string worksheetTrailing = "")
     {
         var path = Path.Combine(AppContext.BaseDirectory, $"read-probe-{Guid.NewGuid():N}.xlsx");
         using var archive = new ZipArchive(File.Create(path), ZipArchiveMode.Create);
@@ -234,7 +273,8 @@ public sealed class WorkbookReaderTests
         Write(archive, relationshipPart, $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Target='{sheetTarget}' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/{sheetRelationshipType}'/>{sharedRelationship}{secondRelationship}</Relationships>");
         if (sharedStringsXml is not null)
             Write(archive, (slash < 0 ? "" : workbookPart[..(slash + 1)]) + "sharedStrings.xml", sharedStringsXml);
-        Write(archive, sheetPart, $"<x:worksheet xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><x:sheetData>{sheetDataContent}</x:sheetData></x:worksheet>");
+        var dimension = worksheetDimension is null ? "" : $"<x:dimension ref='{worksheetDimension}'/>";
+        Write(archive, sheetPart, $"<x:worksheet xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>{dimension}<x:sheetData>{sheetDataContent}</x:sheetData>{worksheetTrailing}</x:worksheet>");
         if (secondSheetContent is not null)
         {
             var secondPart = (slash < 0 ? "" : workbookPart[..(slash + 1)]) + "worksheets/sheet2.xml";

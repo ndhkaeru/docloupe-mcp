@@ -46,12 +46,13 @@ public sealed class ExcelSessions : IDisposable
         if (Path.GetExtension(full).ToLowerInvariant() is not (".xlsx" or ".xlsm" or ".xltx" or ".xltm"))
             throw new NotSupportedException("Only OOXML workbooks are supported");
         var workbook = WorkbookReader.Peek(full, detail == "preview" ? maxRows * maxCols : 0, sheet, maxRows, maxCols);
-        var sheets = workbook.Sheets.Select((item, index) => new { name = item.Name, index, state = item.State, part = item.Part }).ToArray();
+        var sheets = workbook.Sheets.Select((item, index) => new { name = item.Name, index, state = item.State,
+            part = item.Part, used_range = item.UsedRange }).ToArray();
         if (detail != "preview")
-            return new { sheets, partial = true, unverified = new[] { "used_range", "features" } };
+            return new { sheets, used_range_basis = "explicit_cells", partial = true, unverified = new[] { "features" } };
         var selected = sheet ?? workbook.Sheets.FirstOrDefault()?.Name;
         var preview = selected is null ? Array.Empty<object>() : new object[] { new { sheet = selected, markdown = PreviewMarkdown(workbook.FirstSheetCells, maxRows, maxCols) } };
-        return new { sheets, preview, partial = true, unverified = new[] { "used_range", "features" } };
+        return new { sheets, preview, used_range_basis = "explicit_cells", partial = true, unverified = new[] { "features" } };
     }
 
     private static string PreviewMarkdown(IReadOnlyList<CellSummary> cells, int rows, int columns)
