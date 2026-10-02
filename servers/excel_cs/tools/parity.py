@@ -20,8 +20,10 @@ SERVER = ROOT / "servers" / "excel_cs"
 MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 OFFICE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PACKAGE = "http://schemas.openxmlformats.org/package/2006/relationships"
-VALUES = {"B1": 27, "C1": 9, "D3": "new text", "E5": True,
+VALUES = {"B1": 27, "C1": 9, "E5": True,
           "F6": 0.1, "G7": 4, "H7": 4, "I8": 12, "J8": "batch"}
+EXPECTED = {**{address: (float(value) if type(value) in (int, float) else value, None)
+               for address, value in VALUES.items()}, "D3": (None, None), "K9": (5.0, "2+3")}
 VARIANTS = ("default", "prefixed-x", "bom-crlf-standalone", "opc-percent-case",
             "new-shared-strings", "nested-workbook")
 
@@ -82,13 +84,10 @@ def check_output(source, output):
     original = read_cells(source)
     actual = read_cells(output)
     errors = []
-    for address, expected in VALUES.items():
-        value, formula = actual.get(address, (None, None))
-        if value != expected or type(value) is not type(float(expected) if type(expected) in (int, float) else expected):
-            errors.append(f"{address}: expected {expected!r}, got {value!r}")
-        if formula is not None:
-            errors.append(f"{address}: stale formula {formula!r}")
-    for address in original.keys() - VALUES.keys():
+    for address, expected in EXPECTED.items():
+        if address not in actual or actual[address] != expected:
+            errors.append(f"{address}: expected {expected!r}, got {actual.get(address)!r}")
+    for address in original.keys() - EXPECTED.keys():
         if original[address] != actual.get(address):
             errors.append(f"{address}: unrelated cell changed: {original[address]!r} -> {actual.get(address)!r}")
     return errors
@@ -111,7 +110,9 @@ async def save_new(source, output, dll):
             session = opened["session"]
             await call("excel_apply", {"session": session, "base_revision": 0, "sheet": "Sheet1", "ops": [
                 *({"op": "set_value", "target": address, "value": VALUES[address]}
-                  for address in ("B1", "C1", "D3", "E5", "F6")),
+                  for address in ("B1", "C1", "E5", "F6")),
+                {"op": "clear", "target": "D3", "what": ["values"]},
+                {"op": "set_formula", "target": "K9", "formula": "=2+3", "cache": {"value": 5}},
                 {"op": "fill", "target": "G7:H7", "value": 4},
                 {"op": "set_values", "target": "I8:J8", "values": [[12, "batch"]]},
             ]})
@@ -127,6 +128,8 @@ def save_legacy(source, output):
     session = str(source.resolve())
     main.excel_edit_cells(session, "Sheet1", [{"cell": address, "value": value}
                                               for address, value in VALUES.items()])
+    main.excel_clear_range(session, "Sheet1", 2, 3, 2, 3)
+    main.excel_set_formula(session, "Sheet1", "K9", "=2+3", cached_value=5, cached_value_present=True)
     main.excel_save_as_copy(session, str(output), report_format="json", verify_preservation=False)
     main.excel_close(session)
 
@@ -157,7 +160,8 @@ async def main():
             elif variant == "new-shared-strings":
                 expected_errors = []
             elif variant in ("prefixed-x", "nested-workbook"):
-                expected_errors = ["A1: unrelated cell changed: ('hello', None) -> None"]
+                expected_errors = ["D3: expected (None, None), got None",
+                                   "A1: unrelated cell changed: ('hello', None) -> None"]
             else:
                 expected_errors = ["A1: unrelated cell changed: ('hello', None) -> ('hellohe', None)"]
             if legacy_errors != expected_errors:
