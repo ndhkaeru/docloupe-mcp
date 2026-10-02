@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Text.Json.Serialization;
 using System.Xml;
 
 namespace DocLoupe.Excel.Verify;
@@ -6,7 +7,8 @@ namespace DocLoupe.Excel.Verify;
 public sealed record DeclaredByteSpan(string Part, int Start, int End, byte[] Before, byte[] After);
 public sealed record FormulaCacheExpectation(string Type, string Value);
 public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCacheExpectation? ExplicitCache = null);
-public sealed record CellRead(string Address, string Kind, string? Value, string? Formula);
+public sealed record CellRead(string Address, string Kind, string? Value, string? Formula,
+    [property: JsonIgnore] string? CacheType = null, [property: JsonIgnore] string? CacheRawValue = null);
 public sealed record GateIssue(string Gate, string Code, string Detail);
 
 public static class P2aGates
@@ -239,7 +241,7 @@ public static class P2aGates
                 {
                     "s" => "text", "inlineStr" => "inline", "b" => "boolean", "e" => "error",
                     _ when value is null => "blank", _ => "number"
-                }, value, formula);
+                }, value, formula, formula is null ? null : type, formula is null ? null : scalar);
             }).ToArray();
     }
 

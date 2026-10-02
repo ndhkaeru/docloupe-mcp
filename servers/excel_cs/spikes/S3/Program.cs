@@ -63,7 +63,7 @@ try
     {
         ["session"] = session, ["mode"] = "copy", ["path"] = output,
         ["assert"] = new object[] { new { target = "Sheet1!B1", equals = new { value = 99 } },
-            new { target = "Sheet1!C1", equals = new { formula = "B1+2" } },
+            new { target = "Sheet1!C1", equals = new { formula = "B1+2", value = 2 } },
             new { target = "Sheet1!D4", equals = new { value = 4 } },
             new { target = "Sheet1!E4", equals = new { value = "batch" } },
             new { target = "Sheet1!F5", equals = new { value = 6 } },
@@ -78,8 +78,8 @@ try
             new { target = "Sheet1!M9", equals = new { value = new { error = "#N/A" } } },
             new { target = "Sheet1!N10", equals = new { value = 0.1 } },
             new { target = "Sheet1!O10", equals = new { value = 0.3 } },
-            new { target = "Sheet1!P11", equals = new { formula = "2+3" } },
-            new { target = "Sheet1!Q11", equals = new { formula = "1/0" } } }
+            new { target = "Sheet1!P11", equals = new { formula = "2+3", value = 5 } },
+            new { target = "Sheet1!Q11", equals = new { formula = "1/0", value = (object)new { error = "#DIV/0!" } } } }
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());

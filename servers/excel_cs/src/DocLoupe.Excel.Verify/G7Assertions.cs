@@ -34,7 +34,8 @@ public static class G7Assertions
                 var target = $"{group.Key}!{assertion.Address}";
                 if (assertion.Formula is not null && actual?.Formula != assertion.Formula)
                     issues.Add(new GateIssue("G7", "ASSERT_FORMULA_MISMATCH", target));
-                if (assertion.CheckValue && actual?.Kind == "formula")
+                if (assertion.CheckValue && actual?.Kind == "formula" &&
+                    actual.CacheType is not ("" or "n" or "b" or "e" or "str"))
                     issues.Add(new GateIssue("G7", "ASSERT_CACHE_UNSUPPORTED", target));
                 else if (assertion.CheckValue && !ValueMatches(actual, assertion))
                     issues.Add(new GateIssue("G7", "ASSERT_VALUE_MISMATCH", target));
@@ -45,6 +46,7 @@ public static class G7Assertions
 
     private static bool ValueMatches(CellRead? actual, ValueAssertion assertion)
     {
+        if (actual?.Kind == "formula") return FormulaCacheMatches(actual, assertion);
         if (assertion.Kind == "blank") return actual is null || actual.Kind == "blank";
         if (actual is null) return false;
         if (assertion.Kind == "text")
@@ -53,6 +55,24 @@ public static class G7Assertions
             return actual.Kind == "number" && CanonicalNumber(actual.Value) is { } numeric &&
                 CanonicalNumber(assertion.Value) is { } expected && numeric == expected;
         return assertion.Kind == actual.Kind && assertion.Value == actual.Value;
+    }
+
+    private static bool FormulaCacheMatches(CellRead actual, ValueAssertion assertion)
+    {
+        var raw = actual.CacheRawValue;
+        if (assertion.Kind == "blank") return raw is null && actual.CacheType is ("" or "n");
+        if (raw is null) return false;
+        return assertion.Kind switch
+        {
+            "number" => actual.CacheType is "" or "n" && CanonicalNumber(raw) is { } numeric &&
+                CanonicalNumber(assertion.Value) is { } expected && numeric == expected,
+            "text" => actual.CacheType == "str" && raw == assertion.Value,
+            "boolean" => actual.CacheType == "b" && raw is ("0" or "1") &&
+                (raw == "1" ? "true" : "false") == assertion.Value,
+            "error" => actual.CacheType == "e" && DocLoupe.Excel.Model.CellError.IsSupported(raw) &&
+                raw == assertion.Value,
+            _ => false
+        };
     }
 
     private static (string Digits, long Power)? CanonicalNumber(string? value)

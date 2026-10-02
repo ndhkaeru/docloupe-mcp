@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using DocLoupe.Excel.Engine;
 using DocLoupe.Excel.Package;
@@ -44,6 +45,88 @@ public sealed class SaveAssertionTests
                 Assert.Equal("verified", assertion.GetProperty("status").GetString()));
             Assert.True(File.Exists(output));
             sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void G7ChecksFormulaCachesByTypeAndBlocksWrongAssertions(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-g7-cache-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            sessions.Apply(id, 0, [
+                new SetValueOp("Sheet1", "E5", "formula", "1+1", Operation: "set_formula", ExplicitCache: new FormulaCache("n", "2.50")),
+                new SetValueOp("Sheet1", "F5", "formula", "1+1", Operation: "set_formula", ExplicitCache: new FormulaCache("b", "1")),
+                new SetValueOp("Sheet1", "G5", "formula", "1+1", Operation: "set_formula", ExplicitCache: new FormulaCache("str", "2")),
+                new SetValueOp("Sheet1", "H5", "formula", "1+1", Operation: "set_formula", ExplicitCache: new FormulaCache("e", "#N/A")),
+                new SetValueOp("Sheet1", "I5", "formula", "1+1", Operation: "set_formula")]);
+            var assertions = new[]
+            {
+                Assertion("Sheet1!C1", new { value = 2, formula = "1+1" }),
+                Assertion("Sheet1!E5", new { value = 2.5, formula = "1+1" }),
+                Assertion("Sheet1!F5", new { value = true }),
+                Assertion("Sheet1!G5", new { value = "2" }),
+                Assertion("Sheet1!H5", new { value = new { error = "#N/A" } }),
+                Assertion("Sheet1!I5", new { value = (object?)null })
+            }.Select(item => item.Normalize()).ToArray();
+            var output = Path.Combine(directory, "typed.xlsx");
+            Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(id, output, assertions))
+                .GetProperty("status").GetString());
+            var cacheReadback = JsonSerializer.SerializeToElement(P2aGates.ReadCells(output, "Sheet1", ["E5"]))[0];
+            Assert.False(cacheReadback.TryGetProperty("CacheType", out _));
+            Assert.False(cacheReadback.TryGetProperty("CacheRawValue", out _));
+            foreach (var (address, wrong) in new[]
+            {
+                ("E5", (object)"2.50"), ("F5", 1), ("G5", 2), ("H5", "#N/A"), ("I5", 0), ("C1", 3)
+            })
+                Assert.Contains(G7Assertions.Check(output, [Assertion("Sheet1!" + address, new { value = wrong }).Normalize()]),
+                    issue => issue.Code == "ASSERT_VALUE_MISMATCH");
+            var blockedPath = Path.Combine(directory, "blocked.xlsx");
+            var blocked = Assert.Throws<SaveBlockedException>(() => sessions.Save(id, blockedPath,
+                [Assertion("Sheet1!G5", new { value = 2 }).Normalize()]));
+            Assert.Contains(blocked.Issues, issue => issue.Code == "ASSERT_VALUE_MISMATCH");
+            Assert.False(File.Exists(blockedPath));
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("b", "9", "ASSERT_VALUE_MISMATCH")]
+    [InlineData("s", "0", "ASSERT_CACHE_UNSUPPORTED")]
+    [InlineData("n", "not-a-number", "ASSERT_VALUE_MISMATCH")]
+    public void G7RejectsMalformedOrUnsupportedFormulaCache(string type, string cached, string code)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-g7-invalid-cache-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var output = Path.Combine(directory, "invalid.xlsx");
+            using (var store = new PackageStore(Path.Combine(directory, "default.xlsx")))
+            {
+                var part = store.SheetPart("Sheet1");
+                var document = PackageStore.Parse(store.Read(part));
+                var cell = Assert.Single(document.GetElementsByTagName("c", PackageStore.Main)
+                    .OfType<System.Xml.XmlElement>(), element => element.GetAttribute("r") == "C1");
+                cell.SetAttribute("t", type);
+                Assert.Single(cell.GetElementsByTagName("v", PackageStore.Main)
+                    .OfType<System.Xml.XmlElement>()).InnerText = cached;
+                store.Set(part, Encoding.UTF8.GetBytes(document.OuterXml));
+                store.Save(output);
+            }
+            Assert.Contains(G7Assertions.Check(output, [Assertion("Sheet1!C1", new { value = false }).Normalize()]),
+                issue => issue.Code == code);
         }
         finally { Directory.Delete(directory, true); }
     }
@@ -111,8 +194,9 @@ public sealed class SaveAssertionTests
                 Assert.Contains(G7Assertions.Check(zero, [Assertion("Sheet1!B1", new { value = 1e-100 }).Normalize()]),
                     issue => issue.Code == "ASSERT_VALUE_MISMATCH");
             }
-            Assert.Contains(G7Assertions.Check(path, [Assertion("Sheet1!C1", new { value = 2 }).Normalize()]),
-                issue => issue.Code == "ASSERT_CACHE_UNSUPPORTED");
+            Assert.Empty(G7Assertions.Check(path, [Assertion("Sheet1!C1", new { value = 2 }).Normalize()]));
+            Assert.Contains(G7Assertions.Check(path, [Assertion("Sheet1!C1", new { value = 3 }).Normalize()]),
+                issue => issue.Code == "ASSERT_VALUE_MISMATCH");
         }
         finally { Directory.Delete(directory, true); }
     }

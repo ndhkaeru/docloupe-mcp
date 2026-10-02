@@ -1,6 +1,6 @@
 # S3 — response transport evidence (partial)
 
-`dotnet run --project servers/excel_cs/spikes/S3/S3.csproj --configuration Release -- servers/excel_cs/src/DocLoupe.Excel.Server/bin/Release/net10.0/DocLoupe.Excel.Server.dll` launches the P2a server over stdio with the pinned MCP C# SDK 1.4.1. The client enumerated the P2a tools and `excel_undo`, received both `structuredContent` and an identical compact JSON `TextContent` from `excel_open`, and completed mixed `excel_apply` (including numeric and error typed formula caches) → `excel_save(copy)` with `status=verified` → reopened and read cached results → `excel_undo` → `excel_close`.
+`dotnet run --project servers/excel_cs/spikes/S3/S3.csproj --configuration Release -- servers/excel_cs/src/DocLoupe.Excel.Server/bin/Release/net10.0/DocLoupe.Excel.Server.dll` launches the P2a server over stdio with the pinned MCP C# SDK 1.4.1. The client enumerated the P2a tools and `excel_undo`, received both `structuredContent` and an identical compact JSON `TextContent` from `excel_open`, and completed mixed `excel_apply` (including numeric and error typed formula caches) → `excel_save(copy)` with G7 assertions on those caches and `status=verified` → reopened and read cached results → `excel_undo` → `excel_close`.
 
 The SDK client and probe server are separate projects; the S3 project compiles only its own `Program.cs`. The Release SDK smoke completed locally and is also run by the four-runner CI matrix.
 

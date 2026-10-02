@@ -448,7 +448,7 @@ Failure = { diff_id: string, path: string, expected: any, actual: any, kind: str
 Gap     = { gap_id: string, path: string, reason: string, required: boolean }
 ```
 
-- **Current P2b slice:** `assert` accepts only sheet-qualified cell `equals.value` (blank, string, boolean, supported error tokens, bounded numeric lexemes) and `equals.formula`. Other assertion facets fail closed; formula-cache values are not yet assertable.
+- **Current P2b slice:** `assert` accepts only sheet-qualified cell `equals.value` (blank, string, boolean, supported error tokens, bounded numeric lexemes) and `equals.formula`. Other assertion facets fail closed; `equals.value` on a formula checks its cached result (including its type) without recalculating the formula. `null` requires a missing cache; unsupported cache types fail closed.
 - **Blocked save:** `SAVE_BLOCKED` comes back with `details = { gates, assertions, blocked_by: Failure[] | Gap[] }` and the file is not written.
 - **Gates** are defined in [04 §3](04-correctness.md#3-save-gates).
 - **`verified_with_gaps`** is only possible when every remaining gap is optional (an oracle that is not available), or is a required gap accepted with a reason.
