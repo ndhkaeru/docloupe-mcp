@@ -336,6 +336,29 @@ public sealed class WorkbookReaderTests
         finally { File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData("embed")]
+    [InlineData("link")]
+    [InlineData("pict")]
+    public void ResolvesOtherNamespacedRelationshipReferences(string attribute)
+    {
+        var path = CreateWorkbook("", worksheetTrailing:
+            $"<x:drawing xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships' r:{attribute}='rId8'/>");
+        try
+        {
+            var missing = WorkbookReader.VerifyPartial(path);
+            Assert.Equal("failed", missing.Status);
+            Assert.Contains(missing.PackageIssues, issue => issue.Code == "UNRESOLVED_RELATIONSHIP_ID"
+                && issue.Detail.Contains($"@{attribute}=rId8", StringComparison.Ordinal));
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+                Write(archive, "xl/worksheets/_rels/sheet1.xml.rels",
+                    "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>" +
+                    "<Relationship Id='rId8' Type='urn:custom' Target='../workbook.xml'/></Relationships>");
+            Assert.Equal("unverified", WorkbookReader.VerifyPartial(path).Status);
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void DoesNotTreatOtherIdNamespacesAsRelationships()
     {

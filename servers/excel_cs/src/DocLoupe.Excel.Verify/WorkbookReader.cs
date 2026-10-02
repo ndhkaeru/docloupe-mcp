@@ -17,6 +17,7 @@ public static class WorkbookReader
     private const string RelationshipNamespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private const string PackageRelationshipNamespace = "http://schemas.openxmlformats.org/package/2006/relationships";
     private const string ContentTypeNamespace = "http://schemas.openxmlformats.org/package/2006/content-types";
+    private static readonly string[] RelationshipReferenceAttributes = ["id", "embed", "link", "pict"];
 
     public static WorkbookSummary Peek(string path, int maxCells = 24, string? sheetName = null,
         int maxRows = 1048576, int maxColumns = 16384)
@@ -215,9 +216,12 @@ public static class WorkbookReader
                 while (reader.Read())
                 {
                     if (reader.NodeType != XmlNodeType.Element) continue;
-                    var id = reader.GetAttribute("id", RelationshipNamespace);
-                    if (id is not null && (!relationshipIds.TryGetValue(entry.FullName, out var ids) || !ids.Contains(id)))
-                        issues.Add(new MarkupIssue("UNRESOLVED_RELATIONSHIP_ID", $"{entry.FullName}: {id}"));
+                    foreach (var attribute in RelationshipReferenceAttributes)
+                    {
+                        var id = reader.GetAttribute(attribute, RelationshipNamespace);
+                        if (id is not null && (!relationshipIds.TryGetValue(entry.FullName, out var ids) || !ids.Contains(id)))
+                            issues.Add(new MarkupIssue("UNRESOLVED_RELATIONSHIP_ID", $"{entry.FullName}: @{attribute}={id}"));
+                    }
                 }
             }
             catch (XmlException exception)
