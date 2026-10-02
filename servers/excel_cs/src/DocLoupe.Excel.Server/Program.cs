@@ -16,6 +16,8 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
     McpServerTool.Create((string path) => Handle(() => sessions.Open(path)), new McpServerToolCreateOptions { Name = "excel_open" }),
     McpServerTool.Create((string path, string detail = "summary", string? sheet = null, int max_rows = 20, int max_cols = 10) =>
         Handle(() => sessions.Peek(path, detail, sheet, max_rows, max_cols)), new McpServerToolCreateOptions { Name = "excel_peek" }),
+    McpServerTool.Create((string after_path) => Handle(() => sessions.Verify(after_path)),
+        new McpServerToolCreateOptions { Name = "excel_verify" }),
     McpServerTool.Create((string? session = null) => Handle(() => sessions.Status(session)), new McpServerToolCreateOptions { Name = "excel_status" }),
     McpServerTool.Create((string session, string? sheet, JsonElement target) => Handle(() => sessions.Read(session, sheet, ReadTargets(target))),
         new McpServerToolCreateOptions
@@ -61,7 +63,23 @@ static string[] ReadTargets(JsonElement target)
 
 static CallToolResult Handle(Func<object> action)
 {
-    try { return Result(new { ok = true, data = action(), warnings = Array.Empty<object>() }, false); }
+    try
+    {
+        var data = action();
+        if (data is ReadOnlyVerification verification)
+        {
+            var summary = verification.Summary;
+            var report = new { mode = "validate", files = new { after = verification.Path }, status = summary.Status, partial = true,
+                package_issues = summary.PackageIssues, markup_issues = summary.MarkupIssues,
+                unverified_gates = summary.UnverifiedGates };
+            if (summary.Status == "failed")
+                return Result(new { ok = false, error = new { code = "PACKAGE_INVALID",
+                    message = "Read-only verification found package or markup issues", details = report,
+                    retryable = false } }, true);
+            return Result(new { ok = true, data = report, warnings = new[] { "Partial verification only; unverified gates remain" } }, false);
+        }
+        return Result(new { ok = true, data, warnings = Array.Empty<object>() }, false);
+    }
     catch (SaveBlockedException blocked)
     {
         return Result(new { ok = false, error = new { code = "SAVE_BLOCKED", message = "Staging verification failed; no output was written",

@@ -10,6 +10,8 @@ using DocLoupe.Excel.Verify;
 
 namespace DocLoupe.Excel.Server;
 
+public sealed record ReadOnlyVerification(string Path, VerificationSummary Summary);
+
 public sealed class ExcelSessions : IDisposable
 {
     private readonly ConcurrentDictionary<string, Session> _sessions = new(StringComparer.Ordinal);
@@ -78,6 +80,15 @@ public sealed class ExcelSessions : IDisposable
             }
         }
         return text.ToString();
+    }
+
+    public ReadOnlyVerification Verify(string afterPath)
+    {
+        var full = Path.GetFullPath(afterPath);
+        if (!File.Exists(full)) throw new FileNotFoundException("Workbook not found", full);
+        if (Path.GetExtension(full).ToLowerInvariant() is not (".xlsx" or ".xlsm" or ".xltx" or ".xltm"))
+            throw new NotSupportedException("Only OOXML workbooks are supported");
+        return new ReadOnlyVerification(full, WorkbookReader.VerifyPartial(full));
     }
 
     public object Status(string? id = null)

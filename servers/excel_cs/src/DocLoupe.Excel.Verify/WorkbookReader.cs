@@ -39,6 +39,16 @@ public static class WorkbookReader
 
     public static VerificationSummary VerifyPartial(string path)
     {
+        try { return VerifyPartialCore(path); }
+        catch (InvalidDataException exception)
+        {
+            return new VerificationSummary("failed", [new MarkupIssue("INVALID_PACKAGE", exception.Message)], [],
+                ["G1_REMAINING", "G2", "G4", "G5", "G6", "G7"]);
+        }
+    }
+
+    private static VerificationSummary VerifyPartialCore(string path)
+    {
         var packageIssues = new List<MarkupIssue>();
         var markupIssues = new List<MarkupIssue>();
         using var archive = ZipFile.OpenRead(path);

@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text.Json;
 using DocLoupe.Excel.Server;
 using DocLoupe.Excel.Verify;
@@ -7,6 +8,48 @@ namespace DocLoupe.Excel.Engine.Tests;
 
 public sealed class ReaderFixtureTests
 {
+    [Fact]
+    public void SessionlessVerifyReportsPartialSuccessAndCorruptionWithoutChangingFiles()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-verify-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var source = Path.Combine(directory, "default.xlsx");
+            var sourceBytes = File.ReadAllBytes(source);
+            var valid = sessions.Verify(source);
+            Assert.Equal(Path.GetFullPath(source), valid.Path);
+            Assert.Equal("unverified", valid.Summary.Status);
+            Assert.Contains("G2", valid.Summary.UnverifiedGates);
+            Assert.Equal(sourceBytes, File.ReadAllBytes(source));
+
+            var broken = Path.Combine(directory, "broken.xlsx");
+            File.Copy(source, broken);
+            using (var archive = ZipFile.Open(broken, ZipArchiveMode.Update))
+                archive.GetEntry("_rels/.rels")!.Delete();
+            var brokenBytes = File.ReadAllBytes(broken);
+            var invalid = sessions.Verify(broken);
+            Assert.Equal("failed", invalid.Summary.Status);
+            Assert.Contains(invalid.Summary.PackageIssues, issue => issue.Code == "MISSING_PART");
+            Assert.Equal(brokenBytes, File.ReadAllBytes(broken));
+            var invalidZip = Path.Combine(directory, "invalid-zip.xlsx");
+            File.WriteAllText(invalidZip, "not a zip archive");
+            var zipResult = sessions.Verify(invalidZip);
+            Assert.Equal("failed", zipResult.Summary.Status);
+            Assert.Contains(zipResult.Summary.PackageIssues, issue => issue.Code == "INVALID_PACKAGE");
+            Assert.Empty(JsonSerializer.SerializeToElement(sessions.Status()).GetProperty("sessions").EnumerateArray());
+            Assert.Throws<FileNotFoundException>(() => sessions.Verify(Path.Combine(directory, "missing.xlsx")));
+            var unsupported = Path.Combine(directory, "default.txt");
+            File.Copy(source, unsupported);
+            Assert.Throws<NotSupportedException>(() => sessions.Verify(unsupported));
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
     [Theory]
     [InlineData("opc-percent-case")]
     [InlineData("nested-workbook")]

@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
@@ -18,6 +19,29 @@ try
     if (!tools.Any(tool => tool.Name == "excel_undo")) throw new InvalidOperationException("Undo tool is missing");
     if (!tools.Any(tool => tool.Name == "excel_status")) throw new InvalidOperationException("Status tool is missing");
     if (!tools.Any(tool => tool.Name == "excel_peek")) throw new InvalidOperationException("Peek tool is missing");
+    if (!tools.Any(tool => tool.Name == "excel_verify")) throw new InvalidOperationException("Verify tool is missing");
+    var verified = await client.CallToolAsync("excel_verify", new Dictionary<string, object?> { ["after_path"] = source });
+    if (verified.IsError == true || verified.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "unverified" ||
+        verified.StructuredContent?.GetProperty("data").GetProperty("partial").GetBoolean() != true ||
+        verified.StructuredContent?.GetProperty("data").GetProperty("unverified_gates").GetArrayLength() == 0 ||
+        verified.StructuredContent?.GetProperty("warnings").GetArrayLength() == 0)
+        throw new InvalidOperationException("Read-only verification claimed full success: " + verified.StructuredContent?.GetRawText());
+    var broken = Path.Combine(directory, "broken.xlsx");
+    File.Copy(source, broken);
+    using (var archive = ZipFile.Open(broken, ZipArchiveMode.Update))
+        archive.GetEntry("_rels/.rels")!.Delete();
+    var invalidVerification = await client.CallToolAsync("excel_verify", new Dictionary<string, object?> { ["after_path"] = broken });
+    if (invalidVerification.IsError != true || invalidVerification.StructuredContent?.GetProperty("ok").GetBoolean() != false ||
+        invalidVerification.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PACKAGE_INVALID" ||
+        invalidVerification.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("status").GetString() != "failed")
+        throw new InvalidOperationException("Corrupt workbook was accepted: " + invalidVerification.StructuredContent?.GetRawText());
+    var invalidZip = Path.Combine(directory, "invalid-zip.xlsx");
+    File.WriteAllText(invalidZip, "not a zip archive");
+    var invalidZipResult = await client.CallToolAsync("excel_verify", new Dictionary<string, object?> { ["after_path"] = invalidZip });
+    if (invalidZipResult.IsError != true || invalidZipResult.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PACKAGE_INVALID" ||
+        invalidZipResult.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("package_issues")[0]
+            .GetProperty("Code").GetString() != "INVALID_PACKAGE")
+        throw new InvalidOperationException("Invalid ZIP was not reported as a package error: " + invalidZipResult.StructuredContent?.GetRawText());
     var peek = await client.CallToolAsync("excel_peek", new Dictionary<string, object?>
     {
         ["path"] = source, ["detail"] = "preview", ["sheet"] = "Sheet1", ["max_rows"] = 3, ["max_cols"] = 4
