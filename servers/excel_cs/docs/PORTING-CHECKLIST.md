@@ -1,6 +1,6 @@
 # Checklist tiến độ port Excel MCP sang C#
 
-**Ảnh chụp tiến độ:** cập nhật 2026-10-02 trên `feat/excel-cs-port` (bao gồm lát cắt `expect.value`). Đây là checklist thực thi; hợp đồng đầy đủ nằm trong [01](01-architecture.md), [03](03-tools.md), [04](04-correctness.md), [05](05-legacy-mapping.md) và [06](06-testing-and-roadmap.md). Dấu `[x]` chỉ khẳng định **phạm vi ghi ngay trong mục đó**, không có nghĩa toàn bộ phase đã hoàn tất.
+**Ảnh chụp tiến độ:** cập nhật 2026-10-02 trên `feat/excel-cs-port` (bao gồm `expect.value`/`expect.formula` và kịch bản parity hẹp). Đây là checklist thực thi; hợp đồng đầy đủ nằm trong [01](01-architecture.md), [03](03-tools.md), [04](04-correctness.md), [05](05-legacy-mapping.md) và [06](06-testing-and-roadmap.md). Dấu `[x]` chỉ khẳng định **phạm vi ghi ngay trong mục đó**, không có nghĩa toàn bộ phase đã hoàn tất.
 
 **Đích cuối:** server C# thay thế được `servers/excel` (Python) mà không mất chỉnh sửa hoặc phá hỏng nội dung OOXML; trước khi đổi launcher cần đạt tiêu chí P7 trong [06 §4](06-testing-and-roadmap.md#4-roadmap). **Hiện tại: P2a chạy được; P2b đang làm; chưa thể thay server Python.**
 
@@ -36,7 +36,7 @@
 - [x] `expect.value`, `expect.formula` (riêng hoặc cùng nhau) cho `set_value`/`set_formula`/`clear` **một cell** kiểm trước batch trên revision hiện tại; mismatch trả `PRECONDITION_FAILED` có index/expected/actual, không đổi revision.
 - [ ] Hoàn tất rich-text/phonetic và style ops, các facet `expect` còn lại (kể cả bulk/hash), `dry_run`, readback/diff đầy đủ; không coi các op `set_value` hiện có là parity của toàn bộ 03 §4.
 - [ ] `excel_create`, các chế độ save `overwrite`/`save_as`, persistent ledger/redo (nếu quyết định hỗ trợ) và các option session còn thiếu; hiện **chỉ** cho copy-save.
-- [ ] Chạy ma trận op × fixture, parity Python/C# có danh sách sai khác được duyệt, và agent-eval subset đạt **0 silent failure** theo [06 §2.7](06-testing-and-roadmap.md#27-agent-level-evals).
+- [ ] Chạy ma trận op × fixture, parity Python/C# có danh sách sai khác được duyệt, và agent-eval subset đạt **0 silent failure** theo [06 §2.7](06-testing-and-roadmap.md#27-agent-level-evals). Đã có [kịch bản parity hẹp](../tools/PARITY.md) qua 6 fixture cho scalar edits; 1 Python output tương đương, 5 divergence được kiểm đúng theo fixture; chưa phải ma trận đầy đủ.
 
 ## 3. Phần còn lại của mục tiêu port
 
@@ -64,4 +64,4 @@ dotnet run --project servers/excel_cs/tools/SchemaOrder/SchemaOrder.csproj --con
 dotnet run --project servers/excel_cs/spikes/S3/S3.csproj --configuration Release -- servers/excel_cs/src/DocLoupe.Excel.Server/bin/Release/net10.0/DocLoupe.Excel.Server.dll
 ```
 
-**Thứ tự công việc tiếp theo:** (1) dựng kịch bản parity có kiểm tra độc lập cho các op P2a/P2b hiện có; (2) hoàn tất reader và các op rich/style kèm G4–G7; (3) đóng tiêu chí P0/P1/P2b chưa đạt; (4) P3 → P7 theo [roadmap](06-testing-and-roadmap.md#4-roadmap). Mỗi mục chỉ chuyển thành `[x]` khi có test/báo cáo dẫn chứng và commit tương ứng; không push nếu chưa được yêu cầu.
+**Thứ tự công việc tiếp theo:** (1) mở rộng [kịch bản parity](../tools/PARITY.md) cho formula/clear, rich/style và corpus độc lập; (2) hoàn tất reader và các op rich/style kèm G4–G7; (3) đóng tiêu chí P0/P1/P2b chưa đạt; (4) P3 → P7 theo [roadmap](06-testing-and-roadmap.md#4-roadmap). Mỗi mục chỉ chuyển thành `[x]` khi có test/báo cáo dẫn chứng và commit tương ứng; không push nếu chưa được yêu cầu.
