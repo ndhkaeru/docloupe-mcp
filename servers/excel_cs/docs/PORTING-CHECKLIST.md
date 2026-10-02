@@ -30,6 +30,7 @@
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 
 - [x] `excel_status` (revision, dirty, thay đổi source, busy, ledger 20 mục) và `excel_undo` bằng phát lại những revision cell-content còn giữ; copy-save **không** đánh dấu phiên là đã lưu.
+- [x] `excel_read` vùng A1 hình chữ nhật giới hạn 500 ô, chỉ `cells` hiện hữu trên revision đang mở; chưa hỗ trợ `values`/`markdown`/`full`, placeholder ô rỗng, hash hoặc phân trang.
 - [x] `excel_apply`: `set_values` hình chữ nhật, `set_value` broadcast, `set_formula` thông thường (clear/keep/explicit typed cache), `fill` hằng số hoặc chuỗi thập phân có giới hạn, `clear` **chỉ values** (có thể xoá cell); giới hạn tối đa 500 cell/batch.
 - [x] G6 từ chối source có chữ ký và bảo vệ các advanced parts trong phạm vi hỗ trợ; G7 trên staging hỗ trợ `equals.value`, `equals.formula`, và `unchanged: true` cho cell (kể cả shared-string markup/phonetic hoặc cell vắng mặt).
 - [ ] Mở rộng G6 cho thay đổi advanced parts có chủ đích và chính sách invalidation chữ ký; G7 cho các facet `display`/`rich`/`style`/`except`, với phép đọc độc lập và test âm tương ứng.
@@ -49,7 +50,7 @@
 
 ## 4. Bằng chứng và cách cập nhật checklist
 
-- [x] Ở mốc `9b385dc`, local Windows và Docker Linux chạy **315/315** test. Lát cắt `expect.value` qua **330/330**, sau khi thêm `expect.formula` qua **339/339** test trên cả Windows và Docker Linux (có nguồn fixture local). Sửa index sau range expansion đạt **345/345** test trên Windows và Docker Linux, MCP stdio smoke; parity hẹp chạy trên Windows và Docker Linux cho 6 fixture (1 Python tương đương, 5 khác biệt đã ghi). Schema-order check đã qua ở lát cắt trước. Đây chỉ là bằng chứng cho các lát cắt hiện có, không chứng minh P2b/P3–P7.
+- [x] Ở mốc `9b385dc`, local Windows và Docker Linux chạy **315/315** test. Lát cắt `expect.value` qua **330/330**, sau khi thêm `expect.formula` qua **339/339** test trên cả Windows và Docker Linux (có nguồn fixture local). Sửa index sau range expansion đạt **345/345** test; đọc A1 range giới hạn đạt **358/358** test trên Windows và Docker Linux, MCP stdio smoke; parity hẹp chạy trên Windows và Docker Linux cho 6 fixture (1 Python tương đương, 5 khác biệt đã ghi). Schema-order check đã qua ở lát cắt trước. Đây chỉ là bằng chứng cho các lát cắt hiện có, không chứng minh P2b/P3–P7.
 - [ ] Chạy CI trên **cả bốn runner** cho commit mới (workflow đã cấu hình, nhưng các commit local này chưa push); macOS local được hoãn theo yêu cầu, không đánh dấu đã kiểm chứng.
 - [ ] S3: đo **model thực nhận** `structuredContent` hay `TextContent` trên từng client đích; smoke SDK chỉ chứng minh giao thức tới client, không chứng minh forwarding vào model.
 - [ ] Ma trận `set_value` với corpus cục bộ `D:\data-test\excel-preservation-fixtures\sources` và bộ tổng hợp: lưu báo cáo pass/fail theo từng fixture/gate trước khi đóng tiêu chí release; ghi rõ 01 lỗi schema baseline, 02/05 Excel từ chối ngay file gốc ([S2b](../spikes/S2b/REPORT.md)).
@@ -64,4 +65,4 @@ dotnet run --project servers/excel_cs/tools/SchemaOrder/SchemaOrder.csproj --con
 dotnet run --project servers/excel_cs/spikes/S3/S3.csproj --configuration Release -- servers/excel_cs/src/DocLoupe.Excel.Server/bin/Release/net10.0/DocLoupe.Excel.Server.dll
 ```
 
-**Thứ tự công việc tiếp theo:** (1) mở rộng [kịch bản parity](../tools/PARITY.md) cho formula/clear, rich/style và corpus độc lập; (2) hoàn tất reader và các op rich/style kèm G4–G7; (3) đóng tiêu chí P0/P1/P2b chưa đạt; (4) P3 → P7 theo [roadmap](06-testing-and-roadmap.md#4-roadmap). Mỗi mục chỉ chuyển thành `[x]` khi có test/báo cáo dẫn chứng và commit tương ứng; không push nếu chưa được yêu cầu.
+**Thứ tự công việc tiếp theo:** (1) mở rộng [kịch bản parity](../tools/PARITY.md) cho rich/style và corpus độc lập; (2) hoàn tất reader và các op rich/style kèm G4–G7; (3) đóng tiêu chí P0/P1/P2b chưa đạt; (4) P3 → P7 theo [roadmap](06-testing-and-roadmap.md#4-roadmap). Mỗi mục chỉ chuyển thành `[x]` khi có test/báo cáo dẫn chứng và commit tương ứng; không push nếu chưa được yêu cầu.

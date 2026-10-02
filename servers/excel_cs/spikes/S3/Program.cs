@@ -28,6 +28,13 @@ try
     if (result.IsError == true || result.StructuredContent is null || result.Content.OfType<TextContentBlock>().Count() != 1)
         throw new InvalidOperationException("Dual-channel MCP tool response not received by SDK client");
     var session = result.StructuredContent.Value.GetProperty("data").GetProperty("session").GetString()!;
+    var rangeRead = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["sheet"] = "Sheet1", ["target"] = "A1:C2"
+    });
+    if (rangeRead.IsError == true ||
+        rangeRead.StructuredContent?.GetProperty("data").GetProperty("cells").GetArrayLength() != 3)
+        throw new InvalidOperationException("Bounded range read failed: " + rangeRead.StructuredContent?.GetRawText());
     var stale = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",

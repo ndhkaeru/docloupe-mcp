@@ -63,8 +63,24 @@ public sealed class ExcelSessions : IDisposable
         {
             session.CheckSource();
             if (addresses.Length == 0) throw new ArgumentException("At least one cell address is required");
-            var targets = addresses.Select(address => (Sheet: CellAddress.SheetName(address) ?? sheet
-                ?? throw new ArgumentException("Missing sheet name"), Address: CellAddress.Parse(address).ToString())).ToArray();
+            var targets = new List<(string Sheet, string Address)>();
+            foreach (var address in addresses)
+            {
+                var bounds = address.Split(':');
+                if (bounds.Length is < 1 or > 2 || bounds.Length == 2 && bounds[1].Contains('!'))
+                    throw new FormatException("Invalid cell range");
+                var name = CellAddress.SheetName(bounds[0]) ?? sheet
+                    ?? throw new ArgumentException("Missing sheet name");
+                var first = CellAddress.Parse(bounds[0]);
+                var last = bounds.Length == 2 ? CellAddress.Parse(bounds[1]) : first;
+                if (last.Row < first.Row || last.Column < first.Column)
+                    throw new FormatException("Reversed cell range");
+                var count = (long)(last.Row - first.Row + 1) * (last.Column - first.Column + 1);
+                if (targets.Count + count > 500) throw new ArgumentException("Read exceeds 500 cells");
+                for (var row = first.Row; row <= last.Row; row++)
+                    for (var column = first.Column; column <= last.Column; column++)
+                        targets.Add((name, new CellAddress(row, column).ToString()));
+            }
             var selectedSheet = targets[0].Sheet;
             if (targets.Any(target => target.Sheet != selectedSheet))
                 throw new ArgumentException("All cells in a read must belong to one sheet");
