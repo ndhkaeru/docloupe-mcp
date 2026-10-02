@@ -33,7 +33,8 @@ try
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
         ["ops"] = new object[] { new { op = "set_value", sheet = "Sheet1", target = "B1", value = 99 },
             new { op = "set_formula", sheet = "Sheet1", target = "C1", formula = "=B1+2", cache = "clear" },
-            new { op = "set_values", sheet = "Sheet1", target = "D4", values = new object?[][] { [4, "batch"] } } }
+            new { op = "set_values", sheet = "Sheet1", target = "D4", values = new object?[][] { [4, "batch"] } },
+            new { op = "set_value", sheet = "Sheet1", target = "F5:G5", value = 6 } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
     var status = await client.CallToolAsync("excel_status", new Dictionary<string, object?> { ["session"] = session });
@@ -55,7 +56,9 @@ try
         ["assert"] = new object[] { new { target = "Sheet1!B1", equals = new { value = 99 } },
             new { target = "Sheet1!C1", equals = new { formula = "B1+2" } },
             new { target = "Sheet1!D4", equals = new { value = 4 } },
-            new { target = "Sheet1!E4", equals = new { value = "batch" } } }
+            new { target = "Sheet1!E4", equals = new { value = "batch" } },
+            new { target = "Sheet1!F5", equals = new { value = 6 } },
+            new { target = "Sheet1!G5", equals = new { value = 6 } } }
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());

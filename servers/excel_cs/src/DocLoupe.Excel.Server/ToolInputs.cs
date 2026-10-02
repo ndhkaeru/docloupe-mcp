@@ -73,19 +73,29 @@ public sealed class SetValueRequest
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)
     {
+        if (Op == "set_value" && Target.Contains(':'))
+        {
+            var (sheet, rangeStart, rangeEnd, _) = ParseTargetRange(defaultSheet);
+            var count = (long)(rangeEnd.Row - rangeStart.Row + 1) * (rangeEnd.Column - rangeStart.Column + 1);
+            if (count > 500) throw new ArgumentException("set_value range exceeds 500 cells");
+            var broadcast = new List<SetValueOp>((int)count);
+            for (var row = rangeStart.Row; row <= rangeEnd.Row; row++)
+                for (var column = rangeStart.Column; column <= rangeEnd.Column; column++)
+                    broadcast.Add(new SetValueRequest
+                    {
+                        Op = Op, Sheet = sheet, Target = new CellAddress(row, column).ToString(),
+                        Value = Value, Values = Values, AsText = AsText, RichPolicy = RichPolicy,
+                        Formula = Formula, FormulaKind = FormulaKind, Reference = Reference, Cache = Cache, Other = Other
+                    }.Normalize(sheet));
+            return broadcast.ToArray();
+        }
         if (Op != "set_values") return [Normalize(defaultSheet)];
         if (Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Array ||
             AsText || RichPolicy != "reject" || Formula is not null || FormulaKind is not null ||
             Reference is not null || Cache is not null || Other is { Count: > 0 })
             throw new NotSupportedException("set_values requires only a target and rectangular values array");
 
-        var name = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
-        var separator = Target.LastIndexOf('!');
-        var bounds = (separator < 0 ? Target : Target[(separator + 1)..]).Split(':');
-        if (bounds.Length is < 1 or > 2) throw new FormatException("Invalid set_values range");
-        var first = CellAddress.Parse(bounds[0]);
-        var last = bounds.Length == 2 ? CellAddress.Parse(bounds[1]) : first;
-        if (last.Row < first.Row || last.Column < first.Column) throw new FormatException("Reversed set_values range");
+        var (name, first, last, hasRange) = ParseTargetRange(defaultSheet);
 
         var rows = Values.EnumerateArray().ToArray();
         if (rows.Length is < 1 or > 500 || rows.Any(row => row.ValueKind != JsonValueKind.Array))
@@ -93,7 +103,7 @@ public sealed class SetValueRequest
         var width = rows[0].GetArrayLength();
         if (width is < 1 or > 500 || rows.Length * width > 500 || rows.Any(row => row.GetArrayLength() != width))
             throw new ArgumentException("set_values requires a rectangular array of at most 500 cells");
-        if (bounds.Length == 2 && (last.Row - first.Row + 1 != rows.Length || last.Column - first.Column + 1 != width))
+        if (hasRange && (last.Row - first.Row + 1 != rows.Length || last.Column - first.Column + 1 != width))
             throw new ArgumentException("set_values dimensions do not match target range");
         if (first.Row + rows.Length - 1 > 1048576 || first.Column + width - 1 > 16384)
             throw new ArgumentException("set_values exceeds worksheet bounds");
@@ -108,6 +118,18 @@ public sealed class SetValueRequest
                     Value = rows[row][column]
                 }.Normalize(name) with { Operation = "set_values" });
         return operations.ToArray();
+    }
+
+    private (string Sheet, CellAddress First, CellAddress Last, bool HasRange) ParseTargetRange(string? defaultSheet)
+    {
+        var name = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
+        var separator = Target.LastIndexOf('!');
+        var bounds = (separator < 0 ? Target : Target[(separator + 1)..]).Split(':');
+        if (bounds.Length is < 1 or > 2) throw new FormatException("Invalid cell range");
+        var first = CellAddress.Parse(bounds[0]);
+        var last = bounds.Length == 2 ? CellAddress.Parse(bounds[1]) : first;
+        if (last.Row < first.Row || last.Column < first.Column) throw new FormatException("Reversed cell range");
+        return (name, first, last, bounds.Length == 2);
     }
 }
 
