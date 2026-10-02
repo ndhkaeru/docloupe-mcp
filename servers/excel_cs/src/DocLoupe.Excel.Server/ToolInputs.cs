@@ -123,20 +123,19 @@ public sealed class SetValueRequest
             Expect: NormalizeExpect(name, address));
     }
 
-    private ExpectedValue? NormalizeExpect(string sheet, string address)
+    private CellPrecondition? NormalizeExpect(string sheet, string address)
     {
         if (Expect.ValueKind == JsonValueKind.Undefined) return null;
-        if (Expect.ValueKind != JsonValueKind.Object || Expect.EnumerateObject().Count() != 1 ||
-            !Expect.TryGetProperty("value", out _))
-            throw new NotSupportedException("Only expect.value is supported");
+        if (Expect.ValueKind != JsonValueKind.Object)
+            throw new NotSupportedException("Only expect.value and expect.formula are supported");
         var assertion = new SaveAssertionRequest { Target = sheet + "!" + address, Expected = Expect }.Normalize();
-        return new ExpectedValue(assertion.Kind!, assertion.Value);
+        return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula);
     }
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)
     {
         if (Expect.ValueKind != JsonValueKind.Undefined && (Op is not ("set_value" or "set_formula" or "clear") || Target.Contains(':')))
-            throw new NotSupportedException("expect.value requires a single-cell operation");
+            throw new NotSupportedException("expect requires a single-cell operation");
         var hasValue = Value.ValueKind != JsonValueKind.Undefined;
         var hasSeries = Series.ValueKind != JsonValueKind.Undefined;
         if (Op == "set_value" && hasSeries) throw new NotSupportedException("series requires fill");

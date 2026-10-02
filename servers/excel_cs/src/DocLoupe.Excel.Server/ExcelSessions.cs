@@ -92,7 +92,8 @@ public sealed class ExcelSessions : IDisposable
                     {
                         var operation = operations[index];
                         if (operation.Expect is not { } expected) continue;
-                        var assertion = new ValueAssertion(operation.Sheet, operation.Address, true, expected.Kind, expected.Value, null);
+                        var assertion = new ValueAssertion(operation.Sheet, operation.Address, expected.CheckValue,
+                            expected.Kind, expected.Value, expected.Formula);
                         if (G7Assertions.Check(basePath, [assertion]).Count == 0) continue;
                         CellRead? actual;
                         try { actual = P2aGates.ReadCells(basePath, operation.Sheet, [operation.Address]).SingleOrDefault(); }
@@ -288,12 +289,12 @@ public sealed record SessionSnapshot(int Revision, IReadOnlyList<LedgerEntry> Le
 
 public sealed record BusyOperation(string Operation, string Since);
 
-public sealed class PreconditionFailedException(int index, string target, ExpectedValue expected, CellRead? actual)
+public sealed class PreconditionFailedException(int index, string target, CellPrecondition expected, CellRead? actual)
     : Exception("PRECONDITION_FAILED: " + target)
 {
     public int Index { get; } = index;
     public string Target { get; } = target;
-    public ExpectedValue Expected { get; } = expected;
+    public CellPrecondition Expected { get; } = expected;
     public CellRead? Actual { get; } = actual;
 }
 

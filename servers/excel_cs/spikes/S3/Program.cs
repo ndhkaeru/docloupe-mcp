@@ -40,7 +40,7 @@ try
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
         ["ops"] = new object[] { new { op = "set_value", sheet = "Sheet1", target = "B1", value = 99, expect = new { value = 42 } },
-            new { op = "set_formula", sheet = "Sheet1", target = "C1", formula = "=B1+2", cache = "keep" },
+            new { op = "set_formula", sheet = "Sheet1", target = "C1", formula = "=B1+2", cache = "keep", expect = new { formula = "=1+1", value = 2 } },
             new { op = "set_values", sheet = "Sheet1", target = "D4", values = new object?[][] { [4, "batch"] } },
             new { op = "set_value", sheet = "Sheet1", target = "F5:G5", value = 6 },
             new { op = "fill", sheet = "Sheet1", target = "H6:I6", value = 8 },
@@ -58,6 +58,14 @@ try
     if (status.IsError == true || status.StructuredContent?.GetProperty("data").GetProperty("revision").GetInt32() != 1 ||
         status.StructuredContent?.GetProperty("data").GetProperty("ledger").GetArrayLength() != 1)
         throw new InvalidOperationException("Session status failed: " + status.StructuredContent?.GetRawText());
+    var staleFormula = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 1, ["sheet"] = "Sheet1",
+        ["ops"] = new[] { new { op = "clear", target = "C1", expect = new { formula = "1+1" } } }
+    });
+    if (staleFormula.IsError != true || staleFormula.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PRECONDITION_FAILED" ||
+        staleFormula.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("actual").GetProperty("Formula").GetString() != "B1+2")
+        throw new InvalidOperationException("MCP formula precondition did not catch a stale revision: " + staleFormula.StructuredContent?.GetRawText());
     var invalidOutput = Path.Combine(directory, "invalid.xlsx");
     var rejected = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
     {
