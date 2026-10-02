@@ -32,6 +32,9 @@ public sealed class ReadRangeTests
             Assert.Equal(3, initial.GetProperty("cells").GetArrayLength());
             sessions.Apply(session, 0, [new SetValueOp("Sheet1", "B2", "number", "27")]);
             var preview = Read(sessions, session, "B1:C2", "Sheet1");
+            var listed = JsonSerializer.SerializeToElement(sessions.Read(session, "Sheet1", ["A1", "B1:C2"]));
+            Assert.Equal("hello", Value(listed, "A1"));
+            Assert.Equal("27", Value(listed, "B2"));
             Assert.Equal(1, preview.GetProperty("revision").GetInt32());
             Assert.Equal("27", Value(preview, "B2"));
             Assert.DoesNotContain(preview.GetProperty("cells").EnumerateArray(),

@@ -35,6 +35,24 @@ try
     if (rangeRead.IsError == true ||
         rangeRead.StructuredContent?.GetProperty("data").GetProperty("cells").GetArrayLength() != 3)
         throw new InvalidOperationException("Bounded range read failed: " + rangeRead.StructuredContent?.GetRawText());
+    var readSchema = tools.Single(tool => tool.Name == "excel_read").ProtocolTool.InputSchema;
+    if (readSchema.GetProperty("properties").GetProperty("target").GetProperty("oneOf").GetArrayLength() != 2)
+        throw new InvalidOperationException("Read target array is missing from MCP input schema: " + readSchema.GetRawText());
+    var listedRead = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["sheet"] = "Sheet1", ["target"] = new[] { "A1", "B1:C2" }
+    });
+    if (listedRead.IsError == true ||
+        listedRead.StructuredContent?.GetProperty("data").GetProperty("cells").GetArrayLength() != 3)
+        throw new InvalidOperationException("Read target list failed: " + listedRead.StructuredContent?.GetRawText()
+            + " text=" + listedRead.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text
+            + " schema=" + tools.Single(tool => tool.Name == "excel_read").ProtocolTool.InputSchema.GetRawText());
+    var invalidRead = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["sheet"] = "Sheet1", ["target"] = new object[] { "A1", 7 }
+    });
+    if (invalidRead.IsError != true)
+        throw new InvalidOperationException("Non-string read target was accepted");
     var stale = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",

@@ -30,7 +30,7 @@
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 
 - [x] `excel_status` (revision, dirty, thay đổi source, busy, ledger 20 mục) và `excel_undo` bằng phát lại những revision cell-content còn giữ; copy-save **không** đánh dấu phiên là đã lưu.
-- [x] `excel_read` vùng A1 hình chữ nhật giới hạn 500 ô, chỉ `cells` hiện hữu trên revision đang mở; chưa hỗ trợ `values`/`markdown`/`full`, placeholder ô rỗng, hash hoặc phân trang.
+- [x] `excel_read` một ô/vùng A1 hoặc danh sách target giới hạn tổng 500 ô, chỉ `cells` hiện hữu trên revision đang mở; chưa hỗ trợ `values`/`markdown`/`full`, placeholder ô rỗng, hash hoặc phân trang.
 - [x] `excel_apply`: `set_values` hình chữ nhật, `set_value` broadcast, `set_formula` thông thường (clear/keep/explicit typed cache), `fill` hằng số hoặc chuỗi thập phân có giới hạn, `clear` **chỉ values** (có thể xoá cell); giới hạn tối đa 500 cell/batch.
 - [x] G6 từ chối source có chữ ký và bảo vệ các advanced parts trong phạm vi hỗ trợ; G7 trên staging hỗ trợ `equals.value`, `equals.formula`, và `unchanged: true` cho cell (kể cả shared-string markup/phonetic hoặc cell vắng mặt).
 - [ ] Mở rộng G6 cho thay đổi advanced parts có chủ đích và chính sách invalidation chữ ký; G7 cho các facet `display`/`rich`/`style`/`except`, với phép đọc độc lập và test âm tương ứng.
