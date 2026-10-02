@@ -73,20 +73,25 @@ public sealed class SetValueRequest
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)
     {
-        if (Op == "set_value" && Target.Contains(':'))
+        if (Op == "fill" && (!Target.Contains(':') || Value.ValueKind == JsonValueKind.Undefined ||
+            Values.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
+            Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null ||
+            Other is { Count: > 0 }))
+            throw new NotSupportedException("Only constant fill on a rectangular range is supported");
+        if ((Op is "set_value" or "fill") && Target.Contains(':'))
         {
             var (sheet, rangeStart, rangeEnd, _) = ParseTargetRange(defaultSheet);
             var count = (long)(rangeEnd.Row - rangeStart.Row + 1) * (rangeEnd.Column - rangeStart.Column + 1);
-            if (count > 500) throw new ArgumentException("set_value range exceeds 500 cells");
+            if (count > 500) throw new ArgumentException($"{Op} range exceeds 500 cells");
             var broadcast = new List<SetValueOp>((int)count);
             for (var row = rangeStart.Row; row <= rangeEnd.Row; row++)
                 for (var column = rangeStart.Column; column <= rangeEnd.Column; column++)
                     broadcast.Add(new SetValueRequest
                     {
-                        Op = Op, Sheet = sheet, Target = new CellAddress(row, column).ToString(),
+                        Op = "set_value", Sheet = sheet, Target = new CellAddress(row, column).ToString(),
                         Value = Value, Values = Values, AsText = AsText, RichPolicy = RichPolicy,
                         Formula = Formula, FormulaKind = FormulaKind, Reference = Reference, Cache = Cache, Other = Other
-                    }.Normalize(sheet));
+                    }.Normalize(sheet) with { Operation = Op });
             return broadcast.ToArray();
         }
         if (Op != "set_values") return [Normalize(defaultSheet)];

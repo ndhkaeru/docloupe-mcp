@@ -34,7 +34,8 @@ try
         ["ops"] = new object[] { new { op = "set_value", sheet = "Sheet1", target = "B1", value = 99 },
             new { op = "set_formula", sheet = "Sheet1", target = "C1", formula = "=B1+2", cache = "clear" },
             new { op = "set_values", sheet = "Sheet1", target = "D4", values = new object?[][] { [4, "batch"] } },
-            new { op = "set_value", sheet = "Sheet1", target = "F5:G5", value = 6 } }
+            new { op = "set_value", sheet = "Sheet1", target = "F5:G5", value = 6 },
+            new { op = "fill", sheet = "Sheet1", target = "H6:I6", value = 8 } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
     var status = await client.CallToolAsync("excel_status", new Dictionary<string, object?> { ["session"] = session });
@@ -58,7 +59,9 @@ try
             new { target = "Sheet1!D4", equals = new { value = 4 } },
             new { target = "Sheet1!E4", equals = new { value = "batch" } },
             new { target = "Sheet1!F5", equals = new { value = 6 } },
-            new { target = "Sheet1!G5", equals = new { value = 6 } } }
+            new { target = "Sheet1!G5", equals = new { value = 6 } },
+            new { target = "Sheet1!H6", equals = new { value = 8 } },
+            new { target = "Sheet1!I6", equals = new { value = 8 } } }
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());
