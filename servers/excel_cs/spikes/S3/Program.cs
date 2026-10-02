@@ -58,6 +58,14 @@ try
     });
     if (rejected.IsError != true || File.Exists(invalidOutput))
         throw new InvalidOperationException("Unsupported assertion was not rejected");
+    var changedOutput = Path.Combine(directory, "changed.xlsx");
+    var changed = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["mode"] = "copy", ["path"] = changedOutput,
+        ["assert"] = new[] { new { target = "Sheet1!B1", unchanged = true } }
+    });
+    if (changed.IsError != true || File.Exists(changedOutput))
+        throw new InvalidOperationException("Changed cell passed an unchanged assertion");
     var output = Path.Combine(directory, "written.xlsx");
     var saved = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
     {
@@ -79,7 +87,8 @@ try
             new { target = "Sheet1!N10", equals = new { value = 0.1 } },
             new { target = "Sheet1!O10", equals = new { value = 0.3 } },
             new { target = "Sheet1!P11", equals = new { formula = "2+3", value = 5 } },
-            new { target = "Sheet1!Q11", equals = new { formula = "1/0", value = (object)new { error = "#DIV/0!" } } } }
+            new { target = "Sheet1!Q11", equals = new { formula = "1/0", value = (object)new { error = "#DIV/0!" } } },
+            new { target = "Sheet1!B2", unchanged = true } }
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());

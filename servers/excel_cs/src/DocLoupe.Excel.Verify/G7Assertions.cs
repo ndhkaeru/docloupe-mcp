@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace DocLoupe.Excel.Verify;
 
-public sealed record ValueAssertion(string Sheet, string Address, bool CheckValue, string? Kind, string? Value, string? Formula);
+public sealed record ValueAssertion(string Sheet, string Address, bool CheckValue, string? Kind, string? Value, string? Formula, bool Unchanged = false);
 
 public static class G7Assertions
 {
@@ -12,7 +12,7 @@ public static class G7Assertions
 
     public static bool IsSupportedNumber(string? value) => CanonicalNumber(value) is not null;
 
-    public static IReadOnlyList<GateIssue> Check(string path, IReadOnlyList<ValueAssertion> assertions)
+    public static IReadOnlyList<GateIssue> Check(string path, IReadOnlyList<ValueAssertion> assertions, string? source = null)
     {
         var issues = new List<GateIssue>();
         foreach (var group in assertions.GroupBy(item => item.Sheet, StringComparer.Ordinal))
@@ -28,10 +28,34 @@ public static class G7Assertions
                 issues.AddRange(group.Select(item => new GateIssue("G7", "ASSERT_SHEET_MISSING", $"{group.Key}!{item.Address}")));
                 continue;
             }
+            Dictionary<string, CellRead>? originals = null;
+            if (source is not null && group.Any(item => item.Unchanged))
+            {
+                try
+                {
+                    originals = P2aGates.ReadCells(source, group.Key, group.Where(item => item.Unchanged)
+                        .Select(item => item.Address)).ToDictionary(cell => cell.Address, StringComparer.Ordinal);
+                }
+                catch (InvalidOperationException)
+                {
+                    issues.AddRange(group.Where(item => item.Unchanged).Select(item =>
+                        new GateIssue("G7", "ASSERT_SOURCE_SHEET_MISSING", $"{group.Key}!{item.Address}")));
+                }
+            }
             foreach (var assertion in group)
             {
                 cells.TryGetValue(assertion.Address, out var actual);
                 var target = $"{group.Key}!{assertion.Address}";
+                if (assertion.Unchanged)
+                {
+                    if (source is null) issues.Add(new GateIssue("G7", "ASSERT_SOURCE_REQUIRED", target));
+                    else if (originals is not null)
+                    {
+                        originals.TryGetValue(assertion.Address, out var original);
+                        if (original != actual) issues.Add(new GateIssue("G7", "ASSERT_CHANGED", target));
+                    }
+                    continue;
+                }
                 if (assertion.Formula is not null && actual?.Formula != assertion.Formula)
                     issues.Add(new GateIssue("G7", "ASSERT_FORMULA_MISMATCH", target));
                 if (assertion.CheckValue && actual?.Kind == "formula" &&

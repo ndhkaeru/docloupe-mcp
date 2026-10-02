@@ -161,6 +161,81 @@ public sealed class SaveAssertionTests
     }
 
     [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void G7UnchangedChecksExistingAndMissingCellsAndBlocksEdits(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-g7-unchanged-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, variant + ".xlsx");
+            foreach (var (target, operation) in new[]
+            {
+                ("B1", new SetValueOp("Sheet1", "B1", "number", "27")),
+                ("F9", new SetValueOp("Sheet1", "F9", "number", "27")),
+                ("D3", new SetValueOp("Sheet1", "D3", "blank", null, Operation: "clear", RemoveCell: true))
+            })
+            {
+                using var sessions = new ExcelSessions();
+                var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+                sessions.Apply(id, 0, [operation]);
+                var assertions = new[] { "A1", "B1", "C1", "D3", "F9" }
+                    .Select(address => Unchanged("Sheet1!" + address)).ToArray();
+                var output = Path.Combine(directory, target + ".xlsx");
+                var blocked = Assert.Throws<SaveBlockedException>(() => sessions.Save(id, output, assertions));
+                Assert.Equal(["Sheet1!" + target], blocked.Issues.Select(issue => issue.Detail).ToArray());
+                Assert.All(blocked.Issues, issue => Assert.Equal("ASSERT_CHANGED", issue.Code));
+                Assert.False(File.Exists(output));
+                Assert.Empty(Directory.GetFiles(directory, "*.staging"));
+
+                Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(id, output,
+                    assertions.Where(assertion => assertion.Address != target).ToArray()))
+                    .GetProperty("status").GetString());
+                sessions.Close(id, true);
+            }
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void G7UnchangedChecksReferencedSharedStringMarkupNotJustValue()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-g7-phonetic-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            var output = Path.Combine(directory, "phonetic.xlsx");
+            using (var store = new PackageStore(source))
+            {
+                var part = "xl/sharedStrings.xml";
+                var xml = Encoding.UTF8.GetString(store.Read(part));
+                Assert.Contains("phoneticPr fontId=\"0\"", xml);
+                store.Set(part, Encoding.UTF8.GetBytes(xml.Replace("phoneticPr fontId=\"0\"",
+                    "phoneticPr fontId=\"1\"", StringComparison.Ordinal)));
+                store.Save(output);
+            }
+            Assert.Equal("hello", Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["A1"])).Value);
+            Assert.Contains(G7Assertions.Check(output, [Unchanged("Sheet1!A1")], source),
+                issue => issue.Code == "ASSERT_CHANGED");
+            Assert.Empty(G7Assertions.Check(output, [Unchanged("Sheet1!B1")], source));
+            Assert.Contains(G7Assertions.Check(output, [Unchanged("Sheet1!A1")]),
+                issue => issue.Code == "ASSERT_SOURCE_REQUIRED");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":false}")]
+    [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":null}")]
+    [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":\"true\"}")]
+    [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":true,\"except\":[\"value\"]}")]
+    [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":true,\"equals\":{\"value\":\"hello\"}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"display\":\"27\"}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"value\":27},\"unchanged\":true}")]
     [InlineData("{\"target\":\"B1\",\"equals\":{\"value\":27}}")]
@@ -205,4 +280,7 @@ public sealed class SaveAssertionTests
     {
         Target = target, Expected = JsonSerializer.SerializeToElement(equals)
     };
+
+    private static ValueAssertion Unchanged(string target) => JsonSerializer.Deserialize<SaveAssertionRequest>(
+        JsonSerializer.Serialize(new { target, unchanged = true }))!.Normalize();
 }

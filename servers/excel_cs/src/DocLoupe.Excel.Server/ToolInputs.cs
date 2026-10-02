@@ -213,15 +213,23 @@ public sealed class SaveAssertionRequest
     [JsonPropertyName("target")]
     public required string Target { get; init; }
     [JsonPropertyName("equals")]
-    public required JsonElement Expected { get; init; }
+    public JsonElement Expected { get; init; }
+    [JsonPropertyName("unchanged")]
+    public JsonElement Unchanged { get; init; }
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Other { get; init; }
 
     public DocLoupe.Excel.Verify.ValueAssertion Normalize()
     {
-        if (Other is { Count: > 0 }) throw new NotSupportedException("Only equals assertions are supported");
+        if (Other is { Count: > 0 }) throw new NotSupportedException("Unsupported assertion fields");
         var sheet = CellAddress.SheetName(Target) ?? throw new ArgumentException("Assertion target must be sheet-qualified");
         var address = CellAddress.Parse(Target).ToString();
+        if (Unchanged.ValueKind != JsonValueKind.Undefined)
+        {
+            if (Unchanged.ValueKind != JsonValueKind.True || Expected.ValueKind != JsonValueKind.Undefined)
+                throw new NotSupportedException("Only standalone unchanged: true is supported");
+            return new DocLoupe.Excel.Verify.ValueAssertion(sheet, address, false, null, null, null, Unchanged: true);
+        }
         if (Expected.ValueKind != JsonValueKind.Object) throw new ArgumentException("Assertion equals must be an object");
         var properties = Expected.EnumerateObject().ToArray();
         if (properties.Length == 0 || properties.GroupBy(property => property.Name).Any(group => group.Count() > 1) ||

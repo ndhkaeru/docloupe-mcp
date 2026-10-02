@@ -8,7 +8,8 @@ public sealed record DeclaredByteSpan(string Part, int Start, int End, byte[] Be
 public sealed record FormulaCacheExpectation(string Type, string Value);
 public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCacheExpectation? ExplicitCache = null);
 public sealed record CellRead(string Address, string Kind, string? Value, string? Formula,
-    [property: JsonIgnore] string? CacheType = null, [property: JsonIgnore] string? CacheRawValue = null);
+    [property: JsonIgnore] string? CacheType = null, [property: JsonIgnore] string? CacheRawValue = null,
+    [property: JsonIgnore] string? CellMarkup = null, [property: JsonIgnore] string? SharedMarkup = null);
 public sealed record GateIssue(string Gate, string Code, string Detail);
 
 public static class P2aGates
@@ -219,9 +220,9 @@ public static class P2aGates
         var part = Resolve(main, relationships[sheet.GetAttribute("id", Office)].Target);
         var document = Load(entries[part]);
         var sst = relationships.Values.FirstOrDefault(item => item.Type.EndsWith("/sharedStrings", StringComparison.Ordinal));
-        string[] shared = sst.Type is null ? [] : Load(entries[Resolve(main, sst.Target)])
-            .GetElementsByTagName("si", Main).OfType<XmlElement>()
-            .Select(TextValue).ToArray();
+        XmlElement[] sharedItems = sst.Type is null ? [] : Load(entries[Resolve(main, sst.Target)])
+            .GetElementsByTagName("si", Main).OfType<XmlElement>().ToArray();
+        var shared = sharedItems.Select(TextValue).ToArray();
         var requested = addresses.ToHashSet(StringComparer.Ordinal);
         return document.GetElementsByTagName("c", Main).OfType<XmlElement>()
             .Where(item => requested.Contains(item.GetAttribute("r"))).Select(item =>
@@ -241,7 +242,9 @@ public static class P2aGates
                 {
                     "s" => "text", "inlineStr" => "inline", "b" => "boolean", "e" => "error",
                     _ when value is null => "blank", _ => "number"
-                }, value, formula, formula is null ? null : type, formula is null ? null : scalar);
+                }, value, formula, formula is null ? null : type, formula is null ? null : scalar,
+                    item.OuterXml, type == "s" && int.TryParse(scalar, out var sharedIndex) &&
+                    sharedIndex >= 0 && sharedIndex < sharedItems.Length ? sharedItems[sharedIndex].OuterXml : null);
             }).ToArray();
     }
 

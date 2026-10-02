@@ -159,7 +159,7 @@ public sealed class ExcelSessions : IDisposable
                 reports.AddRange(AdvancedPartGate.Check(session.Path, staging,
                     result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
                     item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null))));
-                if (reports.Count == 0) reports.AddRange(G7Assertions.Check(staging, assertions ?? []));
+                if (reports.Count == 0) reports.AddRange(G7Assertions.Check(staging, assertions ?? [], session.Path));
                 if (reports.Count > 0) throw new SaveBlockedException(reports);
                 if (schema.Gaps.Count > 0) throw new SaveBlockedException(schema.Gaps.Select(issue => new GateIssue("G2", issue.Code, issue.Detail)).ToArray());
                 var readback = result.Intent.GroupBy(item => item.Sheet).ToDictionary(group => group.Key,
