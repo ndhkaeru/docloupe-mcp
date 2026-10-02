@@ -36,7 +36,9 @@ try
             new { op = "set_values", sheet = "Sheet1", target = "D4", values = new object?[][] { [4, "batch"] } },
             new { op = "set_value", sheet = "Sheet1", target = "F5:G5", value = 6 },
             new { op = "fill", sheet = "Sheet1", target = "H6:I6", value = 8 },
-            new { op = "fill", sheet = "Sheet1", target = "J7:K7", series = new { start = -3, step = 2 } } }
+            new { op = "fill", sheet = "Sheet1", target = "J7:K7", series = new { start = -3, step = 2 } },
+            new { op = "clear", sheet = "Sheet1", target = "A1", what = new[] { "values" }, remove_cells = false },
+            new { op = "clear", sheet = "Sheet1", target = "L8" } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
     var status = await client.CallToolAsync("excel_status", new Dictionary<string, object?> { ["session"] = session });
@@ -64,7 +66,9 @@ try
             new { target = "Sheet1!H6", equals = new { value = 8 } },
             new { target = "Sheet1!I6", equals = new { value = 8 } },
             new { target = "Sheet1!J7", equals = new { value = -3 } },
-            new { target = "Sheet1!K7", equals = new { value = -1 } } }
+            new { target = "Sheet1!K7", equals = new { value = -1 } },
+            new { target = "Sheet1!A1", equals = new { value = System.Text.Json.JsonSerializer.SerializeToElement<object?>(null) } },
+            new { target = "Sheet1!L8", equals = new { value = System.Text.Json.JsonSerializer.SerializeToElement<object?>(null) } } }
     });
     if (saved.IsError == true || saved.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "verified")
         throw new InvalidOperationException("Verified save failed: " + saved.StructuredContent?.GetRawText());

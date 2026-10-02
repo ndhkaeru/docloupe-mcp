@@ -4,7 +4,7 @@ using System.Xml;
 namespace DocLoupe.Excel.Verify;
 
 public sealed record DeclaredByteSpan(string Part, int Start, int End, byte[] Before, byte[] After);
-public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value);
+public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false);
 public sealed record CellRead(string Address, string Kind, string? Value, string? Formula);
 public sealed record GateIssue(string Gate, string Code, string Detail);
 
@@ -155,8 +155,17 @@ public static class P2aGates
             {
                 var before = oldSheet.GetElementsByTagName("c", Main).OfType<XmlElement>().SingleOrDefault(item => item.GetAttribute("r") == cell.Address);
                 var after = newSheet.GetElementsByTagName("c", Main).OfType<XmlElement>().SingleOrDefault(item => item.GetAttribute("r") == cell.Address);
-                if (after is null) { issues.Add(new("G5", "CELL_MISSING", $"{group.Key}!{cell.Address}")); continue; }
-                if (before is null) continue;
+                if (after is null)
+                {
+                    if (before is null && cell.AllowMissing) continue;
+                    issues.Add(new("G5", "CELL_MISSING", $"{group.Key}!{cell.Address}"));
+                    continue;
+                }
+                if (before is null)
+                {
+                    if (cell.AllowMissing) issues.Add(new("G5", "UNEXPECTED_CELL_CREATED", $"{group.Key}!{cell.Address}"));
+                    continue;
+                }
                 static string[] UnchangedAttributes(XmlElement element) => element.Attributes.OfType<XmlAttribute>()
                     .Where(attribute => attribute.NamespaceURI != "http://www.w3.org/2000/xmlns/"
                         && (attribute.NamespaceURI != "" || attribute.LocalName != "t"))
@@ -234,7 +243,14 @@ public static class P2aGates
                     .SingleOrDefault(item => item.GetAttribute("r") == expectation.Address);
                 if (cell is null)
                 {
+                    if (expectation.AllowMissing && expectation.Kind == "blank") continue;
                     issues.Add(new("G4", "INTENT_MISSING", $"{group.Key}!{expectation.Address}"));
+                    continue;
+                }
+                if (expectation.AllowMissing && expectation.Kind == "blank" &&
+                    (cell.HasAttribute("t") || cell.ChildNodes.OfType<XmlElement>().Any()))
+                {
+                    issues.Add(new("G4", "INTENT_MISMATCH", $"{group.Key}!{expectation.Address}: clear left cell content or type"));
                     continue;
                 }
                 var formula = cell.GetElementsByTagName("f", Main).OfType<XmlElement>().FirstOrDefault();

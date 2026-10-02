@@ -32,13 +32,32 @@ public sealed class SetValueRequest
     public string? Reference { get; init; }
     [JsonPropertyName("cache")]
     public JsonElement? Cache { get; init; }
+    [JsonPropertyName("what")]
+    public JsonElement What { get; init; }
+    [JsonPropertyName("remove_cells")]
+    public JsonElement RemoveCells { get; init; }
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Other { get; init; }
 
     public SetValueOp Normalize(string? defaultSheet)
     {
-        if (Op is not ("set_value" or "set_formula")) throw new NotSupportedException("Only set_value and normal set_formula are supported");
+        if (Op is not ("set_value" or "set_formula" or "clear")) throw new NotSupportedException("Unsupported cell operation");
         if (Other is { Count: > 0 }) throw new NotSupportedException("Unsupported cell operation fields");
+        if (Op == "clear")
+        {
+            if (Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Undefined ||
+                Series.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
+                Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null ||
+                RemoveCells.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.False) ||
+                What.ValueKind != JsonValueKind.Undefined &&
+                (What.ValueKind != JsonValueKind.Array || What.GetArrayLength() != 1 ||
+                 What[0].ValueKind != JsonValueKind.String || What[0].GetString() != "values"))
+                throw new NotSupportedException("Only clear values with remove_cells: false is supported");
+            var clearSheet = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
+            return new SetValueOp(clearSheet, CellAddress.Parse(Target).ToString(), "blank", null, Operation: "clear");
+        }
+        if (What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
+            throw new NotSupportedException("what and remove_cells require clear");
         if (Values.ValueKind != JsonValueKind.Undefined) throw new NotSupportedException("values requires set_values");
         if (Series.ValueKind != JsonValueKind.Undefined) throw new NotSupportedException("series requires fill");
         var name = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
@@ -81,11 +100,12 @@ public sealed class SetValueRequest
         var hasSeries = Series.ValueKind != JsonValueKind.Undefined;
         if (Op == "set_value" && hasSeries) throw new NotSupportedException("series requires fill");
         if (Op == "fill" && (!Target.Contains(':') || hasValue == hasSeries ||
+            What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined ||
             Values.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
             Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null ||
             Other is { Count: > 0 }))
             throw new NotSupportedException("fill requires exactly one of value or an integer series on a rectangular range");
-        if ((Op is "set_value" or "fill") && Target.Contains(':'))
+        if ((Op is "set_value" or "fill" or "clear") && Target.Contains(':'))
         {
             var (sheet, rangeStart, rangeEnd, _) = ParseTargetRange(defaultSheet);
             var count = (long)(rangeEnd.Row - rangeStart.Row + 1) * (rangeEnd.Column - rangeStart.Column + 1);
@@ -96,7 +116,13 @@ public sealed class SetValueRequest
                 for (var column = rangeStart.Column; column <= rangeEnd.Column; column++)
                 {
                     var address = new CellAddress(row, column).ToString();
-                    if (hasSeries)
+                    if (Op == "clear")
+                        broadcast.Add(new SetValueRequest
+                        {
+                            Op = "clear", Sheet = sheet, Target = address, What = What,
+                            RemoveCells = RemoveCells, Other = Other
+                        }.Normalize(sheet));
+                    else if (hasSeries)
                     {
                         long number;
                         try
@@ -117,7 +143,8 @@ public sealed class SetValueRequest
                         {
                             Op = "set_value", Sheet = sheet, Target = address,
                             Value = Value, Values = Values, Series = Series, AsText = AsText, RichPolicy = RichPolicy,
-                            Formula = Formula, FormulaKind = FormulaKind, Reference = Reference, Cache = Cache, Other = Other
+                            Formula = Formula, FormulaKind = FormulaKind, Reference = Reference, Cache = Cache,
+                            What = What, RemoveCells = RemoveCells, Other = Other
                         }.Normalize(sheet) with { Operation = Op });
                 }
             return broadcast.ToArray();
@@ -126,7 +153,8 @@ public sealed class SetValueRequest
         if (Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Array ||
             Series.ValueKind != JsonValueKind.Undefined ||
             AsText || RichPolicy != "reject" || Formula is not null || FormulaKind is not null ||
-            Reference is not null || Cache is not null || Other is { Count: > 0 })
+            Reference is not null || Cache is not null || What.ValueKind != JsonValueKind.Undefined ||
+            RemoveCells.ValueKind != JsonValueKind.Undefined || Other is { Count: > 0 })
             throw new NotSupportedException("set_values requires only a target and rectangular values array");
 
         var (name, first, last, hasRange) = ParseTargetRange(defaultSheet);

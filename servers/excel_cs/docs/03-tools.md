@@ -293,6 +293,8 @@ Effects listed per op are the semantic paths (02 §6) the op **declares**. G4 ch
 | `rich_delete` | `target`, `at: Span` | `.rich`, `.value` |
 | `phonetic_set` | `target`, `runs`, `properties?` | `.phonetic` |
 
+**Current `clear` slice:** only `what: ["values"]` (or omitted) and `remove_cells: false` (or omitted) are supported, for a cell or rectangular range of at most 500 cells. Existing cells retain their style; absent cells remain absent. Clearing an existing formula invalidates its `calcChain` entry; a no-op clear leaves all package part bytes unchanged. Other facets and cell removal fail closed.
+
 **Current P2b slice:** `set_formula` accepts only `kind: "normal"` (or omitted) with `cache: "clear"` (or omitted). It rejects formula-group edits, non-clearing cache modes, and unsupported fields before mutating the session. Existing `set_value` formula objects remain compatible with P2a. `set_value` also broadcasts to a rectangular range (maximum 500 cells); existing per-cell rich-text and merged-cell guards still apply to the whole batch. `set_values` accepts a rectangular matrix (maximum 500 cells) with an exactly matching range or a top-left anchor, and expands to cell edits in one revision. `fill` accepts `value` or row-major integer `series: {start, step}` on a rectangular range of at most 500 cells. Each series result must fit 15 decimal digits; decimal series, `pattern_from`, and additional fill fields fail closed. Bulk formatting/rich-text options are not supported yet; invalid shapes fail before applying any cells.
 
 `Span = { match: string, occurrence?: number | "all" = 1, normalize?: "nfc" | "none" } | { range: [number, number] } | "all"`. Ranges count graphemes (02 §4.2).

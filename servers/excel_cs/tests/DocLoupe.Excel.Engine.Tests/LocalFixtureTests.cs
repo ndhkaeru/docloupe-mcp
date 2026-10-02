@@ -45,6 +45,46 @@ public sealed class LocalFixtureTests
         }
     }
 
+    [Fact]
+    public void LocalSourcesAcceptClearValuesWithoutCreatingAbsentCells()
+    {
+        var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
+        if (string.IsNullOrWhiteSpace(directory)) return;
+        var sources = Directory.GetFiles(directory, "*.*")
+            .Where(path => Path.GetExtension(path) is ".xlsx" or ".xlsm")
+            .Where(path => !Path.GetFileName(path).StartsWith("07-external-", StringComparison.Ordinal))
+            .OrderBy(path => path).ToArray();
+        Assert.Equal(8, sources.Length);
+        foreach (var source in sources)
+        {
+            var output = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(source));
+            try
+            {
+                using var store = new PackageStore(source);
+                var sheet = store.SheetNames()[0];
+                var unusual = Path.GetFileName(source).StartsWith("06", StringComparison.Ordinal) ||
+                    Path.GetFileName(source).StartsWith("07", StringComparison.Ordinal);
+                var address = unusual ? "A1" : "B3";
+                var absent = "XFD1048576";
+                var result = SetValueEngine.Apply(store, [new SetValueOp(sheet, address, "blank", null, Operation: "clear"),
+                    new SetValueOp(sheet, absent, "blank", null, Operation: "clear")]);
+                store.Save(output);
+                var expected = result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind,
+                    item.Value, item.AllowMissing)).ToArray();
+                Assert.Empty(P2aGates.CheckPackage(output, result.ChangedParts));
+                Assert.Empty(P2aGates.CheckIntent(output, expected));
+                Assert.Empty(P2aGates.ReadCells(output, sheet, [absent]));
+                Assert.Empty(P2aGates.CheckTouchedCells(source, output, expected));
+                Assert.Empty(P2aGates.CheckPreservation(source, output, result.Edits.Select(edit =>
+                    new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)),
+                    AddedOrRemoved(source, store, result.ChangedParts)));
+                Assert.Empty(P2aMarkupGate.Check(source, output, result.ChangedParts));
+                Assert.Empty(DetachedValidator.Check(source, output, result.ChangedParts).Issues);
+            }
+            finally { if (File.Exists(output)) File.Delete(output); }
+        }
+    }
+
     private static IEnumerable<string> AddedOrRemoved(string source, PackageStore store, IEnumerable<string> changedParts)
     {
         using var archive = ZipFile.OpenRead(source);

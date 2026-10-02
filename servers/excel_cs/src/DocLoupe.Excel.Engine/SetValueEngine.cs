@@ -8,7 +8,7 @@ using DocLoupe.Excel.Package;
 namespace DocLoupe.Excel.Engine;
 
 public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value");
-public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value);
+public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false);
 public sealed record ApplyResult(IReadOnlyList<ExpectedCell> Intent, IReadOnlyList<ByteEdit> Edits, IReadOnlyList<string> ChangedParts);
 
 public static class SetValueEngine
@@ -20,7 +20,10 @@ public static class SetValueEngine
 
     public static ApplyResult Apply(PackageStore store, IReadOnlyList<SetValueOp> operations)
     {
-        if (operations.Count == 0) throw new ArgumentException("At least one set_value operation is required");
+        if (operations.Count == 0) throw new ArgumentException("At least one cell operation is required");
+        if (operations.Any(operation => operation.Operation == "clear" &&
+            (operation.Kind != "blank" || operation.Value is not null || operation.RichPolicy != "reject" || operation.AsText)))
+            throw new NotSupportedException("Only value-only clear is supported");
         var planned = new Dictionary<string, (byte[] Content, IReadOnlyList<ByteEdit> Edits)>(StringComparer.OrdinalIgnoreCase);
         var intent = new List<ExpectedCell>();
         var strings = new SharedStrings(store);
@@ -69,13 +72,16 @@ public static class SetValueEngine
                     var inline = Direct(cell, "is");
                     var rich = existingShared && strings.IsRich(index) || inline is not null &&
                         inline.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "r" or "rPh" or "phoneticPr");
-                    if (rich && operation.RichPolicy != "replace")
+                    if (rich && operation.RichPolicy != "replace" && operation.Operation != "clear")
                         throw new InvalidDataException("RICH_CONTENT_REQUIRES_REPLACE");
-                    if (existingShared && operation.Kind is not "text") strings.RemoveReference();
-                    var markup = MakeCell(lexical.Document, cell, operation, address, strings);
-                    lexical.Replace(cell, markup);
+                    if (operation.Operation != "clear" || cell.HasAttribute("t") || cell.ChildNodes.OfType<XmlElement>().Any())
+                    {
+                        if (existingShared && operation.Kind is not "text") strings.RemoveReference();
+                        var markup = MakeCell(lexical.Document, cell, operation, address, strings);
+                        lexical.Replace(cell, markup);
+                    }
                 }
-                else
+                else if (operation.Operation != "clear")
                 {
                     var markup = MakeCell(lexical.Document, null, operation, address, strings);
                     if (row is null)
@@ -89,17 +95,21 @@ public static class SetValueEngine
                         added.Add((address, markup));
                     }
                 }
-                intent.Add(new ExpectedCell(operation.Sheet, address.ToString(), operation.Kind, operation.Value));
+                intent.Add(new ExpectedCell(operation.Sheet, address.ToString(), operation.Kind, operation.Value,
+                    operation.Operation == "clear"));
             }
             foreach (var (row, added) in newCells)
                 InsertCells(lexical, row, added);
             if (createdRows.Count > 0)
                 InsertRows(lexical, root, sheetData, rows, createdRows);
             var result = lexical.Finish(part);
-            planned.Add(part, result);
+            if (result.Edits.Count > 0) planned.Add(part, result);
         }
-        strings.Finish(planned);
-        UpdateWorkbook(store, planned, overwrittenFormula);
+        if (planned.Count > 0)
+        {
+            strings.Finish(planned);
+            UpdateWorkbook(store, planned, overwrittenFormula);
+        }
         var edits = planned.Values.SelectMany(value => value.Edits).ToList();
         var deleted = new List<string>();
         if (overwrittenFormula) RemoveCalculationChain(store, planned, edits, deleted);

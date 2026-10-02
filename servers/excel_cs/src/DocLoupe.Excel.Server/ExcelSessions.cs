@@ -148,14 +148,14 @@ public sealed class ExcelSessions : IDisposable
                 var schema = DetachedValidator.Check(session.Path, staging, result.ChangedParts);
                 reports.AddRange(schema.Issues.Select(issue => new GateIssue("G2", issue.Code, issue.Detail)));
                 reports.AddRange(P2aMarkupGate.Check(session.Path, staging, result.ChangedParts));
-                reports.AddRange(P2aGates.CheckIntent(staging, result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value))));
+                reports.AddRange(P2aGates.CheckIntent(staging, result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing))));
                 var addedOrRemoved = result.ChangedParts.Where(part => !store.Contains(part) || !PartExists(session.Path, part));
                 reports.AddRange(P2aGates.CheckPreservation(session.Path, staging,
                     result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)), addedOrRemoved));
                 reports.AddRange(P2aGates.CheckTouchedCells(session.Path, staging,
-                    result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value))));
+                    result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing))));
                 reports.AddRange(AdvancedPartGate.Check(session.Path, staging,
-                    result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value))));
+                    result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing))));
                 if (reports.Count == 0) reports.AddRange(G7Assertions.Check(staging, assertions ?? []));
                 if (reports.Count > 0) throw new SaveBlockedException(reports);
                 if (schema.Gaps.Count > 0) throw new SaveBlockedException(schema.Gaps.Select(issue => new GateIssue("G2", issue.Code, issue.Detail)).ToArray());
