@@ -4,7 +4,7 @@ using System.Xml;
 namespace DocLoupe.Excel.Verify;
 
 public sealed record DeclaredByteSpan(string Part, int Start, int End, byte[] Before, byte[] After);
-public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false);
+public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false);
 public sealed record CellRead(string Address, string Kind, string? Value, string? Formula);
 public sealed record GateIssue(string Gate, string Code, string Detail);
 
@@ -157,8 +157,13 @@ public static class P2aGates
                 var after = newSheet.GetElementsByTagName("c", Main).OfType<XmlElement>().SingleOrDefault(item => item.GetAttribute("r") == cell.Address);
                 if (after is null)
                 {
-                    if (before is null && cell.AllowMissing) continue;
+                    if (before is null && cell.AllowMissing || before is not null && cell.RequireMissing) continue;
                     issues.Add(new("G5", "CELL_MISSING", $"{group.Key}!{cell.Address}"));
+                    continue;
+                }
+                if (cell.RequireMissing)
+                {
+                    issues.Add(new("G5", "CELL_NOT_REMOVED", $"{group.Key}!{cell.Address}"));
                     continue;
                 }
                 if (before is null)
@@ -245,6 +250,11 @@ public static class P2aGates
                 {
                     if (expectation.AllowMissing && expectation.Kind == "blank") continue;
                     issues.Add(new("G4", "INTENT_MISSING", $"{group.Key}!{expectation.Address}"));
+                    continue;
+                }
+                if (expectation.RequireMissing)
+                {
+                    issues.Add(new("G4", "INTENT_PRESENT", $"{group.Key}!{expectation.Address}: cell should have been removed"));
                     continue;
                 }
                 if (expectation.AllowMissing && expectation.Kind == "blank" &&

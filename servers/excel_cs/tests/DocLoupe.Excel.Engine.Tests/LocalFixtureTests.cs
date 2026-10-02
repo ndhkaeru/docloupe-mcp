@@ -45,8 +45,10 @@ public sealed class LocalFixtureTests
         }
     }
 
-    [Fact]
-    public void LocalSourcesAcceptClearValuesWithoutCreatingAbsentCells()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LocalSourcesAcceptClearValuesWithoutCreatingAbsentCells(bool removeCells)
     {
         var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
         if (string.IsNullOrWhiteSpace(directory)) return;
@@ -66,12 +68,14 @@ public sealed class LocalFixtureTests
                     Path.GetFileName(source).StartsWith("07", StringComparison.Ordinal);
                 var address = unusual ? "A1" : "B3";
                 var absent = "XFD1048576";
-                var result = SetValueEngine.Apply(store, [new SetValueOp(sheet, address, "blank", null, Operation: "clear"),
-                    new SetValueOp(sheet, absent, "blank", null, Operation: "clear")]);
+                var result = SetValueEngine.Apply(store, [new SetValueOp(sheet, address, "blank", null,
+                    Operation: "clear", RemoveCell: removeCells),
+                    new SetValueOp(sheet, absent, "blank", null, Operation: "clear", RemoveCell: removeCells)]);
                 store.Save(output);
                 var expected = result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind,
-                    item.Value, item.AllowMissing)).ToArray();
+                    item.Value, item.AllowMissing, item.RequireMissing)).ToArray();
                 Assert.Empty(P2aGates.CheckPackage(output, result.ChangedParts));
+                if (removeCells) Assert.Empty(P2aGates.ReadCells(output, sheet, [address]));
                 Assert.Empty(P2aGates.CheckIntent(output, expected));
                 Assert.Empty(P2aGates.ReadCells(output, sheet, [absent]));
                 Assert.Empty(P2aGates.CheckTouchedCells(source, output, expected));

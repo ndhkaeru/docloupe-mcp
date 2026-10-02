@@ -37,6 +37,29 @@ public sealed class ClearTests
         sessions.Close(id, true);
     }
 
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void RemovingCellsAcrossSyntheticFixturesKeepsOtherParts(string variant)
+    {
+        using var fixture = new Fixture();
+        var source = fixture.Source(variant);
+        using var sessions = new ExcelSessions();
+        var id = Open(sessions, source);
+        var request = Request("""{"op":"clear","target":"Sheet1!A1:D3","what":["values"],"remove_cells":true}""");
+        var applied = sessions.Apply(id, 0, request.NormalizeMany(null));
+        var intent = (IReadOnlyList<ExpectedCell>)applied.GetType().GetProperty("intent")!.GetValue(applied)!;
+        Assert.All(intent, item => Assert.True(item.RequireMissing));
+        var output = fixture.Output("removed");
+        sessions.Save(id, output);
+        Assert.Empty(P2aGates.ReadCells(output, "Sheet1", ["A1", "B1", "C1", "D3", "A2"]));
+        sessions.Close(id, true);
+    }
+
     [Fact]
     public void ClearingStyledCellKeepsStyleAndClearingAbsentCellChangesNoPart()
     {
@@ -95,15 +118,17 @@ public sealed class ClearTests
             using var chain = zip.CreateEntry("xl/calcChain.xml").Open();
             chain.Write(Encoding.UTF8.GetBytes("<calcChain xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><c r=\"C1\" i=\"1\"/></calcChain>"));
         }
-        foreach (var (target, removed) in new[] { ("B1", false), ("C1", true), ("E5", false) })
+        foreach (var (target, removed, removeCell) in new[] { ("B1", false, false), ("C1", true, false),
+                     ("E5", false, false), ("C1", true, true) })
         {
             using var sessions = new ExcelSessions();
             var id = Open(sessions, source);
-            sessions.Apply(id, 0, Request($"{{\"op\":\"clear\",\"sheet\":\"Sheet1\",\"target\":\"{target}\"}}").NormalizeMany(null));
-            var path = fixture.Output(target);
+            sessions.Apply(id, 0, Request($"{{\"op\":\"clear\",\"sheet\":\"Sheet1\",\"target\":\"{target}\",\"remove_cells\":{removeCell.ToString().ToLowerInvariant()}}}").NormalizeMany(null));
+            var path = fixture.Output(target + removeCell);
             sessions.Save(id, path);
             using var archive = ZipFile.OpenRead(path);
             Assert.Equal(removed, archive.GetEntry("xl/calcChain.xml") is null);
+            if (removeCell) Assert.Empty(P2aGates.ReadCells(path, "Sheet1", [target]));
             sessions.Close(id, true);
         }
     }
@@ -112,7 +137,7 @@ public sealed class ClearTests
     [InlineData("{\"op\":\"clear\",\"target\":\"B1\",\"what\":[\"formats\"]}")]
     [InlineData("{\"op\":\"clear\",\"target\":\"B1\",\"what\":[\"values\",\"formats\"]}")]
     [InlineData("{\"op\":\"clear\",\"target\":\"B1\",\"what\":[]}")]
-    [InlineData("{\"op\":\"clear\",\"target\":\"B1\",\"remove_cells\":true}")]
+    [InlineData("{\"op\":\"clear\",\"target\":\"B1\",\"remove_cells\":1}")]
     [InlineData("{\"op\":\"clear\",\"target\":\"B1\",\"remove_cells\":null}")]
     [InlineData("{\"op\":\"clear\",\"target\":\"B1\",\"value\":null}")]
     [InlineData("{\"op\":\"clear\",\"target\":\"B1\",\"rich_policy\":\"replace\"}")]
@@ -130,6 +155,8 @@ public sealed class ClearTests
         Assert.Throws<NotSupportedException>(() => SetValueEngine.Apply(store,
             [new SetValueOp("Sheet1", "B1", "number", "7", Operation: "clear")]));
         Assert.Empty(store.ChangedParts);
+        Assert.Throws<NotSupportedException>(() => SetValueEngine.Apply(store,
+            [new SetValueOp("Sheet1", "B1", "blank", null, RemoveCell: true)]));
     }
 
     [Fact]
@@ -139,6 +166,10 @@ public sealed class ClearTests
         var source = fixture.Source("default");
         Assert.Contains(P2aGates.CheckIntent(source, [new CellExpectation("Sheet1", "B1", "blank", null, true)]),
             issue => issue.Code == "INTENT_MISMATCH");
+        var required = new CellExpectation("Sheet1", "B1", "blank", null, true, true);
+        Assert.Contains(P2aGates.CheckIntent(source, [required]), issue => issue.Code == "INTENT_PRESENT");
+        Assert.Contains(P2aGates.CheckTouchedCells(source, source, [required]),
+            issue => issue.Code == "CELL_NOT_REMOVED");
         var missing = fixture.Output("missing");
         File.Copy(source, missing);
         using (var zip = ZipFile.Open(missing, ZipArchiveMode.Update))

@@ -48,13 +48,14 @@ public sealed class SetValueRequest
             if (Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Undefined ||
                 Series.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
                 Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null ||
-                RemoveCells.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.False) ||
+                RemoveCells.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.False or JsonValueKind.True) ||
                 What.ValueKind != JsonValueKind.Undefined &&
                 (What.ValueKind != JsonValueKind.Array || What.GetArrayLength() != 1 ||
                  What[0].ValueKind != JsonValueKind.String || What[0].GetString() != "values"))
                 throw new NotSupportedException("Only clear values with remove_cells: false is supported");
             var clearSheet = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
-            return new SetValueOp(clearSheet, CellAddress.Parse(Target).ToString(), "blank", null, Operation: "clear");
+            return new SetValueOp(clearSheet, CellAddress.Parse(Target).ToString(), "blank", null,
+                Operation: "clear", RemoveCell: RemoveCells.ValueKind == JsonValueKind.True);
         }
         if (What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
             throw new NotSupportedException("what and remove_cells require clear");
