@@ -36,6 +36,20 @@ try
     if (stale.IsError != true || stale.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PRECONDITION_FAILED" ||
         stale.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("index").GetInt32() != 0)
         throw new InvalidOperationException("MCP precondition failure was not structured: " + stale.StructuredContent?.GetRawText());
+    var expandedFailure = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
+        ["ops"] = new object[]
+        {
+            new { op = "set_value", target = "F5:G5", value = 6 },
+            new { op = "clear", target = "B1", expect = new { value = 0 } }
+        }
+    });
+    if (expandedFailure.IsError != true ||
+        expandedFailure.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PRECONDITION_FAILED" ||
+        expandedFailure.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("index").GetInt32() != 1)
+        throw new InvalidOperationException("Expanded batch reported a cell index instead of the request index: "
+            + expandedFailure.StructuredContent?.GetRawText());
     var applied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",

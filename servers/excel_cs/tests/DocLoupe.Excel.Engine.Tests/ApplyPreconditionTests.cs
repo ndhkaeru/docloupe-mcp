@@ -117,6 +117,42 @@ public sealed class ApplyPreconditionTests
     }
 
     [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void ExpandedRangeReportsOriginalRequestIndexWithoutApplyingAnyCells(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-range-index-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            var requests = new[]
+            {
+                JsonSerializer.Deserialize<SetValueRequest>("""{"op":"set_value","target":"Sheet1!F5:G5","value":7}""")!,
+                JsonSerializer.Deserialize<SetValueRequest>("""{"op":"clear","target":"Sheet1!B1","expect":{"value":0}}""")!
+            };
+            var expanded = requests.SelectMany((request, index) => request.NormalizeMany(null)
+                .Select(cell => cell with { SourceIndex = index })).ToArray();
+            Assert.Equal(3, expanded.Length);
+            var failure = Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0, expanded));
+            Assert.Equal(1, failure.Index);
+            Assert.Equal("Sheet1!B1", failure.Target);
+            Assert.Equal("42", failure.Actual?.Value);
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            Assert.Empty(JsonSerializer.SerializeToElement(sessions.Read(id, "Sheet1", ["F5", "G5"]))
+                .GetProperty("cells").EnumerateArray());
+            sessions.Close(id, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":null}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":""}}""")]

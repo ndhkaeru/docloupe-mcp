@@ -98,7 +98,8 @@ public sealed class ExcelSessions : IDisposable
                         CellRead? actual;
                         try { actual = P2aGates.ReadCells(basePath, operation.Sheet, [operation.Address]).SingleOrDefault(); }
                         catch (InvalidOperationException) { actual = null; }
-                        throw new PreconditionFailedException(index, operation.Sheet + "!" + operation.Address, expected, actual);
+                        throw new PreconditionFailedException(operation.SourceIndex < 0 ? index : operation.SourceIndex,
+                            operation.Sheet + "!" + operation.Address, expected, actual);
                     }
                 }
                 finally { if (basePath != session.Path) File.Delete(basePath); }
