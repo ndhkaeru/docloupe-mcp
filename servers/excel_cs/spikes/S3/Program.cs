@@ -17,6 +17,14 @@ try
     Console.WriteLine("tools=" + string.Join(',', tools.Select(tool => tool.Name)));
     if (!tools.Any(tool => tool.Name == "excel_undo")) throw new InvalidOperationException("Undo tool is missing");
     if (!tools.Any(tool => tool.Name == "excel_status")) throw new InvalidOperationException("Status tool is missing");
+    if (!tools.Any(tool => tool.Name == "excel_peek")) throw new InvalidOperationException("Peek tool is missing");
+    var peek = await client.CallToolAsync("excel_peek", new Dictionary<string, object?>
+    {
+        ["path"] = source, ["detail"] = "preview", ["sheet"] = "Sheet1", ["max_rows"] = 3, ["max_cols"] = 4
+    });
+    if (peek.IsError == true || peek.StructuredContent?.GetProperty("data").GetProperty("preview")[0]
+        .GetProperty("markdown").GetString()?.Contains("hello", StringComparison.Ordinal) != true)
+        throw new InvalidOperationException("Sessionless peek failed: " + peek.StructuredContent?.GetRawText());
     var emptyStatus = await client.CallToolAsync("excel_status", new Dictionary<string, object?>());
     if (emptyStatus.IsError == true || emptyStatus.StructuredContent?.GetProperty("data").GetProperty("sessions").GetArrayLength() != 0)
         throw new InvalidOperationException("Empty status failed: " + emptyStatus.StructuredContent?.GetRawText()

@@ -154,6 +154,26 @@ public sealed class WorkbookReaderTests
         }
     }
 
+    [Fact]
+    public void SelectsRequestedSheetAndBoundsThePreview()
+    {
+        var path = CreateWorkbook("<x:row r='1'><x:c r='A1'><x:v>first</x:v></x:c></x:row>",
+            secondSheetContent: "<x:row r='1'><x:c r='A1'><x:v>second</x:v></x:c><x:c r='B1'><x:v>outside</x:v></x:c></x:row>");
+        try
+        {
+            var workbook = WorkbookReader.Peek(path, maxCells: 2, sheetName: "Second", maxRows: 1, maxColumns: 1);
+            Assert.Equal(2, workbook.Sheets.Count);
+            Assert.Equal("second", Assert.Single(workbook.FirstSheetCells).Value);
+            Assert.Throws<KeyNotFoundException>(() => WorkbookReader.Peek(path, sheetName: "Missing"));
+            Assert.Throws<ArgumentOutOfRangeException>(() => WorkbookReader.Peek(path, maxRows: 0));
+            Assert.Equal("unverified", WorkbookReader.VerifyPartial(path).Status);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData("0", "漢字")]
     [InlineData("1", "Other")]
@@ -198,21 +218,28 @@ public sealed class WorkbookReaderTests
         string? workbookTarget = null, string sheetTarget = "worksheets/sheet1.xml",
         string sheetPart = "xl/worksheets/sheet1.xml", bool includeRoot = true,
         string rootRelationshipType = "officeDocument", string sheetRelationshipType = "worksheet",
-        string? sharedStringsXml = null)
+        string? sharedStringsXml = null, string? secondSheetContent = null)
     {
         var path = Path.Combine(AppContext.BaseDirectory, $"read-probe-{Guid.NewGuid():N}.xlsx");
         using var archive = new ZipArchive(File.Create(path), ZipArchiveMode.Create);
         Write(archive, "[Content_Types].xml", "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'/>");
         if (includeRoot)
             Write(archive, "_rels/.rels", $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId0' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/{rootRelationshipType}' Target='{workbookTarget ?? workbookPart}'/></Relationships>");
-        Write(archive, workbookPart, "<x:workbook xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><x:sheets><x:sheet name='S' sheetId='1' r:id='rId1'/></x:sheets></x:workbook>");
+        var secondSheet = secondSheetContent is null ? "" : "<x:sheet name='Second' sheetId='2' r:id='rId3'/>";
+        Write(archive, workbookPart, $"<x:workbook xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><x:sheets><x:sheet name='S' sheetId='1' r:id='rId1'/>{secondSheet}</x:sheets></x:workbook>");
         var slash = workbookPart.LastIndexOf('/');
         var relationshipPart = (slash < 0 ? "" : workbookPart[..(slash + 1)]) + "_rels/" + workbookPart[(slash + 1)..] + ".rels";
         var sharedRelationship = sharedStringsXml is null ? "" : "<Relationship Id='rId2' Target='sharedStrings.xml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings'/>";
-        Write(archive, relationshipPart, $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Target='{sheetTarget}' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/{sheetRelationshipType}'/>{sharedRelationship}</Relationships>");
+        var secondRelationship = secondSheetContent is null ? "" : "<Relationship Id='rId3' Target='worksheets/sheet2.xml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet'/>";
+        Write(archive, relationshipPart, $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Target='{sheetTarget}' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/{sheetRelationshipType}'/>{sharedRelationship}{secondRelationship}</Relationships>");
         if (sharedStringsXml is not null)
             Write(archive, (slash < 0 ? "" : workbookPart[..(slash + 1)]) + "sharedStrings.xml", sharedStringsXml);
         Write(archive, sheetPart, $"<x:worksheet xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><x:sheetData>{sheetDataContent}</x:sheetData></x:worksheet>");
+        if (secondSheetContent is not null)
+        {
+            var secondPart = (slash < 0 ? "" : workbookPart[..(slash + 1)]) + "worksheets/sheet2.xml";
+            Write(archive, secondPart, $"<x:worksheet xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><x:sheetData>{secondSheetContent}</x:sheetData></x:worksheet>");
+        }
         return path;
     }
 

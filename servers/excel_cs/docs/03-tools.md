@@ -535,6 +535,8 @@ input  { path: string, detail?: "info" | "summary" | "preview" = "summary",
 output data { sheets: {...}[], features?: {...}, preview?: { sheet: string, markdown: string }[] }
 ```
 
+**Current P1 slice (not the full contract above):** `info` and `summary` expose sheet names, order, state and part path; `preview` adds top-left Markdown for the selected sheet (first sheet by default). Limits are 100 rows, 20 columns and 2,000 cells; responses include `partial: true` and `unverified: ["used_range", "features"]` rather than implying that those fields were inspected. No session is created.
+
 ### 6.5 `convert_to_markdown`
 
 ```ts

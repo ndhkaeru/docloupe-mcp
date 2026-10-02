@@ -36,6 +36,49 @@ public sealed class ExcelSessions : IDisposable
         return new { session = id, revision = 0, path = full, sheets };
     }
 
+    public object Peek(string path, string detail = "summary", string? sheet = null, int maxRows = 20, int maxCols = 10)
+    {
+        if (detail is not ("info" or "summary" or "preview")) throw new ArgumentException("Invalid peek detail");
+        if (maxRows is < 1 or > 100 || maxCols is < 1 or > 20 || maxRows * maxCols > 2000)
+            throw new ArgumentOutOfRangeException(nameof(maxRows), "Preview is limited to 100 rows, 20 columns and 2000 cells");
+        var full = Path.GetFullPath(path);
+        if (!File.Exists(full)) throw new FileNotFoundException("Workbook not found", full);
+        if (Path.GetExtension(full).ToLowerInvariant() is not (".xlsx" or ".xlsm" or ".xltx" or ".xltm"))
+            throw new NotSupportedException("Only OOXML workbooks are supported");
+        var workbook = WorkbookReader.Peek(full, detail == "preview" ? maxRows * maxCols : 0, sheet, maxRows, maxCols);
+        var sheets = workbook.Sheets.Select((item, index) => new { name = item.Name, index, state = item.State, part = item.Part }).ToArray();
+        if (detail != "preview")
+            return new { sheets, partial = true, unverified = new[] { "used_range", "features" } };
+        var selected = sheet ?? workbook.Sheets.FirstOrDefault()?.Name;
+        var preview = selected is null ? Array.Empty<object>() : new object[] { new { sheet = selected, markdown = PreviewMarkdown(workbook.FirstSheetCells, maxRows, maxCols) } };
+        return new { sheets, preview, partial = true, unverified = new[] { "used_range", "features" } };
+    }
+
+    private static string PreviewMarkdown(IReadOnlyList<CellSummary> cells, int rows, int columns)
+    {
+        var lookup = cells.ToDictionary(cell => cell.Address, StringComparer.OrdinalIgnoreCase);
+        var text = new System.Text.StringBuilder("| row |");
+        for (var column = 1; column <= columns; column++)
+            text.Append(' ').Append(new CellAddress(1, column).ToString()[..^1]).Append(" |");
+        text.AppendLine().Append("| --- |");
+        for (var column = 0; column < columns; column++) text.Append(" --- |");
+        for (var row = 1; row <= rows; row++)
+        {
+            text.AppendLine().Append("| ").Append(row).Append(" |");
+            for (var column = 1; column <= columns; column++)
+            {
+                var address = new CellAddress(row, column).ToString();
+                lookup.TryGetValue(address, out var cell);
+                var value = cell?.Value ?? (cell?.Formula is null ? "" : "=" + cell.Formula);
+                text.Append(' ').Append(value.Replace("\\", "\\\\", StringComparison.Ordinal)
+                    .Replace("|", "\\|", StringComparison.Ordinal)
+                    .Replace("\r\n", "<br>", StringComparison.Ordinal)
+                    .Replace('\n', ' ').Replace('\r', ' ')).Append(" |");
+            }
+        }
+        return text.ToString();
+    }
+
     public object Status(string? id = null)
     {
         if (id is null)

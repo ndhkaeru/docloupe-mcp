@@ -42,7 +42,7 @@
 
 ## 3. Phần còn lại của mục tiêu port
 
-- [ ] **P0/P1 đầy đủ:** chốt các spike S1–S9 chưa đạt exit criteria; hoàn tất `excel_peek`/`find`/`inspect`/`verify` độc lập, các view/read semantics còn thiếu; kiểm trên corruption/equivalence corpus và đối chiếu Python. Những phần đang phục vụ P2a không tự động hoàn thành P1.
+- [ ] **P0/P1 đầy đủ:** chốt các spike S1–S9 chưa đạt exit criteria; `excel_peek` hiện trả info/summary tối giản và preview Markdown đọc-only (tối đa 100 hàng × 20 cột/2.000 ô, báo `partial` và `unverified` cho used range/features); chưa đủ hợp đồng `features`, used range hoặc `excel_find`/`excel_inspect`/`excel_verify`, các view/read semantics còn thiếu; cần kiểm corruption/equivalence corpus và đối chiếu Python. Những phần đang phục vụ P2a không tự động hoàn thành P1.
 - [ ] **P3:** thêm row/column, merge, sheet ops, transform-aware verification và formula shifter; differential fuzzing qua ngưỡng đã chốt.
 - [ ] **P4:** tables, conditional formatting, data validation, names, hyperlinks, comments, printing, views, protection, workbook/doc properties.
 - [ ] **P5:** drawings, package/expert ops và `excel_export`, đối chiếu kịch bản EX-01.
@@ -51,7 +51,7 @@
 
 ## 4. Bằng chứng và cách cập nhật checklist
 
-- [x] Ở mốc `9b385dc`, local Windows và Docker Linux chạy **315/315** test. Lát cắt `expect.value` qua **330/330**, sau khi thêm `expect.formula` qua **339/339** test trên cả Windows và Docker Linux (có nguồn fixture local). Sửa index sau range expansion đạt **345/345** test; đọc A1 range giới hạn đạt **358/358** test trên Windows và Docker Linux, MCP stdio smoke; reader OPC/worksheet-link và shared-string preview P1 đạt **380/380** test trên Windows và Docker Linux (bao gồm sáu fixture tổng hợp); parity hẹp chạy trên Windows và Docker Linux cho 6 fixture (1 Python tương đương, 5 khác biệt đã ghi). Schema-order check đã qua ở lát cắt trước. Đây chỉ là bằng chứng cho các lát cắt hiện có, không chứng minh P2b/P3–P7.
+- [x] Ở mốc `9b385dc`, local Windows và Docker Linux chạy **315/315** test. Lát cắt `expect.value` qua **330/330**, sau khi thêm `expect.formula` qua **339/339** test trên cả Windows và Docker Linux (có nguồn fixture local). Sửa index sau range expansion đạt **345/345** test; đọc A1 range giới hạn đạt **358/358** test trên Windows và Docker Linux, MCP stdio smoke; reader OPC/worksheet-link, shared-string preview và `excel_peek` P1 đạt **383/383** test trên Windows và Docker Linux (sáu fixture tổng hợp), schema-order và MCP stdio smoke qua cả hai OS; parity hẹp chạy trên Windows và Docker Linux cho 6 fixture (1 Python tương đương, 5 khác biệt đã ghi). Bản `excel_peek` này vẫn chỉ là lát cắt read-only; `used_range`/`features` được báo `unverified`. Đây chỉ là bằng chứng cho các lát cắt hiện có, không chứng minh P2b/P3–P7.
 - [ ] Chạy CI trên **cả bốn runner** cho commit mới (workflow đã cấu hình, nhưng các commit local này chưa push); macOS local được hoãn theo yêu cầu, không đánh dấu đã kiểm chứng.
 - [ ] S3: đo **model thực nhận** `structuredContent` hay `TextContent` trên từng client đích; smoke SDK chỉ chứng minh giao thức tới client, không chứng minh forwarding vào model.
 - [ ] Ma trận `set_value` với corpus cục bộ `D:\data-test\excel-preservation-fixtures\sources` và bộ tổng hợp: **7/7 test `LocalFixtureTests` qua trên Windows 2026-10-02** (gồm 8 nguồn, set/clear/error/fill, chữ ký); vẫn thiếu báo cáo pass/fail theo từng fixture/gate trước khi đóng tiêu chí release. Ghi rõ 01 lỗi schema baseline, 02/05 Excel từ chối ngay file gốc ([S2b](../spikes/S2b/REPORT.md)).

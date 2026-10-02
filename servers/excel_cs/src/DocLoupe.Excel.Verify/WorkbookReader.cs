@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO.Compression;
 using System.Xml;
+using DocLoupe.Excel.Model;
 
 namespace DocLoupe.Excel.Verify;
 
@@ -17,16 +18,21 @@ public static class WorkbookReader
     private const string PackageRelationshipNamespace = "http://schemas.openxmlformats.org/package/2006/relationships";
     private const string ContentTypeNamespace = "http://schemas.openxmlformats.org/package/2006/content-types";
 
-    public static WorkbookSummary Peek(string path, int maxCells = 24)
+    public static WorkbookSummary Peek(string path, int maxCells = 24, string? sheetName = null,
+        int maxRows = 1048576, int maxColumns = 16384)
     {
         if (maxCells is < 0 or > 2000) throw new ArgumentOutOfRangeException(nameof(maxCells));
+        if (maxRows is < 1 or > 1048576) throw new ArgumentOutOfRangeException(nameof(maxRows));
+        if (maxColumns is < 1 or > 16384) throw new ArgumentOutOfRangeException(nameof(maxColumns));
         using var archive = ZipFile.OpenRead(path);
         if (archive.Entries.GroupBy(entry => entry.FullName, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
             throw new InvalidDataException("Duplicate OPC part");
         var workbookPart = LocateWorkbookPart(archive);
         var relationships = ReadWorkbookRelationships(archive, workbookPart);
         var sheets = ReadSheets(archive, workbookPart, relationships);
-        var cells = sheets.Count == 0 ? [] : ReadCells(archive, workbookPart, sheets[0].Part, maxCells);
+        var selectedSheet = sheetName is null ? sheets.FirstOrDefault() : sheets.SingleOrDefault(sheet => sheet.Name == sheetName)
+            ?? throw new KeyNotFoundException($"Sheet not found: {sheetName}");
+        var cells = selectedSheet is null ? [] : ReadCells(archive, workbookPart, selectedSheet.Part, maxCells, maxRows, maxColumns);
         return new WorkbookSummary(path, sheets, cells);
     }
 
@@ -187,7 +193,8 @@ public static class WorkbookReader
         return sheets;
     }
 
-    private static List<CellSummary> ReadCells(ZipArchive archive, string workbookPart, string part, int maxCells)
+    private static List<CellSummary> ReadCells(ZipArchive archive, string workbookPart, string part,
+        int maxCells, int maxRows, int maxColumns)
     {
         var entry = FindEntry(archive, part) ?? throw new InvalidDataException($"Missing sheet part {part}");
         var cells = new List<CellSummary>();
@@ -201,7 +208,11 @@ public static class WorkbookReader
             if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "c"
                 || reader.NamespaceURI != SpreadsheetNamespace)
                 continue;
-            var address = reader.GetAttribute("r") ?? "";
+            var address = reader.GetAttribute("r") ?? throw new InvalidDataException("Cell has no address");
+            CellAddress coordinate;
+            try { coordinate = CellAddress.Parse(address); }
+            catch (FormatException exception) { throw new InvalidDataException($"Invalid cell address: {address}", exception); }
+            if (coordinate.Row > maxRows || coordinate.Column > maxColumns) continue;
             var type = reader.GetAttribute("t") ?? "n";
             string? value = null;
             string? formula = null;
