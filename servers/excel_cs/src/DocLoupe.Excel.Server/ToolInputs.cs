@@ -15,6 +15,8 @@ public sealed class SetValueRequest
     public required string Target { get; init; }
     [JsonPropertyName("value")]
     public JsonElement Value { get; init; }
+    [JsonPropertyName("values")]
+    public JsonElement Values { get; init; }
     [JsonPropertyName("as_text")]
     public bool AsText { get; init; }
     [JsonPropertyName("rich_policy")]
@@ -34,6 +36,7 @@ public sealed class SetValueRequest
     {
         if (Op is not ("set_value" or "set_formula")) throw new NotSupportedException("Only set_value and normal set_formula are supported");
         if (Other is { Count: > 0 }) throw new NotSupportedException("Unsupported cell operation fields");
+        if (Values.ValueKind != JsonValueKind.Undefined) throw new NotSupportedException("values requires set_values");
         var name = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
         var address = CellAddress.Parse(Target).ToString();
         if (Op == "set_formula")
@@ -66,6 +69,45 @@ public sealed class SetValueRequest
         if (kind == "text" && scalar?.StartsWith('=') == true && !AsText)
             throw new ArgumentException("AMBIGUOUS_FORMULA_TEXT");
         return new SetValueOp(name, address, kind, scalar, RichPolicy, AsText, Op);
+    }
+
+    public SetValueOp[] NormalizeMany(string? defaultSheet)
+    {
+        if (Op != "set_values") return [Normalize(defaultSheet)];
+        if (Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Array ||
+            AsText || RichPolicy != "reject" || Formula is not null || FormulaKind is not null ||
+            Reference is not null || Cache is not null || Other is { Count: > 0 })
+            throw new NotSupportedException("set_values requires only a target and rectangular values array");
+
+        var name = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
+        var separator = Target.LastIndexOf('!');
+        var bounds = (separator < 0 ? Target : Target[(separator + 1)..]).Split(':');
+        if (bounds.Length is < 1 or > 2) throw new FormatException("Invalid set_values range");
+        var first = CellAddress.Parse(bounds[0]);
+        var last = bounds.Length == 2 ? CellAddress.Parse(bounds[1]) : first;
+        if (last.Row < first.Row || last.Column < first.Column) throw new FormatException("Reversed set_values range");
+
+        var rows = Values.EnumerateArray().ToArray();
+        if (rows.Length is < 1 or > 500 || rows.Any(row => row.ValueKind != JsonValueKind.Array))
+            throw new ArgumentException("set_values requires a nonempty two-dimensional array of at most 500 cells");
+        var width = rows[0].GetArrayLength();
+        if (width is < 1 or > 500 || rows.Length * width > 500 || rows.Any(row => row.GetArrayLength() != width))
+            throw new ArgumentException("set_values requires a rectangular array of at most 500 cells");
+        if (bounds.Length == 2 && (last.Row - first.Row + 1 != rows.Length || last.Column - first.Column + 1 != width))
+            throw new ArgumentException("set_values dimensions do not match target range");
+        if (first.Row + rows.Length - 1 > 1048576 || first.Column + width - 1 > 16384)
+            throw new ArgumentException("set_values exceeds worksheet bounds");
+
+        var operations = new List<SetValueOp>(rows.Length * width);
+        for (var row = 0; row < rows.Length; row++)
+            for (var column = 0; column < width; column++)
+                operations.Add(new SetValueRequest
+                {
+                    Op = "set_value", Sheet = name,
+                    Target = new CellAddress(first.Row + row, first.Column + column).ToString(),
+                    Value = rows[row][column]
+                }.Normalize(name) with { Operation = "set_values" });
+        return operations.ToArray();
     }
 }
 
