@@ -41,6 +41,38 @@ public sealed class ExcelSessions : IDisposable
         return new { session = id, revision = 0, path = full, sheets };
     }
 
+    public object CreateFromTemplate(string templatePath, string targetPath)
+    {
+        var source = Path.GetFullPath(templatePath);
+        var destination = Path.GetFullPath(targetPath);
+        if (Path.GetExtension(source).ToLowerInvariant() != ".xlsx" ||
+            Path.GetExtension(destination).ToLowerInvariant() != ".xlsx")
+            throw new NotSupportedException("Template creation currently supports .xlsx only");
+        if (!File.Exists(source)) throw new FileNotFoundException("Template not found", source);
+        if (!Directory.Exists(Path.GetDirectoryName(destination)))
+            throw new DirectoryNotFoundException(Path.GetDirectoryName(destination));
+        if (File.Exists(destination)) throw new IOException("Destination already exists");
+        var fingerprint = Fingerprint(source);
+        using (var template = new PackageStore(source)) template.SheetNames();
+        var staging = Path.Combine(Path.GetDirectoryName(destination)!, "." + Path.GetFileName(destination) +
+            "." + Guid.NewGuid().ToString("N") + ".staging");
+        try
+        {
+            File.Copy(source, staging);
+            if (Fingerprint(source) != fingerprint || Fingerprint(staging) != fingerprint)
+                throw new InvalidOperationException("SOURCE_CHANGED_ON_DISK");
+            string[] sheets;
+            using (var copied = new PackageStore(staging)) sheets = copied.SheetNames().ToArray();
+            File.Move(staging, destination);
+            string id;
+            do { id = "xs_" + Guid.NewGuid().ToString("N")[..16]; }
+            while (!_sessions.TryAdd(id, new Session(id, destination, fingerprint)));
+            return new { session = id, revision = 0, path = destination, sheets, @new = true,
+                default_path = destination };
+        }
+        finally { if (File.Exists(staging)) File.Delete(staging); }
+    }
+
     public object Peek(string path, string detail = "summary", string? sheet = null, int maxRows = 20, int maxCols = 10)
     {
         if (detail is not ("info" or "summary" or "preview")) throw new ArgumentException("Invalid peek detail");

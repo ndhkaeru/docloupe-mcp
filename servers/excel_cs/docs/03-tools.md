@@ -121,6 +121,8 @@ output data { same shape as excel_open, plus new: true, default_path: string }
 
 A new workbook has no O, so G5 (preservation) does not apply on its first save. G1–G4 and G7 still run.
 
+**Current P2b create slice:** only `template_path` plus a distinct, nonexistent `target_path`, both `.xlsx`, are supported. The entire template is copied byte-for-byte to a staging file, verified against the source fingerprint and opened as a new clean session after atomic publication. Later edits use that copy as O, so the normal save gates still apply. Creating a workbook without a template, choosing sheet names/active sheet, macros or document properties, and an implicit target path remain unsupported; this is not yet the complete creation contract.
+
 ### 2.3 `excel_status`
 
 ```ts
