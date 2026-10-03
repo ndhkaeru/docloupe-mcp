@@ -23,14 +23,14 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
             : sessions.Verify(after_path, before_path, max_differences, NormalizeAssertions(@assert))),
         new McpServerToolCreateOptions { Name = "excel_verify" }),
     McpServerTool.Create((string? session = null) => Handle(() => sessions.Status(session)), new McpServerToolCreateOptions { Name = "excel_status" }),
-    McpServerTool.Create((string session, JsonElement target, string? sheet = null, bool skip_empty = true, string view = "cells") =>
+    McpServerTool.Create((string session, JsonElement? target = null, string? sheet = null, bool skip_empty = true, string view = "cells") =>
         Handle(() => sessions.Read(session, sheet, ReadTargets(target), skip_empty, view)),
         new McpServerToolCreateOptions
         {
             Name = "excel_read",
             SchemaCreateOptions = new AIJsonSchemaCreateOptions
             {
-                TransformSchemaNode = (context, node) => context.TypeInfo.Type == typeof(JsonElement)
+                TransformSchemaNode = (context, node) => context.TypeInfo.Type == typeof(JsonElement) || context.TypeInfo.Type == typeof(JsonElement?)
                     ? new JsonObject
                     {
                         ["oneOf"] = new JsonArray(
@@ -70,13 +70,14 @@ static ValueAssertion[]? NormalizeAssertions(SaveAssertionRequest[]? requests)
     return requests.Select(item => item.Normalize()).ToArray();
 }
 
-static string[] ReadTargets(JsonElement target)
+static string[] ReadTargets(JsonElement? target)
 {
-    if (target.ValueKind == JsonValueKind.String)
-        return [target.GetString() ?? throw new ArgumentException("Target cannot be null")];
-    if (target.ValueKind != JsonValueKind.Array || target.GetArrayLength() is < 1 or > 500)
+    if (target is null || target.Value.ValueKind == JsonValueKind.Undefined) return [];
+    if (target.Value.ValueKind == JsonValueKind.String)
+        return [target.Value.GetString() ?? throw new ArgumentException("Target cannot be null")];
+    if (target.Value.ValueKind != JsonValueKind.Array || target.Value.GetArrayLength() is < 1 or > 500)
         throw new ArgumentException("Target must be a cell, range, or nonempty array of at most 500 targets");
-    return target.EnumerateArray().Select(item => item.ValueKind == JsonValueKind.String
+    return target.Value.EnumerateArray().Select(item => item.ValueKind == JsonValueKind.String
         ? item.GetString()! : throw new ArgumentException("Every read target must be a string")).ToArray();
 }
 

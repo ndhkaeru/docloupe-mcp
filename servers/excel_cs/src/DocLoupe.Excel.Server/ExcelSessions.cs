@@ -153,7 +153,30 @@ public sealed class ExcelSessions : IDisposable
         lock (session.Sync)
         {
             session.CheckSource();
-            if (addresses.Length == 0) throw new ArgumentException("At least one cell address is required");
+            if (addresses.Length == 0)
+            {
+                var preview = session.Preview();
+                try
+                {
+                    var workbook = WorkbookReader.Peek(preview, maxCells: 0, sheetName: sheet);
+                    var selected = sheet is null ? workbook.Sheets.FirstOrDefault() :
+                        workbook.Sheets.Single(item => item.Name == sheet);
+                    if (selected is null) throw new InvalidDataException("Workbook has no readable worksheet");
+                    if (selected.UsedRange is null)
+                        return view switch
+                        {
+                            "cells" => new { session = id, revision = session.Revision, sheet = selected.Name,
+                                view = "cells", cells = Array.Empty<CellRead>() } as object,
+                            "values" => new { session = id, revision = session.Revision, sheet = selected.Name,
+                                view = "values", rows = Array.Empty<object?[]>() },
+                            "markdown" => new { session = id, revision = session.Revision, sheet = selected.Name,
+                                view = "markdown", markdown = "" },
+                            _ => throw new NotSupportedException("Unsupported read view")
+                        };
+                    addresses = [selected.Name + "!" + selected.UsedRange];
+                }
+                finally { if (preview != session.Path) File.Delete(preview); }
+            }
             if (view is not ("cells" or "values" or "markdown"))
                 throw new NotSupportedException("Only cells, values and markdown views are supported");
             if (view != "cells" && addresses.Length != 1)

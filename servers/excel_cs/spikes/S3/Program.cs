@@ -135,6 +135,12 @@ try
     if (rangeRead.IsError == true ||
         rangeRead.StructuredContent?.GetProperty("data").GetProperty("cells").GetArrayLength() != 3)
         throw new InvalidOperationException("Bounded range read failed: " + rangeRead.StructuredContent?.GetRawText());
+    var usedRead = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["sheet"] = "Sheet1"
+    });
+    if (usedRead.IsError == true || usedRead.StructuredContent?.GetProperty("data").GetProperty("cells").GetArrayLength() != 4)
+        throw new InvalidOperationException("Default used-range read failed: " + usedRead.StructuredContent?.GetRawText());
     var typedRead = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
     {
         ["session"] = session, ["target"] = "Sheet1!A1:C2", ["view"] = "values"

@@ -1,4 +1,6 @@
+using System.IO.Compression;
 using System.Text.Json;
+using System.Xml;
 using DocLoupe.Excel.Engine;
 using DocLoupe.Excel.Server;
 using DocLoupe.Excel.Verify;
@@ -40,6 +42,72 @@ public sealed class ReadRangeTests
             Assert.DoesNotContain(preview.GetProperty("cells").EnumerateArray(),
                 cell => cell.GetProperty("Address").GetString() == "A1");
             sessions.Close(session, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void MissingTargetUsesExplicitCellRangeAndCurrentRevision(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-read-used-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            var cells = JsonSerializer.SerializeToElement(sessions.Read(id, "Sheet1", []));
+            Assert.Equal(4, cells.GetProperty("cells").GetArrayLength());
+            Assert.Equal("old", Value(cells, "D3"));
+            var values = JsonSerializer.SerializeToElement(sessions.Read(id, null, [], view: "values"));
+            Assert.Equal(3, values.GetProperty("rows").GetArrayLength());
+            Assert.Equal(4, values.GetProperty("rows")[0].GetArrayLength());
+            Assert.Equal("old", values.GetProperty("rows")[2][3].GetString());
+            sessions.Apply(id, 0, [new SetValueOp("Sheet1", "E4", "number", "77")]);
+            var markdown = JsonSerializer.SerializeToElement(sessions.Read(id, "Sheet1", [], view: "markdown"));
+            Assert.Equal(1, markdown.GetProperty("revision").GetInt32());
+            Assert.Contains("| 4 |", markdown.GetProperty("markdown").GetString());
+            Assert.Contains("77", markdown.GetProperty("markdown").GetString());
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void EmptyWorksheetHasEmptyDefaultReadInAllViews()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-read-used-empty-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
+            {
+                var entry = archive.GetEntry("xl/worksheets/sheet1.xml")!;
+                var document = new XmlDocument();
+                using (var stream = entry.Open()) document.Load(stream);
+                var sheetData = document.DocumentElement!.GetElementsByTagName("sheetData",
+                    "http://schemas.openxmlformats.org/spreadsheetml/2006/main")[0]!;
+                sheetData.RemoveAll();
+                entry.Delete();
+                using var writer = new StreamWriter(archive.CreateEntry("xl/worksheets/sheet1.xml").Open());
+                writer.Write(document.OuterXml);
+            }
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            Assert.Empty(JsonSerializer.SerializeToElement(sessions.Read(id, null, []))
+                .GetProperty("cells").EnumerateArray());
+            Assert.Empty(JsonSerializer.SerializeToElement(sessions.Read(id, null, [], view: "values"))
+                .GetProperty("rows").EnumerateArray());
+            Assert.Equal("", JsonSerializer.SerializeToElement(sessions.Read(id, null, [], view: "markdown"))
+                .GetProperty("markdown").GetString());
+            sessions.Close(id, false);
         }
         finally { Directory.Delete(directory, true); }
     }
