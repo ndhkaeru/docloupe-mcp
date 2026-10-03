@@ -503,10 +503,11 @@ public sealed class ExcelSessions : IDisposable
             using var candidate = new PackageStore(session.BasePath);
             var next = Coalesce(session.Operations.Concat(operations));
             var result = SetValueEngine.Apply(candidate, next);
+            var readback = Readback(candidate, operations);
             if (dryRun)
                 return new { session = id, dry_run = true, revision = session.Revision,
                     revision_before = baseRevision, revision_after = baseRevision,
-                    intent = result.Intent, changed_parts = result.ChangedParts };
+                    intent = result.Intent, changed_parts = result.ChangedParts, readback };
             session.Operations.AddRange(operations);
             session.RevisionLengths.Add(operations.Length);
             session.Revision++;
@@ -515,8 +516,28 @@ public sealed class ExcelSessions : IDisposable
             session.Publish();
             return new { session = id, dry_run = false, revision = session.Revision,
                 revision_before = baseRevision, revision_after = session.Revision,
-                intent = result.Intent, changed_parts = result.ChangedParts };
+                intent = result.Intent, changed_parts = result.ChangedParts, readback };
         }
+    }
+
+    private static IReadOnlyDictionary<string, CellRead?> Readback(PackageStore candidate, SetValueOp[] operations)
+    {
+        var staging = Path.Combine(Path.GetTempPath(), "docloupe-readback-" + Guid.NewGuid().ToString("N") + ".xlsx");
+        try
+        {
+            candidate.Save(staging);
+            var readback = new Dictionary<string, CellRead?>(StringComparer.Ordinal);
+            foreach (var group in operations.GroupBy(operation => operation.Sheet, StringComparer.Ordinal))
+            {
+                var addresses = group.Select(operation => operation.Address).Distinct(StringComparer.Ordinal).ToArray();
+                var cells = P2aGates.ReadCells(staging, group.Key, addresses)
+                    .ToDictionary(cell => cell.Address, StringComparer.Ordinal);
+                foreach (var address in addresses)
+                    readback[group.Key + "!" + address] = cells.GetValueOrDefault(address);
+            }
+            return readback;
+        }
+        finally { if (File.Exists(staging)) File.Delete(staging); }
     }
 
     public UndoResult Undo(string id, int baseRevision, int toRevision)

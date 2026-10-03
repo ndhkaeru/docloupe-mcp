@@ -36,6 +36,10 @@ public sealed class DryRunTests
             Assert.Equal(1, plan.GetProperty("revision_before").GetInt32());
             Assert.Equal(1, plan.GetProperty("revision_after").GetInt32());
             Assert.Equal(1, plan.GetProperty("revision").GetInt32());
+            var plannedCells = plan.GetProperty("readback");
+            Assert.Equal(2, plannedCells.EnumerateObject().Count());
+            Assert.Equal("replacement", plannedCells.GetProperty("Sheet1!B1").GetProperty("Value").GetString());
+            Assert.Equal("true", plannedCells.GetProperty("Sheet1!G4").GetProperty("Value").GetString());
             Assert.Equal(1, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("ledger").GetArrayLength());
             Assert.Empty(JsonSerializer.SerializeToElement(sessions.Read(id, "Sheet1", ["G4"]))
                 .GetProperty("cells").EnumerateArray());
@@ -46,11 +50,32 @@ public sealed class DryRunTests
             Assert.Equal(2, applied.GetProperty("revision_after").GetInt32());
             Assert.Equal(plan.GetProperty("intent").GetRawText(), applied.GetProperty("intent").GetRawText());
             Assert.Equal(plan.GetProperty("changed_parts").GetRawText(), applied.GetProperty("changed_parts").GetRawText());
+            Assert.Equal(plannedCells.GetRawText(), applied.GetProperty("readback").GetRawText());
             var output = Path.Combine(directory, "saved.xlsx");
             sessions.Save(id, output);
             Assert.Equal("replacement", Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["B1"])).Value);
             Assert.Equal("true", Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["G4"])).Value);
             Assert.Equal(original, File.ReadAllBytes(source));
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void ReadbackIncludesRemovedCellAsNull()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-dry-clear-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            var request = Request("""{"op":"clear","target":"Sheet1!B1","remove_cells":true}""");
+            var plan = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, [request], dryRun: true));
+            Assert.Equal(JsonValueKind.Null, plan.GetProperty("readback").GetProperty("Sheet1!B1").ValueKind);
+            var applied = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, [request]));
+            Assert.Equal(JsonValueKind.Null, applied.GetProperty("readback").GetProperty("Sheet1!B1").ValueKind);
             sessions.Close(id, true);
         }
         finally { Directory.Delete(directory, true); }
