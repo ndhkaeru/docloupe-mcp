@@ -253,6 +253,17 @@ public static partial class P2aGates
             .ToArray();
     }
 
+    private static RawTag CompleteEmptyTag(string text, RawTag tag)
+    {
+        if (text.AsSpan(tag.CharStart, tag.CharEnd - tag.CharStart).TrimEnd().EndsWith("/>".AsSpan(), StringComparison.Ordinal))
+            return tag;
+        var closing = new Regex(@"\G</" + Regex.Escape(tag.Name) + @"\s*>",
+            RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5)).Match(text, tag.CharEnd);
+        return closing.Success
+            ? tag with { End = Encoding.UTF8.GetByteCount(text.AsSpan(0, closing.Index + closing.Length)) }
+            : tag;
+    }
+
     private static string RawAttribute(RawTag tag, string name)
     {
         var attributes = tag.Attributes;
@@ -372,7 +383,8 @@ public static partial class P2aGates
                 allowed.AddRange(TagSpans(text, "Relationship").Where(tag =>
                     RawAttribute(tag, "Type") == Office + "/calcChain" &&
                     Resolve(workbook.Part, RawAttribute(tag, "Target"))
-                        .Equals(workbook.CalcChainPart, StringComparison.OrdinalIgnoreCase)));
+                        .Equals(workbook.CalcChainPart, StringComparison.OrdinalIgnoreCase))
+                    .Select(tag => CompleteEmptyTag(text, tag)));
             if (addShared)
                 insertionOffsets.Add(ClosingTagOffset(text, TagSpans(text, "Relationships").Single()));
         }
@@ -381,7 +393,8 @@ public static partial class P2aGates
             if (removeChain)
                 allowed.AddRange(TagSpans(text, "Override").Where(tag =>
                     RawAttribute(tag, "PartName").TrimStart('/')
-                        .Equals(workbook.CalcChainPart, StringComparison.OrdinalIgnoreCase)));
+                        .Equals(workbook.CalcChainPart, StringComparison.OrdinalIgnoreCase))
+                    .Select(tag => CompleteEmptyTag(text, tag)));
             if (addShared)
                 insertionOffsets.Add(ClosingTagOffset(text, TagSpans(text, "Types").Single()));
         }

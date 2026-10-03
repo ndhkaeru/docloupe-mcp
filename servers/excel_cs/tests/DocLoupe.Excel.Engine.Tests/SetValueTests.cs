@@ -129,15 +129,24 @@ public sealed class SetValueTests
         Assert.Empty(DetachedValidator.Check(source, output, result.ChangedParts).Issues);
     }
 
-    [Fact]
-    public void FormulaOverwriteRemovesCalcChainButOtherEditsKeepIt()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FormulaOverwriteRemovesCalcChainButOtherEditsKeepIt(bool explicitEndTags)
     {
         using var fixture = new Fixture();
         var source = fixture.Source("default");
         using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
         {
-            AddBeforeClose(archive, "xl/_rels/workbook.xml.rels", "</Relationships>", "<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain\" Target=\"calcChain.xml\"/>");
-            AddBeforeClose(archive, "[Content_Types].xml", "</Types>", "<Override PartName=\"/xl/calcChain.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml\"/>");
+            var relationship = "<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain\" Target=\"calcChain.xml\"/>";
+            var overrideTag = "<Override PartName=\"/xl/calcChain.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml\"/>";
+            if (explicitEndTags)
+            {
+                relationship = relationship.Replace("/>", "></Relationship>", StringComparison.Ordinal);
+                overrideTag = overrideTag.Replace("/>", "></Override>", StringComparison.Ordinal);
+            }
+            AddBeforeClose(archive, "xl/_rels/workbook.xml.rels", "</Relationships>", relationship);
+            AddBeforeClose(archive, "[Content_Types].xml", "</Types>", overrideTag);
             using var stream = archive.CreateEntry("xl/calcChain.xml").Open();
             stream.Write(Encoding.UTF8.GetBytes("<calcChain xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><c r=\"C1\" i=\"1\"/></calcChain>"));
         }
