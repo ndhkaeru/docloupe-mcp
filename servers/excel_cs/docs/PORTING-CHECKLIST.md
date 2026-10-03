@@ -32,6 +32,7 @@
 - [x] 2026-10-03: G5 chặn thuộc tính/style, phần tử lạ và namespace cục bộ không được yêu cầu trong ô vừa tạo; vẫn chấp nhận khai báo namespace thực sự cần cho serializer trên ô mới/cũ. Ca style/child được xác nhận đỏ trước khi sửa. **585/585** test trên Windows và Docker Linux với corpus local; chưa chạy macOS/CI từ xa.
 - [x] 2026-10-03: G2 có hồi quy che lỗi baseline trên cả worksheet mặc định và prefix `x:`; G3 chặn đổi prefix tại các phần tử con bên trong cell, kể cả khi namespace URI không đổi (test đỏ trước khi sửa). **587/587** test và schema-order đạt trên Windows/Docker Linux với corpus local. Chưa phải kiểm hình dạng G3 tổng quát cho op cấu trúc/rich text; không có kết quả macOS hoặc CI từ xa.
 - [x] 2026-10-03: G2 định vị đường dẫn lỗi baseline theo namespace và chỉ số trong từng namespace (không lẫn `other:row` với `row`), so cả cây con có thể bị che; đường dẫn không phân giải được mà part thay đổi trở thành gap bắt buộc. Test đỏ trước khi sửa, test đối chứng ở ô ngoài vùng lỗi. **589/589** test với corpus local qua trên Windows và Docker Linux, schema-order qua trên Linux. Chưa chạy CI remote/macOS.
+- [x] 2026-10-03: G5 từ chối comment/processing instruction/CDATA/entity reference bên trong cell thuộc intent ở cả source và staging thay vì bỏ qua vì chỉ duyệt `XmlElement`; test đối kháng khai báo span hợp lệ và test tích hợp `Save` chặn mất comment nguồn, không tạo output. **592/592** test với corpus local cùng schema-order đạt trên Windows và Docker Linux; chưa chạy CI remote/macOS.
 
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 

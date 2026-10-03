@@ -143,6 +143,10 @@ public static partial class P2aGates
 
     public static IReadOnlyList<GateIssue> CheckTouchedCells(string source, string written, IEnumerable<CellExpectation> expected)
     {
+        static bool HasUnmodeledNode(XmlNode node) => node.ChildNodes.OfType<XmlNode>().Any(child =>
+            child.NodeType is XmlNodeType.Comment or XmlNodeType.ProcessingInstruction or XmlNodeType.CDATA or
+                XmlNodeType.EntityReference || HasUnmodeledNode(child));
+
         static bool GeneratedNamespace(XmlAttribute attribute, XmlElement cell, XmlElement? originalScope)
         {
             if (attribute.NamespaceURI != "http://www.w3.org/2000/xmlns/" || originalScope is null)
@@ -173,6 +177,8 @@ public static partial class P2aGates
             {
                 var before = oldSheet.GetElementsByTagName("c", Main).OfType<XmlElement>().SingleOrDefault(item => item.GetAttribute("r") == cell.Address);
                 var after = newSheet.GetElementsByTagName("c", Main).OfType<XmlElement>().SingleOrDefault(item => item.GetAttribute("r") == cell.Address);
+                if (before is not null && HasUnmodeledNode(before) || after is not null && HasUnmodeledNode(after))
+                    issues.Add(new("G5", "CELL_UNMODELED_NODE", $"{group.Key}!{cell.Address}"));
                 if (after is null)
                 {
                     if (before is null && cell.AllowMissing || before is not null && cell.RequireMissing) continue;

@@ -1,9 +1,11 @@
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using DocLoupe.Excel.Engine;
 using DocLoupe.Excel.Package;
 using DocLoupe.Excel.Schema;
+using DocLoupe.Excel.Server;
 using DocLoupe.Excel.Verify;
 using Xunit;
 
@@ -162,6 +164,55 @@ public sealed class CorruptionGateTests
         Assert.Contains(P2aGates.CheckTouchedCells(fixture.Source, broken,
             [new CellExpectation("Sheet1", "B2", "number", "100")]),
             issue => issue.Gate == "G5" && issue.Code is "CELL_ATTRIBUTE_CHANGED" or "CELL_UNMODELED_CHILD");
+    }
+
+    [Theory]
+    [InlineData("<!--unrequested-->")]
+    [InlineData("<?unrequested test?>")]
+    public void G5RejectsUnmodeledNodesHiddenInsideTheIntendedCell(string markup)
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(fixture.Source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt(part, xml => xml.Replace("<v>100</v>",
+            markup + "<v>100</v>", StringComparison.Ordinal), edited);
+        var declared = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End,
+            edit.Before, edit.Part.Equals(part, StringComparison.OrdinalIgnoreCase)
+                ? Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(edit.After).Replace("<v>100</v>",
+                    markup + "<v>100</v>", StringComparison.Ordinal)) : edit.After)).ToArray();
+        var intent = new CellExpectation("Sheet1", "B1", "number", "100");
+        Assert.Empty(P2aGates.CheckPackage(broken, result.ChangedParts));
+        var schema = DetachedValidator.Check(fixture.Source, broken, result.ChangedParts);
+        Assert.Empty(schema.Issues);
+        Assert.Empty(schema.Gaps);
+        Assert.Empty(P2aMarkupGate.Check(fixture.Source, broken, result.ChangedParts));
+        Assert.Empty(P2aGates.CheckIntent(broken, [intent]));
+        Assert.Empty(P2aGates.CheckPreservation(fixture.Source, broken, declared, []));
+        Assert.Empty(P2aGates.CheckSemanticPreservation(fixture.Source, broken, [intent], declared));
+        Assert.Contains(P2aGates.CheckTouchedCells(fixture.Source, broken, [intent]),
+            issue => issue.Gate == "G5" && issue.Code == "CELL_UNMODELED_NODE");
+    }
+
+    [Fact]
+    public void SaveBlocksWhenWritingWouldDiscardSourceCellComment()
+    {
+        using var fixture = new Fixture();
+        var source = fixture.Corrupt("xl/worksheets/sheet1.xml", xml =>
+            xml.Replace("<v>42</v>", "<!--preserve--><v>42</v>", StringComparison.Ordinal));
+        using var sessions = new ExcelSessions();
+        var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+        sessions.Apply(id, 0, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+        var output = Path.Combine(fixture.Directory, "blocked.xlsx");
+        var blocked = Assert.Throws<SaveBlockedException>(() => sessions.Save(id, output));
+        Assert.Contains(blocked.Issues, issue => issue.Gate == "G5" && issue.Code == "CELL_UNMODELED_NODE");
+        Assert.False(File.Exists(output));
+        sessions.Close(id, true);
     }
 
     [Fact]
