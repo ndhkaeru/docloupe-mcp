@@ -23,8 +23,8 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
             : sessions.Verify(after_path, before_path, max_differences, NormalizeAssertions(@assert))),
         new McpServerToolCreateOptions { Name = "excel_verify" }),
     McpServerTool.Create((string? session = null) => Handle(() => sessions.Status(session)), new McpServerToolCreateOptions { Name = "excel_status" }),
-    McpServerTool.Create((string session, string? sheet, JsonElement target, bool skip_empty = true) =>
-        Handle(() => sessions.Read(session, sheet, ReadTargets(target), skip_empty)),
+    McpServerTool.Create((string session, JsonElement target, string? sheet = null, bool skip_empty = true, string view = "cells") =>
+        Handle(() => sessions.Read(session, sheet, ReadTargets(target), skip_empty, view)),
         new McpServerToolCreateOptions
         {
             Name = "excel_read",
@@ -46,7 +46,7 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
         }),
     McpServerTool.Create((string session, int base_revision, SetValueRequest[] ops, string? sheet = null, bool dry_run = false) => Handle(() => sessions.Apply(session, base_revision, ops.SelectMany((op, index) => op.NormalizeMany(sheet).Select(cell => cell with { SourceIndex = index })).ToArray(), dry_run)), new McpServerToolCreateOptions { Name = "excel_apply" }),
     McpServerTool.Create((string session, string mode, string path, SaveAssertionRequest[]? @assert = null) => Handle(() => mode == "copy" ? sessions.Save(session, path, @assert?.Select(item => item.Normalize()).ToArray()) : throw new NotSupportedException("P2a save supports copy mode only")), new McpServerToolCreateOptions { Name = "excel_save" }),
-    McpServerTool.Create((string session, bool discard_unsaved) => Handle(() => sessions.Close(session, discard_unsaved)), new McpServerToolCreateOptions { Name = "excel_close" }),
+    McpServerTool.Create((string session, bool discard_unsaved = false) => Handle(() => sessions.Close(session, discard_unsaved)), new McpServerToolCreateOptions { Name = "excel_close" }),
     McpServerTool.Create((string session, int base_revision, int to_revision) => Handle(() =>
     {
         var undone = sessions.Undo(session, base_revision, to_revision);

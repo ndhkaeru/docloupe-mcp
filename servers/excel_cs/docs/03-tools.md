@@ -187,7 +187,7 @@ output data {
 | `cells` | Before editing | Values, display strings, rich markup, formulas, sparse style, hash |
 | `full` | Debugging formatting | Everything, plus `xf_id`, `text_form`, color sources, formula attributes |
 
-**Current P2b read slice:** `excel_read` accepts a sheet-qualified or default-sheet A1 cell, bounded rectangular target (`A1:C3`), or nonempty array of up to 500 such strings, returns only existing cells by default in `cells` view from the current revision (`skip_empty=false` includes addressable `blank` placeholders in target order), and rejects reversed, malformed, cross-sheet, or >500-cell ranges. It does not yet provide typed 2D `values`, hashes, pagination, rich/style projections, or the other views above.
+**Current P2b read slice:** `excel_read` accepts a sheet-qualified or default-sheet A1 cell, bounded rectangular target (`A1:C3`), or nonempty array of up to 500 such strings, returns only existing cells by default in `cells` view from the current revision (`skip_empty=false` includes addressable `blank` placeholders in target order), and rejects reversed, malformed, cross-sheet, or >500-cell ranges. The `values` view accepts one explicit cell or rectangular A1 range (at most 500 cells), including `null` for empty coordinates, typed numbers, text, booleans and errors; formulas return typed cached results or `null` for a missing cache. `skip_empty` applies only to the `cells` view. Date-format resolution, default used range, multiple targets in `values`, hashes, pagination, rich/style projections, full read metadata and other views remain future work.
 
 ### 3.2 `excel_find`
 

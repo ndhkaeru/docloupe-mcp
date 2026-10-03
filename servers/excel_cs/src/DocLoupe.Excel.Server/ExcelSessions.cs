@@ -147,13 +147,16 @@ public sealed class ExcelSessions : IDisposable
                 summary = entry.Summary }).ToArray(), server = ServerInfo };
     }
 
-    public object Read(string id, string? sheet, string[] addresses, bool skipEmpty = true)
+    public object Read(string id, string? sheet, string[] addresses, bool skipEmpty = true, string view = "cells")
     {
         var session = Get(id);
         lock (session.Sync)
         {
             session.CheckSource();
             if (addresses.Length == 0) throw new ArgumentException("At least one cell address is required");
+            if (view is not ("cells" or "values")) throw new NotSupportedException("Only cells and rectangular values views are supported");
+            if (view == "values" && addresses.Length != 1)
+                throw new NotSupportedException("Values view requires one rectangular range");
             var targets = new List<(string Sheet, string Address)>();
             foreach (var address in addresses)
             {
@@ -179,6 +182,21 @@ public sealed class ExcelSessions : IDisposable
             try
             {
                 var existing = P2aGates.ReadCells(source, selectedSheet, targets.Select(target => target.Address));
+                if (view == "values")
+                {
+                    var indexed = new Dictionary<string, CellRead>(StringComparer.Ordinal);
+                    foreach (var cell in existing)
+                        if (!indexed.TryAdd(cell.Address, cell))
+                            throw new InvalidDataException($"Duplicate cell address: {selectedSheet}!{cell.Address}");
+                    var bounds = addresses[0].Split(':');
+                    var first = CellAddress.Parse(bounds[0]);
+                    var last = bounds.Length == 2 ? CellAddress.Parse(bounds[1]) : first;
+                    var width = last.Column - first.Column + 1;
+                    var rows = targets.Chunk(width).Select(row => row.Select(target =>
+                        indexed.TryGetValue(target.Address, out var cell) ? TypedValue(cell) : null).ToArray()).ToArray();
+                    return new { session = id, revision = session.Revision, sheet = selectedSheet,
+                        view = "values", rows };
+                }
                 IReadOnlyList<CellRead> cells = existing;
                 if (!skipEmpty)
                 {
@@ -193,6 +211,32 @@ public sealed class ExcelSessions : IDisposable
             }
             finally { if (source != session.Path) File.Delete(source); }
         }
+    }
+
+    private static object? TypedValue(CellRead cell)
+    {
+        if (cell.Kind == "blank" || cell.Kind == "formula" && cell.Value is null) return null;
+        var kind = cell.Kind == "formula" ? cell.CacheType switch
+        {
+            null or "" or "n" => "number", "str" => "text", "b" => "boolean", "e" => "error",
+            _ => throw new NotSupportedException("Unsupported formula cache type in values view")
+        } : cell.Kind;
+        return kind switch
+        {
+            "text" or "inline" => cell.Value,
+            "boolean" when cell.Value is "true" or "false" => cell.Value == "true",
+            "error" when cell.Value is not null => new { error = cell.Value },
+            "number" when cell.Value is not null => ParseNumber(cell.Value),
+            _ => throw new InvalidDataException("Invalid cell value in values view: " + cell.Address)
+        };
+    }
+
+    private static JsonElement ParseNumber(string value)
+    {
+        using var document = JsonDocument.Parse(value);
+        if (document.RootElement.ValueKind != JsonValueKind.Number)
+            throw new InvalidDataException("Invalid number in values view");
+        return document.RootElement.Clone();
     }
 
     public object Apply(string id, int baseRevision, SetValueOp[] operations, bool dryRun = false)

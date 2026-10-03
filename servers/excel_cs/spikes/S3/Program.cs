@@ -135,6 +135,14 @@ try
     if (rangeRead.IsError == true ||
         rangeRead.StructuredContent?.GetProperty("data").GetProperty("cells").GetArrayLength() != 3)
         throw new InvalidOperationException("Bounded range read failed: " + rangeRead.StructuredContent?.GetRawText());
+    var typedRead = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["target"] = "Sheet1!A1:C2", ["view"] = "values"
+    });
+    if (typedRead.IsError == true || typedRead.StructuredContent?.GetProperty("data").GetProperty("rows")[0][0].GetString() != "hello" ||
+        typedRead.StructuredContent?.GetProperty("data").GetProperty("rows")[0][1].GetInt32() != 42 ||
+        typedRead.StructuredContent?.GetProperty("data").GetProperty("rows")[1][0].ValueKind != System.Text.Json.JsonValueKind.Null)
+        throw new InvalidOperationException("Typed values view failed: " + typedRead.StructuredContent?.GetRawText());
     var readSchema = tools.Single(tool => tool.Name == "excel_read").ProtocolTool.InputSchema;
     if (readSchema.GetProperty("properties").GetProperty("target").GetProperty("oneOf").GetArrayLength() != 2)
         throw new InvalidOperationException("Read target array is missing from MCP input schema: " + readSchema.GetRawText());
@@ -294,7 +302,7 @@ try
         throw new InvalidOperationException("Undo failed: " + undone.StructuredContent?.GetRawText());
     var closed = await client.CallToolAsync("excel_close", new Dictionary<string, object?>
     {
-        ["session"] = session, ["discard_unsaved"] = false
+        ["session"] = session
     });
     if (closed.IsError == true) throw new InvalidOperationException("Close failed");
 }
