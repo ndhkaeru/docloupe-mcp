@@ -130,10 +130,10 @@ public sealed class SetValueRequest
     {
         if (Expect.ValueKind == JsonValueKind.Undefined) return null;
         if (Expect.ValueKind != JsonValueKind.Object)
-            throw new NotSupportedException("Only expect.value, expect.formula and expect.empty are supported");
+            throw new NotSupportedException("Only expect.value, expect.formula, expect.empty and expect.text are supported");
         var properties = Expect.EnumerateObject().ToArray();
         if (properties.Length == 0 || properties.GroupBy(property => property.Name).Any(group => group.Count() > 1) ||
-            properties.Any(property => property.Name is not ("value" or "formula" or "empty")))
+            properties.Any(property => property.Name is not ("value" or "formula" or "empty" or "text")))
             throw new NotSupportedException("Unsupported expect fields");
         bool? empty = null;
         if (Expect.TryGetProperty("empty", out var expectedEmpty))
@@ -143,14 +143,19 @@ public sealed class SetValueRequest
                 JsonValueKind.False => false,
                 _ => throw new ArgumentException("expect.empty must be a boolean")
             };
-        var valueAndFormula = properties.Where(property => property.Name != "empty").ToArray();
-        if (valueAndFormula.Length == 0) return new CellPrecondition(false, null, null, null, empty);
+        string? text = null;
+        if (Expect.TryGetProperty("text", out var expectedText))
+            text = expectedText.ValueKind == JsonValueKind.String
+                ? expectedText.GetString()
+                : throw new ArgumentException("expect.text must be a string");
+        var valueAndFormula = properties.Where(property => property.Name is "value" or "formula").ToArray();
+        if (valueAndFormula.Length == 0) return new CellPrecondition(false, null, null, null, empty, text);
         var assertion = new SaveAssertionRequest
         {
             Target = sheet + "!" + address,
             Expected = JsonSerializer.SerializeToElement(valueAndFormula.ToDictionary(property => property.Name, property => property.Value))
         }.Normalize();
-        return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula, empty);
+        return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula, empty, text);
     }
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)

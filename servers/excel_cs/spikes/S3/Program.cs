@@ -246,7 +246,7 @@ try
             new { op = "fill", sheet = "Sheet1", target = "J7:K7", series = new { start = -3, step = 2 } },
             new { op = "clear", sheet = "Sheet1", target = "A1", what = new[] { "values" }, remove_cells = false },
             new { op = "clear", sheet = "Sheet1", target = "L8" },
-            new { op = "clear", sheet = "Sheet1", target = "D3", remove_cells = true },
+            new { op = "clear", sheet = "Sheet1", target = "D3", remove_cells = true, expect = new { text = "old" } },
             new { op = "set_value", sheet = "Sheet1", target = "M9", value = new { error = "#N/A" } },
             new { op = "fill", sheet = "Sheet1", target = "N10:O10", series = new { start = 0.1, step = 0.2 } },
             new { op = "set_formula", sheet = "Sheet1", target = "P11", formula = "2+3", cache = (object)new { value = 5 } },

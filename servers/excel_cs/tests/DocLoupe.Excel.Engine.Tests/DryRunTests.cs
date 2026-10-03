@@ -171,6 +171,43 @@ public sealed class DryRunTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    public void TextPreconditionUsesVisibleSharedStringWithoutPhoneticText(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-text-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, variant + ".xlsx");
+            var original = File.ReadAllBytes(source);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            var good = Request("""{"op":"set_value","target":"Sheet1!A1","value":"new text","rich_policy":"replace","expect":{"text":"hello"}}""");
+            var plan = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, [good], dryRun: true));
+            Assert.Equal("new text", plan.GetProperty("readback").GetProperty("Sheet1!A1").GetProperty("Value").GetString());
+            var inline = Request("""{"op":"set_value","target":"Sheet1!D3","value":"updated","expect":{"text":"old","value":"old","empty":false}}""");
+            var inlinePlan = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, [inline], dryRun: true));
+            Assert.Equal("updated", inlinePlan.GetProperty("readback").GetProperty("Sheet1!D3").GetProperty("Value").GetString());
+            Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"set_value","target":"Sheet1!D3","value":"updated","expect":{"text":"wrong","value":"old"}}""")]));
+            Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"set_value","target":"Sheet1!A1","value":"new text","rich_policy":"replace","expect":{"text":"hellohe"}}""")]));
+            Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"set_value","target":"Sheet1!B1","value":10,"expect":{"text":"42"}}""")]));
+            Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"set_value","target":"Sheet1!C1","value":10,"expect":{"text":"2"}}""")]));
+            Assert.Throws<NotSupportedException>(() => Request(
+                """{"op":"set_value","target":"Sheet1!A1","value":10,"expect":{"display":"hello"}}"""));
+            var status = JsonSerializer.SerializeToElement(sessions.Status(id));
+            Assert.Equal(0, status.GetProperty("revision").GetInt32());
+            Assert.Equal(original, File.ReadAllBytes(source));
+            sessions.Close(id, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     [Fact]
     public void PreconditionRevisionAndWriterFailuresDoNotChangeSession()
     {
