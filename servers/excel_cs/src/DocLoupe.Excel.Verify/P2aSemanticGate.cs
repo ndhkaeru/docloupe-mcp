@@ -497,10 +497,24 @@ public static partial class P2aGates
         {
             if (!allowedIndices.Contains(index))
                 issues.Add(new("G5", "UNDECLARED_SHARED_STRING_CHANGE", $"orphan <si> index {index}"));
-            var children = afterItems[index].ChildNodes.OfType<XmlElement>().ToArray();
-            if (HasUnmodeledNode(afterItems[index]) ||
-                children.Length != 1 || children[0].LocalName != "t" || children[0].NamespaceURI != Main ||
-                !expectations.Any(item => item.Kind == "text" && item.Value == children[0].InnerText))
+            var item = afterItems[index];
+            var children = item.ChildNodes.OfType<XmlElement>().ToArray();
+            var value = children.Length == 1 ? children[0] : null;
+            var preserveSpace = value is { InnerText.Length: > 0 } &&
+                (char.IsWhiteSpace(value.InnerText[0]) || char.IsWhiteSpace(value.InnerText[^1]));
+            var expectedPrefix = written.DocumentElement!.Prefix;
+            var generatedNamespace = item.Attributes.OfType<XmlAttribute>().Where(attribute =>
+                attribute.NamespaceURI == "http://www.w3.org/2000/xmlns/" &&
+                expectedPrefix.Length > 0 && attribute.LocalName == expectedPrefix && attribute.Value == Main).ToArray();
+            var spaceAttributes = value?.Attributes.OfType<XmlAttribute>().Where(attribute =>
+                attribute.NamespaceURI == "http://www.w3.org/XML/1998/namespace" &&
+                attribute.LocalName == "space" && attribute.Value == "preserve").ToArray() ?? [];
+            if (HasUnmodeledNode(item) || item.ChildNodes.Count != 1 ||
+                item.Prefix != expectedPrefix || item.Attributes.Count != generatedNamespace.Length ||
+                value is null || value.LocalName != "t" || value.NamespaceURI != Main ||
+                value.Prefix != expectedPrefix || value.Attributes.Count != spaceAttributes.Length ||
+                preserveSpace != (spaceAttributes.Length == 1) ||
+                !expectations.Any(expectation => expectation.Kind == "text" && expectation.Value == value.InnerText))
                 issues.Add(new("G5", "UNDECLARED_SHARED_STRING_CHANGE", $"unexpected <si> index {index}"));
         }
         var oldReferences = 0;

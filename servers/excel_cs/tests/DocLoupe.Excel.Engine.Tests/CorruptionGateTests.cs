@@ -338,6 +338,60 @@ public sealed class CorruptionGateTests
     }
 
     [Theory]
+    [InlineData("<si>", "<si xmlns:extra=\"urn:test\">")]
+    [InlineData("<t>", "<t xml:space=\"preserve\">")]
+    public void G5RejectsExtraAttributesOnNewSharedString(string from, string to)
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/sharedStrings.xml";
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(fixture.Source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "text", "new value")]);
+            store.Save(edited);
+        }
+        const string item = "<si><t>new value</t></si>";
+        var altered = item.Replace(from, to, StringComparison.Ordinal);
+        var broken = fixture.Corrupt(part, xml => xml.Replace(item, altered, StringComparison.Ordinal), edited);
+        var declared = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End,
+            edit.Before, edit.Part.Equals(part, StringComparison.OrdinalIgnoreCase)
+                ? Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(edit.After).Replace(item,
+                    altered, StringComparison.Ordinal)) : edit.After)).ToArray();
+        var intent = new CellExpectation("Sheet1", "B1", "text", "new value");
+        Assert.Empty(P2aGates.CheckPackage(broken, result.ChangedParts));
+        var schema = DetachedValidator.Check(fixture.Source, broken, result.ChangedParts);
+        Assert.Empty(schema.Issues);
+        Assert.Empty(schema.Gaps);
+        Assert.Empty(P2aMarkupGate.Check(fixture.Source, broken, result.ChangedParts));
+        Assert.Empty(P2aGates.CheckIntent(broken, [intent]));
+        Assert.Empty(P2aGates.CheckPreservation(fixture.Source, broken, declared, []));
+        Assert.Empty(P2aGates.CheckTouchedCells(fixture.Source, broken, [intent]));
+        Assert.Contains(P2aGates.CheckSemanticPreservation(fixture.Source, broken, [intent], declared),
+            issue => issue.Gate == "G5" && issue.Code == "UNDECLARED_SHARED_STRING_CHANGE");
+    }
+
+    [Theory]
+    [InlineData("default", " leading")]
+    [InlineData("prefixed-x", "trailing ")]
+    public void G5AcceptsGeneratedSharedStringNamespaceAndSpace(string variant, string text)
+    {
+        using var fixture = new Fixture();
+        var source = Path.Combine(fixture.Directory, variant + ".xlsx");
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "text", text)]);
+            store.Save(edited);
+        }
+        var intent = new CellExpectation("Sheet1", "B1", "text", text);
+        Assert.Empty(P2aGates.CheckSemanticPreservation(source, edited, [intent], result.Edits.Select(edit =>
+            new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After))));
+        Assert.Empty(P2aGates.CheckTouchedCells(source, edited, [intent]));
+    }
+
+    [Theory]
     [InlineData("<!-- -->")]
     [InlineData("<![CDATA[ ]]>")]
     public void G5RejectsFormattingCharacterDataOutsideNewSharedString(string markup)
