@@ -511,12 +511,17 @@ public sealed class ExcelSessions : IDisposable
             try { previous = Readback(priorPath, operations); }
             finally { if (priorPath != session.BasePath) File.Delete(priorPath); }
             var (diff, diffSummary) = DescribeDiff(previous, readback, maxDiffItems);
-            var results = operations.Select((operation, index) => new
+            var results = operations.Select((operation, index) =>
             {
-                index = operation.SourceIndex < 0 ? index : operation.SourceIndex,
-                op = operation.Operation,
-                status = dryRun ? "planned" : "applied",
-                resolved = operation.Sheet + "!" + operation.Address
+                var result = new Dictionary<string, object?>
+                {
+                    ["index"] = operation.SourceIndex < 0 ? index : operation.SourceIndex,
+                    ["op"] = operation.Operation,
+                    ["status"] = dryRun ? "planned" : "applied",
+                    ["resolved"] = operation.Sheet + "!" + operation.Address
+                };
+                if (operation.Label is not null) result["label"] = operation.Label;
+                return result;
             }).ToArray();
             if (dryRun)
                 return new { session = id, dry_run = true, revision = session.Revision,

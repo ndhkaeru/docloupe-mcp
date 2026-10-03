@@ -145,16 +145,28 @@ public sealed class DryRunTests
             var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, "default.xlsx")))
                 .GetProperty("session").GetString()!;
             var expanded = JsonSerializer.Deserialize<SetValueRequest>(
-                """{"op":"set_value","target":"Sheet1!E6:F6","value":1}""")!
+                """{"op":"set_value","label":"seed row","target":"Sheet1!E6:F6","value":1}""")!
                 .NormalizeMany(null).Select(cell => cell with { SourceIndex = 0 }).ToArray();
-            var plan = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, expanded, dryRun: true));
+            var unlabeled = Request("""{"op":"set_value","target":"Sheet1!G6","value":2}""") with { SourceIndex = 1 };
+            var plan = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, [.. expanded, unlabeled], dryRun: true));
             var results = plan.GetProperty("results").EnumerateArray().ToArray();
-            Assert.Equal(2, results.Length);
-            Assert.All(results, item => Assert.Equal(0, item.GetProperty("index").GetInt32()));
+            Assert.Equal(3, results.Length);
+            Assert.All(results[..2], item => Assert.Equal(0, item.GetProperty("index").GetInt32()));
+            Assert.All(results[..2], item => Assert.Equal("seed row", item.GetProperty("label").GetString()));
             Assert.Equal("Sheet1!E6", results[0].GetProperty("resolved").GetString());
             Assert.Equal("Sheet1!F6", results[1].GetProperty("resolved").GetString());
-            Assert.Equal(2, plan.GetProperty("readback").EnumerateObject().Count());
-            sessions.Close(id, false);
+            Assert.Equal(1, results[2].GetProperty("index").GetInt32());
+            Assert.False(results[2].TryGetProperty("label", out _));
+            Assert.Equal(3, plan.GetProperty("readback").EnumerateObject().Count());
+            var applied = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, [.. expanded, unlabeled]));
+            Assert.Equal("seed row", applied.GetProperty("results")[0].GetProperty("label").GetString());
+            Assert.False(applied.GetProperty("results")[2].TryGetProperty("label", out _));
+            var tooLong = JsonSerializer.Deserialize<SetValueRequest>(JsonSerializer.Serialize(new
+            {
+                op = "set_value", label = new string('x', 257), target = "Sheet1!B1", value = 1
+            }))!;
+            Assert.Throws<ArgumentException>(() => tooLong.NormalizeMany(null));
+            sessions.Close(id, true);
         }
         finally { Directory.Delete(directory, true); }
     }

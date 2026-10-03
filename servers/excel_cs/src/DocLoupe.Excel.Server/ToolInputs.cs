@@ -9,6 +9,8 @@ public sealed class SetValueRequest
 {
     [JsonPropertyName("op")]
     public required string Op { get; init; }
+    [JsonPropertyName("label")]
+    public string? Label { get; init; }
     [JsonPropertyName("sheet")]
     public string? Sheet { get; init; }
     [JsonPropertyName("target")]
@@ -42,6 +44,7 @@ public sealed class SetValueRequest
 
     public SetValueOp Normalize(string? defaultSheet)
     {
+        if (Label is { Length: > 256 }) throw new ArgumentException("Op label exceeds 256 characters");
         if (Op is not ("set_value" or "set_formula" or "clear")) throw new NotSupportedException("Unsupported cell operation");
         if (Other is { Count: > 0 }) throw new NotSupportedException("Unsupported cell operation fields");
         if (Op == "clear")
@@ -58,7 +61,7 @@ public sealed class SetValueRequest
             var clearAddress = CellAddress.Parse(Target).ToString();
             return new SetValueOp(clearSheet, clearAddress, "blank", null,
                 Operation: "clear", RemoveCell: RemoveCells.ValueKind == JsonValueKind.True,
-                Expect: NormalizeExpect(clearSheet, clearAddress));
+                Expect: NormalizeExpect(clearSheet, clearAddress), Label: Label);
         }
         if (What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
             throw new NotSupportedException("what and remove_cells require clear");
@@ -96,7 +99,7 @@ public sealed class SetValueRequest
             }
             return new SetValueOp(name, address, "formula", formula, Operation: Op,
                 KeepCache: Cache is { ValueKind: JsonValueKind.String } policy && policy.GetString() == "keep",
-                ExplicitCache: explicitCache, Expect: NormalizeExpect(name, address));
+                ExplicitCache: explicitCache, Expect: NormalizeExpect(name, address), Label: Label);
         }
         if (Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null)
             throw new NotSupportedException("Formula fields require set_formula");
@@ -120,7 +123,7 @@ public sealed class SetValueRequest
         if (kind == "text" && scalar?.StartsWith('=') == true && !AsText)
             throw new ArgumentException("AMBIGUOUS_FORMULA_TEXT");
         return new SetValueOp(name, address, kind, scalar, RichPolicy, AsText, Op,
-            Expect: NormalizeExpect(name, address));
+            Expect: NormalizeExpect(name, address), Label: Label);
     }
 
     private CellPrecondition? NormalizeExpect(string sheet, string address)
@@ -151,6 +154,12 @@ public sealed class SetValueRequest
     }
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)
+    {
+        if (Label is { Length: > 256 }) throw new ArgumentException("Op label exceeds 256 characters");
+        return NormalizeManyCore(defaultSheet).Select(operation => operation with { Label = Label }).ToArray();
+    }
+
+    private SetValueOp[] NormalizeManyCore(string? defaultSheet)
     {
         if (Expect.ValueKind != JsonValueKind.Undefined && Op is not ("set_value" or "set_values" or "set_formula" or "fill" or "clear"))
             throw new NotSupportedException("expect requires a supported cell operation");

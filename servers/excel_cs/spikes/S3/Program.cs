@@ -214,13 +214,14 @@ try
     var planned = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1", ["dry_run"] = true,
-        ["ops"] = new[] { new { op = "set_value", target = "B1", value = 99, expect = new { value = 42 } } }
+        ["ops"] = new[] { new { op = "set_value", label = "replace amount", target = "B1", value = 99, expect = new { value = 42 } } }
     });
     if (planned.IsError == true || planned.StructuredContent?.GetProperty("data").GetProperty("dry_run").GetBoolean() != true ||
         planned.StructuredContent?.GetProperty("data").GetProperty("revision_after").GetInt32() != 0 ||
         planned.StructuredContent?.GetProperty("data").GetProperty("intent").GetArrayLength() != 1 ||
         planned.StructuredContent?.GetProperty("data").GetProperty("readback").GetProperty("Sheet1!B1").GetProperty("Value").GetString() != "99" ||
         planned.StructuredContent?.GetProperty("data").GetProperty("results")[0].GetProperty("status").GetString() != "planned" ||
+        planned.StructuredContent?.GetProperty("data").GetProperty("results")[0].GetProperty("label").GetString() != "replace amount" ||
         planned.StructuredContent?.GetProperty("data").GetProperty("diff")[0].GetProperty("path").GetString() != "Sheet1!B1.value")
         throw new InvalidOperationException("MCP dry run failed: " + planned.StructuredContent?.GetRawText());
     var cappedPlan = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
