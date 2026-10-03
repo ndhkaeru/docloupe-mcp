@@ -154,9 +154,10 @@ public sealed class ExcelSessions : IDisposable
         {
             session.CheckSource();
             if (addresses.Length == 0) throw new ArgumentException("At least one cell address is required");
-            if (view is not ("cells" or "values")) throw new NotSupportedException("Only cells and rectangular values views are supported");
-            if (view == "values" && addresses.Length != 1)
-                throw new NotSupportedException("Values view requires one rectangular range");
+            if (view is not ("cells" or "values" or "markdown"))
+                throw new NotSupportedException("Only cells, values and markdown views are supported");
+            if (view != "cells" && addresses.Length != 1)
+                throw new NotSupportedException("Values and markdown views require one rectangular range");
             var targets = new List<(string Sheet, string Address)>();
             foreach (var address in addresses)
             {
@@ -182,7 +183,7 @@ public sealed class ExcelSessions : IDisposable
             try
             {
                 var existing = P2aGates.ReadCells(source, selectedSheet, targets.Select(target => target.Address));
-                if (view == "values")
+                if (view is "values" or "markdown")
                 {
                     var indexed = new Dictionary<string, CellRead>(StringComparer.Ordinal);
                     foreach (var cell in existing)
@@ -191,6 +192,9 @@ public sealed class ExcelSessions : IDisposable
                     var bounds = addresses[0].Split(':');
                     var first = CellAddress.Parse(bounds[0]);
                     var last = bounds.Length == 2 ? CellAddress.Parse(bounds[1]) : first;
+                    if (view == "markdown")
+                        return new { session = id, revision = session.Revision, sheet = selectedSheet,
+                            view = "markdown", markdown = ReadMarkdown(first, last, indexed) };
                     var width = last.Column - first.Column + 1;
                     var rows = targets.Chunk(width).Select(row => row.Select(target =>
                         indexed.TryGetValue(target.Address, out var cell) ? TypedValue(cell) : null).ToArray()).ToArray();
@@ -212,6 +216,39 @@ public sealed class ExcelSessions : IDisposable
             finally { if (source != session.Path) File.Delete(source); }
         }
     }
+
+    private static string ReadMarkdown(CellAddress first, CellAddress last,
+        IReadOnlyDictionary<string, CellRead> cells)
+    {
+        var text = new System.Text.StringBuilder("| row |");
+        for (var column = first.Column; column <= last.Column; column++)
+            text.Append(' ').Append(new CellAddress(1, column).ToString()[..^1]).Append(" |");
+        text.AppendLine().Append("| --- |");
+        for (var column = first.Column; column <= last.Column; column++) text.Append(" --- |");
+        for (var row = first.Row; row <= last.Row; row++)
+        {
+            text.AppendLine().Append("| ").Append(row).Append(" |");
+            for (var column = first.Column; column <= last.Column; column++)
+            {
+                cells.TryGetValue(new CellAddress(row, column).ToString(), out var cell);
+                var value = cell?.Value ?? "";
+                if (cell?.Formula is { } formula) value += " ƒ =" + formula;
+                if (cell is not null && IsRich(cell)) value = "† " + value;
+                text.Append(' ').Append(value.Replace("\\", "\\\\", StringComparison.Ordinal)
+                    .Replace("|", "\\|", StringComparison.Ordinal)
+                    .Replace("<", "&lt;", StringComparison.Ordinal)
+                    .Replace(">", "&gt;", StringComparison.Ordinal)
+                    .Replace("\r\n", "<br>", StringComparison.Ordinal)
+                    .Replace("\n", "<br>", StringComparison.Ordinal)
+                    .Replace("\r", "<br>", StringComparison.Ordinal)).Append(" |");
+            }
+        }
+        return text.ToString();
+    }
+
+    private static bool IsRich(CellRead cell) =>
+        System.Text.RegularExpressions.Regex.IsMatch(cell.SharedMarkup ?? cell.CellMarkup ?? "",
+            @"<([A-Za-z_][\w.-]*:)?r(?=[\s>/])", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static object? TypedValue(CellRead cell)
     {

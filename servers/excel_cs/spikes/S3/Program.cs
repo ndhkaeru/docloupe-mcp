@@ -143,6 +143,13 @@ try
         typedRead.StructuredContent?.GetProperty("data").GetProperty("rows")[0][1].GetInt32() != 42 ||
         typedRead.StructuredContent?.GetProperty("data").GetProperty("rows")[1][0].ValueKind != System.Text.Json.JsonValueKind.Null)
         throw new InvalidOperationException("Typed values view failed: " + typedRead.StructuredContent?.GetRawText());
+    var markdownRead = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["target"] = "Sheet1!B1:C2", ["view"] = "markdown"
+    });
+    if (markdownRead.IsError == true ||
+        markdownRead.StructuredContent?.GetProperty("data").GetProperty("markdown").GetString()?.Contains("| 1 | 42 | 2 ƒ =1+1 |", StringComparison.Ordinal) != true)
+        throw new InvalidOperationException("Markdown range failed: " + markdownRead.StructuredContent?.GetRawText());
     var readSchema = tools.Single(tool => tool.Name == "excel_read").ProtocolTool.InputSchema;
     if (readSchema.GetProperty("properties").GetProperty("target").GetProperty("oneOf").GetArrayLength() != 2)
         throw new InvalidOperationException("Read target array is missing from MCP input schema: " + readSchema.GetRawText());
