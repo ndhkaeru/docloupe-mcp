@@ -143,6 +143,41 @@ public sealed class CorruptionGateTests
             issue => issue.Gate == "G3" && issue.Code == "PREFIX_REWRITTEN");
     }
 
+    [Fact]
+    public void G3RejectsNewRowUsingUnexpectedNamespacePrefix()
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var source = fixture.Corrupt(part, xml => xml.Replace(
+            "<worksheet xmlns=", "<worksheet xmlns:a=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns=",
+            StringComparison.Ordinal));
+        static string Rewrite(string xml) => Regex.Replace(xml, @"<row r=""2"">.*?</row>",
+            match => match.Value.Replace("<row ", "<a:row ", StringComparison.Ordinal)
+                .Replace("</row>", "</a:row>", StringComparison.Ordinal), RegexOptions.Singleline);
+        var edited = Path.Combine(fixture.Directory, "edited-row.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B2", "number", "100")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt(part, Rewrite, edited);
+        var declared = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End,
+            edit.Before, edit.Part.Equals(part, StringComparison.OrdinalIgnoreCase)
+                ? Encoding.UTF8.GetBytes(Rewrite(Encoding.UTF8.GetString(edit.After))) : edit.After)).ToArray();
+        var intent = new CellExpectation("Sheet1", "B2", "number", "100");
+        Assert.Empty(P2aGates.CheckPackage(broken, result.ChangedParts));
+        var schema = DetachedValidator.Check(source, broken, result.ChangedParts);
+        Assert.Empty(schema.Issues);
+        Assert.Empty(schema.Gaps);
+        Assert.Empty(P2aGates.CheckIntent(broken, [intent]));
+        Assert.Empty(P2aGates.CheckPreservation(source, broken, declared, []));
+        Assert.Empty(P2aGates.CheckTouchedCells(source, broken, [intent]));
+        Assert.Empty(P2aGates.CheckSemanticPreservation(source, broken, [intent], declared));
+        Assert.Contains(P2aMarkupGate.Check(source, broken, result.ChangedParts),
+            issue => issue.Gate == "G3" && issue.Code == "PREFIX_REWRITTEN");
+    }
+
     [Theory]
     [InlineData("default")]
     [InlineData("prefixed-x")]

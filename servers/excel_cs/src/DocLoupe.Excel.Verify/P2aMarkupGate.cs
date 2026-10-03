@@ -37,6 +37,29 @@ public static class P2aMarkupGate
                 if (!oldNamespaces.SequenceEqual(newNamespaces)) issues.Add(new("G3", "ROOT_NAMESPACE_CHANGED", part));
                 if (oldRoot.DocumentElement!.NamespaceURI == Main)
                 {
+                    var oldData = oldRoot.DocumentElement.ChildNodes.OfType<XmlElement>()
+                        .SingleOrDefault(element => element.LocalName == "sheetData" && element.NamespaceURI == Main);
+                    var newData = newRoot.DocumentElement!.ChildNodes.OfType<XmlElement>()
+                        .SingleOrDefault(element => element.LocalName == "sheetData" && element.NamespaceURI == Main);
+                    if (newData is not null)
+                    {
+                        if (oldData is null ? newData.Prefix != oldRoot.DocumentElement.Prefix : newData.Name != oldData.Name)
+                            issues.Add(new("G3", "PREFIX_REWRITTEN", $"{part}: sheetData"));
+                        var oldRows = oldData?.ChildNodes.OfType<XmlElement>()
+                            .Where(element => element.LocalName == "row" && element.NamespaceURI == Main)
+                            .ToDictionary(element => element.GetAttribute("r"))
+                            ?? new Dictionary<string, XmlElement>();
+                        var rowPrefix = oldData?.ChildNodes.OfType<XmlElement>()
+                            .FirstOrDefault(element => element.LocalName == "row" && element.NamespaceURI == Main)?.Prefix
+                            ?? oldData?.Prefix ?? oldRoot.DocumentElement.Prefix;
+                        foreach (var row in newData.ChildNodes.OfType<XmlElement>()
+                            .Where(element => element.LocalName == "row" && element.NamespaceURI == Main))
+                        {
+                            oldRows.TryGetValue(row.GetAttribute("r"), out var previous);
+                            if (previous is null ? row.Prefix != rowPrefix : row.Name != previous.Name)
+                                issues.Add(new("G3", "PREFIX_REWRITTEN", $"{part}: row {row.GetAttribute("r")}"));
+                        }
+                    }
                     var oldCells = oldRoot.GetElementsByTagName("c", Main).OfType<XmlElement>()
                         .ToDictionary(cell => cell.GetAttribute("r"));
                     foreach (var cell in newRoot.GetElementsByTagName("c", Main).OfType<XmlElement>())
