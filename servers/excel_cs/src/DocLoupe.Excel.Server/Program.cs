@@ -61,8 +61,11 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
         Handle(() =>
         {
             if (scope?.Other is { Count: > 0 }) throw new NotSupportedException("Unsupported find scope fields");
-            var (pattern, isRegex, expectedValue) = query.Normalize();
-            return sessions.Find(session, scope?.Sheet, scope?.Target, pattern, isRegex, @in, case_sensitive, normalize,
+            var (pattern, isRegex, expectedValue, formulaContains) = query.Normalize();
+            if (formulaContains && @in is not ("value" or "formula"))
+                throw new NotSupportedException("formula_contains only searches formula text");
+            return sessions.Find(session, scope?.Sheet, scope?.Target, pattern, isRegex,
+                formulaContains ? "formula" : @in, case_sensitive, normalize,
                 max_results, expectedValue);
         }), new McpServerToolCreateOptions { Name = "excel_find" }),
     McpServerTool.Create((string session, int base_revision, SetValueRequest[] ops, string? sheet = null, bool dry_run = false) => Handle(() => sessions.Apply(session, base_revision, ops.SelectMany((op, index) => op.NormalizeMany(sheet).Select(cell => cell with { SourceIndex = index })).ToArray(), dry_run)), new McpServerToolCreateOptions { Name = "excel_apply" }),

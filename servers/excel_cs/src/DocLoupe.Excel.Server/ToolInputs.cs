@@ -249,16 +249,18 @@ public sealed class FindQueryRequest
     public string? Text { get; init; }
     [JsonPropertyName("regex")]
     public string? Regex { get; init; }
+    [JsonPropertyName("formula_contains")]
+    public string? FormulaContains { get; init; }
     [JsonPropertyName("value")]
     public JsonElement Value { get; init; }
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Other { get; init; }
 
-    public (string Pattern, bool IsRegex, DocLoupe.Excel.Verify.ValueAssertion? ExpectedValue) Normalize()
+    public (string Pattern, bool IsRegex, DocLoupe.Excel.Verify.ValueAssertion? ExpectedValue, bool FormulaContains) Normalize()
     {
         if (Other is { Count: > 0 } || (Text is null ? 0 : 1) + (Regex is null ? 0 : 1) +
-            (Value.ValueKind == JsonValueKind.Undefined ? 0 : 1) != 1)
-            throw new NotSupportedException("Exactly one of query.text, query.regex or query.value is supported");
+            (FormulaContains is null ? 0 : 1) + (Value.ValueKind == JsonValueKind.Undefined ? 0 : 1) != 1)
+            throw new NotSupportedException("Exactly one of query.text, query.regex, query.formula_contains or query.value is supported");
         if (Value.ValueKind != JsonValueKind.Undefined)
         {
             var assertion = new SaveAssertionRequest
@@ -266,11 +268,11 @@ public sealed class FindQueryRequest
                 Target = "Sheet1!A1",
                 Expected = JsonSerializer.SerializeToElement(new Dictionary<string, JsonElement> { ["value"] = Value })
             }.Normalize();
-            return ("", false, assertion);
+            return ("", false, assertion, false);
         }
-        var pattern = Text ?? Regex!;
+        var pattern = Text ?? Regex ?? FormulaContains!;
         if (pattern.Length is < 1 or > 512) throw new ArgumentException("Search pattern must contain 1..512 characters");
-        return (pattern, Regex is not null, null);
+        return (pattern, Regex is not null, null, FormulaContains is not null);
     }
 }
 

@@ -238,6 +238,14 @@ try
             new { op = "set_formula", sheet = "Sheet1", target = "Q11", formula = "1/0", cache = (object)new { value = new { error = "#DIV/0!" } } } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
+    var formulaMatches = await client.CallToolAsync("excel_find", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["query"] = new { formula_contains = "B1+2" },
+        ["scope"] = new { sheet = "Sheet1", target = "C1" }
+    });
+    if (formulaMatches.IsError == true || formulaMatches.StructuredContent?.GetProperty("data")
+        .GetProperty("matches")[0].GetProperty("addr").GetString() != "Sheet1!C1")
+        throw new InvalidOperationException("MCP formula_contains failed: " + formulaMatches.StructuredContent?.GetRawText());
     var status = await client.CallToolAsync("excel_status", new Dictionary<string, object?> { ["session"] = session });
     if (status.IsError == true || status.StructuredContent?.GetProperty("data").GetProperty("revision").GetInt32() != 1 ||
         status.StructuredContent?.GetProperty("data").GetProperty("ledger").GetArrayLength() != 1)

@@ -66,6 +66,40 @@ public sealed class FindTests
     [InlineData("opc-percent-case")]
     [InlineData("new-shared-strings")]
     [InlineData("nested-workbook")]
+    public void FormulaContainsUsesBoundedFormulaSearchWithoutMatchingCachedValues(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-find-formula-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            var query = JsonSerializer.Deserialize<FindQueryRequest>("{\"formula_contains\":\"1+1\"}")!.Normalize();
+            Assert.True(query.FormulaContains);
+            Assert.False(query.IsRegex);
+            var result = JsonSerializer.SerializeToElement(sessions.Find(id, "Sheet1", "A1:D3",
+                query.Pattern, query.IsRegex, searchIn: "formula"));
+            Assert.Equal("Sheet1!C1", Assert.Single(result.GetProperty("matches").EnumerateArray())
+                .GetProperty("addr").GetString());
+            Assert.Equal(12, result.GetProperty("total_scanned").GetInt32());
+            Assert.Empty(JsonSerializer.SerializeToElement(sessions.Find(id, "Sheet1", "A1:D3",
+                "1+1", false, searchIn: "value")).GetProperty("matches").EnumerateArray());
+            Assert.Equal("Sheet1!C1", Assert.Single(JsonSerializer.SerializeToElement(sessions.Find(id,
+                "Sheet1", "A1:D3", "1+1", false, searchIn: "formula", caseSensitive: true))
+                .GetProperty("matches").EnumerateArray()).GetProperty("addr").GetString());
+            sessions.Close(id, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
     public void TypedValueSearchChecksKindsAndMissingCells(string variant)
     {
         var directory = Path.Combine(Path.GetTempPath(), "docloupe-find-value-" + Guid.NewGuid().ToString("N"));
@@ -77,7 +111,7 @@ public sealed class FindTests
                 .GetProperty("session").GetString()!;
             string[] Search(string target, string query, bool caseSensitive = false, string normalize = "nfc")
             {
-                var (pattern, isRegex, expected) = JsonSerializer.Deserialize<FindQueryRequest>(query)!.Normalize();
+                var (pattern, isRegex, expected, _) = JsonSerializer.Deserialize<FindQueryRequest>(query)!.Normalize();
                 var result = sessions.Find(id, "Sheet1", target, pattern, isRegex,
                     caseSensitive: caseSensitive, normalize: normalize, expectedValue: expected);
                 return JsonSerializer.SerializeToElement(result).GetProperty("matches").EnumerateArray()
@@ -190,7 +224,9 @@ public sealed class FindTests
                     "{}", "{\"text\":\"x\",\"regex\":\"y\"}",
                     "{\"text\":\"x\",\"style\":{}}", "{\"regex\":\"\"}",
                     "{\"value\":[]}", "{\"value\":{}}", "{\"value\":1e2147483648}",
-                    "{\"value\":42,\"regex\":\"x\"}"
+                    "{\"value\":42,\"regex\":\"x\"}",
+                    "{\"formula_contains\":\"\"}", "{\"formula_contains\":\"x\",\"text\":\"x\"}",
+                    "{\"formula_contains\":\"x\",\"value\":1}"
                 })
                 Assert.ThrowsAny<Exception>(() => JsonSerializer.Deserialize<FindQueryRequest>(json)!.Normalize());
             Assert.ThrowsAny<Exception>(() => sessions.Find(id, "Sheet1", "A1:A501", "x", false));
