@@ -504,10 +504,17 @@ public sealed class ExcelSessions : IDisposable
             var next = Coalesce(session.Operations.Concat(operations));
             var result = SetValueEngine.Apply(candidate, next);
             var readback = Readback(candidate, operations);
+            var results = operations.Select((operation, index) => new
+            {
+                index = operation.SourceIndex < 0 ? index : operation.SourceIndex,
+                op = operation.Operation,
+                status = dryRun ? "planned" : "applied",
+                resolved = operation.Sheet + "!" + operation.Address
+            }).ToArray();
             if (dryRun)
                 return new { session = id, dry_run = true, revision = session.Revision,
                     revision_before = baseRevision, revision_after = baseRevision,
-                    intent = result.Intent, changed_parts = result.ChangedParts, readback };
+                    intent = result.Intent, changed_parts = result.ChangedParts, readback, results };
             session.Operations.AddRange(operations);
             session.RevisionLengths.Add(operations.Length);
             session.Revision++;
@@ -516,7 +523,7 @@ public sealed class ExcelSessions : IDisposable
             session.Publish();
             return new { session = id, dry_run = false, revision = session.Revision,
                 revision_before = baseRevision, revision_after = session.Revision,
-                intent = result.Intent, changed_parts = result.ChangedParts, readback };
+                intent = result.Intent, changed_parts = result.ChangedParts, readback, results };
         }
     }
 

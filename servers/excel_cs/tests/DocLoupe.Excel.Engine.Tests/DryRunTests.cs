@@ -36,6 +36,14 @@ public sealed class DryRunTests
             Assert.Equal(1, plan.GetProperty("revision_before").GetInt32());
             Assert.Equal(1, plan.GetProperty("revision_after").GetInt32());
             Assert.Equal(1, plan.GetProperty("revision").GetInt32());
+            var plannedResults = plan.GetProperty("results");
+            Assert.Equal(2, plannedResults.GetArrayLength());
+            Assert.Equal(0, plannedResults[0].GetProperty("index").GetInt32());
+            Assert.Equal("set_value", plannedResults[0].GetProperty("op").GetString());
+            Assert.Equal("planned", plannedResults[0].GetProperty("status").GetString());
+            Assert.Equal("Sheet1!B1", plannedResults[0].GetProperty("resolved").GetString());
+            Assert.Equal(1, plannedResults[1].GetProperty("index").GetInt32());
+            Assert.Equal("Sheet1!G4", plannedResults[1].GetProperty("resolved").GetString());
             var plannedCells = plan.GetProperty("readback");
             Assert.Equal(2, plannedCells.EnumerateObject().Count());
             Assert.Equal("replacement", plannedCells.GetProperty("Sheet1!B1").GetProperty("Value").GetString());
@@ -51,6 +59,7 @@ public sealed class DryRunTests
             Assert.Equal(plan.GetProperty("intent").GetRawText(), applied.GetProperty("intent").GetRawText());
             Assert.Equal(plan.GetProperty("changed_parts").GetRawText(), applied.GetProperty("changed_parts").GetRawText());
             Assert.Equal(plannedCells.GetRawText(), applied.GetProperty("readback").GetRawText());
+            Assert.Equal("applied", applied.GetProperty("results")[0].GetProperty("status").GetString());
             var output = Path.Combine(directory, "saved.xlsx");
             sessions.Save(id, output);
             Assert.Equal("replacement", Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["B1"])).Value);
@@ -77,6 +86,31 @@ public sealed class DryRunTests
             var applied = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, [request]));
             Assert.Equal(JsonValueKind.Null, applied.GetProperty("readback").GetProperty("Sheet1!B1").ValueKind);
             sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void ResultsRetainOriginalIndexForExpandedRange()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-dry-results-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, "default.xlsx")))
+                .GetProperty("session").GetString()!;
+            var expanded = JsonSerializer.Deserialize<SetValueRequest>(
+                """{"op":"set_value","target":"Sheet1!E6:F6","value":1}""")!
+                .NormalizeMany(null).Select(cell => cell with { SourceIndex = 0 }).ToArray();
+            var plan = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, expanded, dryRun: true));
+            var results = plan.GetProperty("results").EnumerateArray().ToArray();
+            Assert.Equal(2, results.Length);
+            Assert.All(results, item => Assert.Equal(0, item.GetProperty("index").GetInt32()));
+            Assert.Equal("Sheet1!E6", results[0].GetProperty("resolved").GetString());
+            Assert.Equal("Sheet1!F6", results[1].GetProperty("resolved").GetString());
+            Assert.Equal(2, plan.GetProperty("readback").EnumerateObject().Count());
+            sessions.Close(id, false);
         }
         finally { Directory.Delete(directory, true); }
     }
