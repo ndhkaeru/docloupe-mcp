@@ -441,6 +441,7 @@ public static partial class P2aGates
         if (node is XmlElement element && element.NamespaceURI == Main && element.LocalName is
             ("worksheet" or "sheetData" or "row" or "workbook" or "sheets" or "sst" or "calcPr"))
             foreach (var child in element.ChildNodes.OfType<XmlCharacterData>().Where(child =>
+                child.NodeType is XmlNodeType.Text or XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace &&
                 string.IsNullOrWhiteSpace(child.Data)).ToArray())
                 element.RemoveChild(child);
         foreach (XmlNode child in node.ChildNodes) RemoveFormattingWhitespace(child);

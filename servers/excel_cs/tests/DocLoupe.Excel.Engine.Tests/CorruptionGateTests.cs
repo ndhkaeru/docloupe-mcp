@@ -337,6 +337,39 @@ public sealed class CorruptionGateTests
             issue => issue.Gate == "G5" && issue.Code == "UNDECLARED_SHARED_STRING_CHANGE");
     }
 
+    [Theory]
+    [InlineData("<!-- -->")]
+    [InlineData("<![CDATA[ ]]>")]
+    public void G5RejectsFormattingCharacterDataOutsideNewSharedString(string markup)
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/sharedStrings.xml";
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(fixture.Source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "text", "new value")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt(part, xml => xml.Replace("</sst>", markup + "</sst>", StringComparison.Ordinal), edited);
+        var declared = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End,
+            edit.Before, edit.Part.Equals(part, StringComparison.OrdinalIgnoreCase) &&
+                Encoding.UTF8.GetString(edit.After).Contains("<si>", StringComparison.Ordinal)
+                ? Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(edit.After).Replace("</si>",
+                    "</si>" + markup, StringComparison.Ordinal)) : edit.After)).ToArray();
+        var intent = new CellExpectation("Sheet1", "B1", "text", "new value");
+        Assert.Empty(P2aGates.CheckPackage(broken, result.ChangedParts));
+        var schema = DetachedValidator.Check(fixture.Source, broken, result.ChangedParts);
+        Assert.Empty(schema.Issues);
+        Assert.Empty(schema.Gaps);
+        Assert.Empty(P2aMarkupGate.Check(fixture.Source, broken, result.ChangedParts));
+        Assert.Empty(P2aGates.CheckIntent(broken, [intent]));
+        Assert.Empty(P2aGates.CheckPreservation(fixture.Source, broken, declared, []));
+        Assert.Empty(P2aGates.CheckTouchedCells(fixture.Source, broken, [intent]));
+        Assert.Contains(P2aGates.CheckSemanticPreservation(fixture.Source, broken, [intent], declared),
+            issue => issue.Gate == "G5" && issue.Code == "UNDECLARED_SHARED_STRING_CHANGE");
+    }
+
     [Fact]
     public void G5RejectsFabricatedSharedStringsMetadataAndRelationship()
     {
