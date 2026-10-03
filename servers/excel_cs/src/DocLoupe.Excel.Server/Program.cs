@@ -16,9 +16,10 @@ builder.Logging.ClearProviders();
 builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
     McpServerTool.Create((string path) => Handle(() => sessions.Open(path)), new McpServerToolCreateOptions { Name = "excel_open" }),
     McpServerTool.Create((string target_path, string? template_path = null, string[]? sheets = null,
-        string? active_sheet = null, string format = "xlsx") => Handle(() =>
+        string? active_sheet = null, string? format = null) => Handle(() =>
         {
-            if (format != "xlsx") throw new NotSupportedException("Creation currently supports xlsx only");
+            if (format is not null && !Path.GetExtension(target_path).Equals("." + format, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("format must match target_path extension");
             if (template_path is not null)
             {
                 if (sheets is not null || active_sheet is not null)

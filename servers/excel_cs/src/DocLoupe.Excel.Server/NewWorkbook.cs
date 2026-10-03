@@ -11,8 +11,16 @@ internal static class NewWorkbook
     private const string Relationships = "http://schemas.openxmlformats.org/package/2006/relationships";
     private const string Types = "http://schemas.openxmlformats.org/package/2006/content-types";
 
-    public static string[] Write(string path, string[]? requestedSheets, string? activeSheet)
+    public static string[] Write(string path, string[]? requestedSheets, string? activeSheet, string format)
     {
+        var workbookContentType = format switch
+        {
+            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+            "xlsm" => "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+            "xltx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+            "xltm" => "application/vnd.ms-excel.template.macroEnabled.main+xml",
+            _ => throw new NotSupportedException("Unsupported workbook format")
+        };
         var sheets = requestedSheets ?? ["Sheet1"];
         if (sheets.Length is < 1 or > 256 || sheets.Any(sheet => string.IsNullOrWhiteSpace(sheet) ||
             sheet.Length > 31 || sheet.IndexOfAny(['[', ']', ':', '*', '?', '/', '\\']) >= 0 ||
@@ -30,8 +38,7 @@ internal static class NewWorkbook
             writer.WriteStartElement("Types", Types);
             WriteContentType(writer, "Default", "Extension", "rels", "application/vnd.openxmlformats-package.relationships+xml");
             WriteContentType(writer, "Default", "Extension", "xml", "application/xml");
-            WriteContentType(writer, "Override", "PartName", "/xl/workbook.xml",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml");
+            WriteContentType(writer, "Override", "PartName", "/xl/workbook.xml", workbookContentType);
             for (var index = 0; index < sheets.Length; index++)
                 WriteContentType(writer, "Override", "PartName", $"/xl/worksheets/sheet{index + 1}.xml",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml");

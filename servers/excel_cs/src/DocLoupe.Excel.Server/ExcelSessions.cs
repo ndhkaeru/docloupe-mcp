@@ -45,9 +45,9 @@ public sealed class ExcelSessions : IDisposable
     {
         var source = Path.GetFullPath(templatePath);
         var destination = Path.GetFullPath(targetPath);
-        if (Path.GetExtension(source).ToLowerInvariant() != ".xlsx" ||
-            Path.GetExtension(destination).ToLowerInvariant() != ".xlsx")
-            throw new NotSupportedException("Template creation currently supports .xlsx only");
+        if (Path.GetExtension(source).ToLowerInvariant() is not (".xlsx" or ".xlsm" or ".xltx" or ".xltm") ||
+            !Path.GetExtension(source).Equals(Path.GetExtension(destination), StringComparison.OrdinalIgnoreCase))
+            throw new NotSupportedException("Template and output must use the same OOXML workbook format");
         if (!File.Exists(source)) throw new FileNotFoundException("Template not found", source);
         if (!Directory.Exists(Path.GetDirectoryName(destination)))
             throw new DirectoryNotFoundException(Path.GetDirectoryName(destination));
@@ -71,8 +71,9 @@ public sealed class ExcelSessions : IDisposable
     public object CreateNew(string targetPath, string[]? sheets = null, string? activeSheet = null)
     {
         var destination = Path.GetFullPath(targetPath);
-        if (!Path.GetExtension(destination).Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException("New workbook creation currently supports .xlsx only");
+        var format = Path.GetExtension(destination).TrimStart('.').ToLowerInvariant();
+        if (format is not ("xlsx" or "xlsm" or "xltx" or "xltm"))
+            throw new NotSupportedException("Unsupported workbook format");
         if (!Directory.Exists(Path.GetDirectoryName(destination)))
             throw new DirectoryNotFoundException(Path.GetDirectoryName(destination));
         if (File.Exists(destination)) throw new IOException("Destination already exists");
@@ -80,11 +81,11 @@ public sealed class ExcelSessions : IDisposable
             "." + Guid.NewGuid().ToString("N") + ".staging");
         try
         {
-            var createdSheets = NewWorkbook.Write(staging, sheets, activeSheet);
+            var createdSheets = NewWorkbook.Write(staging, sheets, activeSheet, format);
             using (var package = new PackageStore(staging))
                 if (!package.SheetNames().SequenceEqual(createdSheets))
                     throw new InvalidDataException("Created worksheets disagree with package relationships");
-            var issues = P2aGates.CheckPackage(staging, [], ".xlsx");
+            var issues = P2aGates.CheckPackage(staging, [], Path.GetExtension(destination));
             var schema = DetachedValidator.CheckPackage(staging);
             if (issues.Count > 0 || schema.Issues.Count > 0 || schema.Gaps.Count > 0)
                 throw new InvalidDataException("Created workbook failed OPC or schema validation");

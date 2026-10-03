@@ -43,14 +43,18 @@ public sealed class CreateTests
         finally { Directory.Delete(directory, true); }
     }
 
-    [Fact]
-    public void NewWorkbookCreatesIndependentSheetsAndPassesTheFirstSave()
+    [Theory]
+    [InlineData("xlsx")]
+    [InlineData("xlsm")]
+    [InlineData("xltx")]
+    [InlineData("xltm")]
+    public void NewWorkbookCreatesIndependentSheetsAndPassesTheFirstSave(string format)
     {
         var directory = Path.Combine(Path.GetTempPath(), "docloupe-create-new-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         try
         {
-            var created = Path.Combine(directory, "fresh.xlsx");
+            var created = Path.Combine(directory, "fresh." + format);
             using var sessions = new ExcelSessions();
             var response = JsonSerializer.SerializeToElement(sessions.CreateNew(created,
                 ["Sheet1", "Dữ liệu"], "Dữ liệu"));
@@ -62,13 +66,39 @@ public sealed class CreateTests
             Assert.False(JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("dirty").GetBoolean());
             sessions.Apply(id, 0, [new SetValueOp("Sheet1", "B2", "number", "3"),
                 new SetValueOp("Dữ liệu", "A1", "text", "mới")]);
-            var output = Path.Combine(directory, "saved.xlsx");
+            var output = Path.Combine(directory, "saved." + format);
             var report = JsonSerializer.SerializeToElement(sessions.Save(id, output));
             Assert.Equal("verified", report.GetProperty("status").GetString());
             Assert.Equal("3", Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["B2"])).Value);
             Assert.Equal("mới", Assert.Single(P2aGates.ReadCells(output, "Dữ liệu", ["A1"])).Value);
             Assert.Empty(P2aGates.ReadCells(created, "Dữ liệu", ["A1"]));
             sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("xlsx")]
+    [InlineData("xlsm")]
+    [InlineData("xltx")]
+    [InlineData("xltm")]
+    public void TemplateCreationPreservesEveryWorkbookFormat(string format)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-create-format-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var original = Path.Combine(directory, "source." + format);
+            var copied = Path.Combine(directory, "copied." + format);
+            using var sessions = new ExcelSessions();
+            var initial = JsonSerializer.SerializeToElement(sessions.CreateNew(original));
+            sessions.Close(initial.GetProperty("session").GetString()!, false);
+            var created = JsonSerializer.SerializeToElement(sessions.CreateFromTemplate(original, copied));
+            Assert.Equal(File.ReadAllBytes(original), File.ReadAllBytes(copied));
+            Assert.Equal(copied, created.GetProperty("path").GetString());
+            sessions.Close(created.GetProperty("session").GetString()!, false);
+            Assert.Throws<NotSupportedException>(() => sessions.CreateFromTemplate(original,
+                Path.Combine(directory, format == "xlsx" ? "different.xlsm" : "different.xlsx")));
         }
         finally { Directory.Delete(directory, true); }
     }
