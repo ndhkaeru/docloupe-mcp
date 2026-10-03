@@ -37,6 +37,18 @@ public static class DetachedValidator
         return new SchemaReport(issues, gaps);
     }
 
+    public static SchemaReport ComparePackages(string source, string written)
+    {
+        using var before = ZipFile.OpenRead(source);
+        using var after = ZipFile.OpenRead(written);
+        var parts = before.Entries.Concat(after.Entries)
+            .Select(entry => entry.FullName)
+            .Where(part => part.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
+                && !part.Equals("[Content_Types].xml", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        return Check(source, written, parts);
+    }
+
     public static SchemaReport Check(string source, string written, IEnumerable<string> touched)
     {
         using var before = ZipFile.OpenRead(source);

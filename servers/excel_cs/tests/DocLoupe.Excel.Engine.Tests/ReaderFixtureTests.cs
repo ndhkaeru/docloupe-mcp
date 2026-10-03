@@ -63,6 +63,8 @@ public sealed class ReaderFixtureTests
         {
             SyntheticFixtures.Create(directory);
             var path = Path.Combine(directory, variant + ".xlsx");
+            var pristine = Path.Combine(directory, "pristine.xlsx");
+            File.Copy(path, pristine);
             using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
             {
                 var entry = archive.GetEntry(part)!;
@@ -79,6 +81,9 @@ public sealed class ReaderFixtureTests
             Assert.Equal("failed", result.Summary.Status);
             Assert.Empty(result.Summary.PackageIssues);
             Assert.Contains(result.Schema!.Issues, issue => issue.Part == part && issue.Code == "SCHEMA_ERROR");
+            var compared = sessions.Verify(path, pristine);
+            Assert.Equal("failed", compared.Status);
+            Assert.Contains(compared.SchemaDelta!.Issues, issue => issue.Part == part && issue.Code == "NEW_SCHEMA_ERROR");
             Assert.Equal(bytes, File.ReadAllBytes(path));
         }
         finally
@@ -142,6 +147,36 @@ public sealed class ReaderFixtureTests
             Assert.Equal("failed", invalid.Status);
             Assert.Null(invalid.Comparison);
             Assert.Contains(invalid.Before.Summary.PackageIssues, issue => issue.Code == "MISSING_PART");
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public void SessionlessCompareDoesNotTreatUnchangedBaselineSchemaErrorsAsNew()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-baseline-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var before = Path.Combine(directory, "default.xlsx");
+            var after = Path.Combine(directory, "after.xlsx");
+            ReplacePart(before, "xl/worksheets/sheet1.xml", "<sheetData>", "<bogus/><sheetData>");
+            File.Copy(before, after);
+            using var sessions = new ExcelSessions();
+            Assert.Equal("failed", sessions.Verify(before).Summary.Status);
+            var result = sessions.Verify(after, before);
+            Assert.Equal("unverified", result.Status);
+            Assert.NotEmpty(result.Before.Schema!.Issues);
+            Assert.Empty(result.SchemaDelta!.Issues);
+            Assert.Empty(result.Comparison!.Differences);
+            ReplacePart(after, "xl/worksheets/sheet1.xml", "<sheetData>", "<bogusAgain/><sheetData>");
+            var changed = sessions.Verify(after, before);
+            Assert.Equal("failed", changed.Status);
+            Assert.Contains(changed.SchemaDelta!.Gaps, issue => issue.Code == "G2_MASKED_BY_BASELINE_ERROR");
+            Assert.NotEmpty(changed.Comparison!.Differences);
         }
         finally
         {

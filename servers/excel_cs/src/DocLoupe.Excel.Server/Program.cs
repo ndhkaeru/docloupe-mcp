@@ -81,6 +81,8 @@ static CallToolResult Handle(Func<object> action)
                     markup_issues = comparison.After.Summary.MarkupIssues,
                     schema_issues = comparison.After.Schema?.Issues ?? [], schema_gaps = comparison.After.Schema?.Gaps ?? [] },
                 differences = comparison.Comparison?.Differences ?? [],
+                new_schema_issues = comparison.SchemaDelta?.Issues ?? [],
+                schema_gaps = comparison.SchemaDelta?.Gaps ?? [],
                 truncated = comparison.Comparison?.Truncated ?? false,
                 unverified_gates = new[] { "G1_REMAINING", "G2", "G3_REMAINING", "G4", "G5_REMAINING", "G6", "G7" }
             };

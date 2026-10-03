@@ -12,7 +12,7 @@ namespace DocLoupe.Excel.Server;
 
 public sealed record ReadOnlyVerification(string Path, VerificationSummary Summary, SchemaReport? Schema);
 public sealed record ReadOnlyComparison(ReadOnlyVerification Before, ReadOnlyVerification After,
-    PackageComparison? Comparison, string Status);
+    PackageComparison? Comparison, SchemaReport? SchemaDelta, string Status);
 
 public sealed class ExcelSessions : IDisposable
 {
@@ -102,11 +102,13 @@ public sealed class ExcelSessions : IDisposable
         if (maxDifferences is < 1 or > 5000) throw new ArgumentOutOfRangeException(nameof(maxDifferences));
         var before = Verify(beforePath);
         var after = Verify(afterPath);
-        if (before.Summary.Status == "failed" || after.Summary.Status == "failed")
-            return new ReadOnlyComparison(before, after, null, "failed");
+        if (before.Summary.PackageIssues.Count + before.Summary.MarkupIssues.Count
+            + after.Summary.PackageIssues.Count + after.Summary.MarkupIssues.Count > 0)
+            return new ReadOnlyComparison(before, after, null, null, "failed");
         var comparison = PackageComparator.Compare(before.Path, after.Path, maxDifferences);
-        return new ReadOnlyComparison(before, after, comparison,
-            comparison.HasDifferences ? "failed" : "unverified");
+        var schemaDelta = DetachedValidator.ComparePackages(before.Path, after.Path);
+        return new ReadOnlyComparison(before, after, comparison, schemaDelta,
+            comparison.HasDifferences || schemaDelta.Issues.Count > 0 ? "failed" : "unverified");
     }
 
     public object Status(string? id = null)
