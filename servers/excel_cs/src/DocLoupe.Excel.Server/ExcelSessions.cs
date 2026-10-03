@@ -195,7 +195,7 @@ public sealed class ExcelSessions : IDisposable
         }
     }
 
-    public object Apply(string id, int baseRevision, SetValueOp[] operations)
+    public object Apply(string id, int baseRevision, SetValueOp[] operations, bool dryRun = false)
     {
         var session = Get(id);
         lock (session.Sync)
@@ -227,13 +227,19 @@ public sealed class ExcelSessions : IDisposable
             using var candidate = new PackageStore(session.Path);
             var next = Coalesce(session.Operations.Concat(operations));
             var result = SetValueEngine.Apply(candidate, next);
+            if (dryRun)
+                return new { session = id, dry_run = true, revision = session.Revision,
+                    revision_before = baseRevision, revision_after = baseRevision,
+                    intent = result.Intent, changed_parts = result.ChangedParts };
             session.Operations.AddRange(operations);
             session.RevisionLengths.Add(operations.Length);
             session.Revision++;
             session.Ledger.Add(new LedgerEntry(session.Revision, operations.Length,
                 string.Join(", ", operations.Select(operation => $"{operation.Operation} {operation.Sheet}!{operation.Address}"))));
             session.Publish();
-            return new { session = id, revision = session.Revision, intent = result.Intent };
+            return new { session = id, dry_run = false, revision = session.Revision,
+                revision_before = baseRevision, revision_after = session.Revision,
+                intent = result.Intent, changed_parts = result.ChangedParts };
         }
     }
 

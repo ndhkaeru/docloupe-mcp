@@ -175,6 +175,15 @@ try
         expandedFailure.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("index").GetInt32() != 1)
         throw new InvalidOperationException("Expanded batch reported a cell index instead of the request index: "
             + expandedFailure.StructuredContent?.GetRawText());
+    var planned = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1", ["dry_run"] = true,
+        ["ops"] = new[] { new { op = "set_value", target = "B1", value = 99, expect = new { value = 42 } } }
+    });
+    if (planned.IsError == true || planned.StructuredContent?.GetProperty("data").GetProperty("dry_run").GetBoolean() != true ||
+        planned.StructuredContent?.GetProperty("data").GetProperty("revision_after").GetInt32() != 0 ||
+        planned.StructuredContent?.GetProperty("data").GetProperty("intent").GetArrayLength() != 1)
+        throw new InvalidOperationException("MCP dry run failed: " + planned.StructuredContent?.GetRawText());
     var applied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
