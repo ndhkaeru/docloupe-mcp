@@ -35,7 +35,17 @@ public static class P2aMarkupGate
                 var oldNamespaces = Namespaces(oldRoot.DocumentElement!);
                 var newNamespaces = Namespaces(newRoot.DocumentElement!);
                 if (!oldNamespaces.SequenceEqual(newNamespaces)) issues.Add(new("G3", "ROOT_NAMESPACE_CHANGED", part));
-                if (oldRoot.DocumentElement!.NamespaceURI == Main)
+                if (oldRoot.DocumentElement!.NamespaceURI == Main && oldRoot.DocumentElement.LocalName == "workbook")
+                {
+                    var oldCalc = oldRoot.DocumentElement.ChildNodes.OfType<XmlElement>()
+                        .SingleOrDefault(element => element.LocalName == "calcPr" && element.NamespaceURI == Main);
+                    var newCalc = newRoot.DocumentElement!.ChildNodes.OfType<XmlElement>()
+                        .SingleOrDefault(element => element.LocalName == "calcPr" && element.NamespaceURI == Main);
+                    if (newCalc is not null && (oldCalc is null
+                        ? newCalc.Prefix != newRoot.DocumentElement.Prefix : newCalc.Name != oldCalc.Name))
+                        issues.Add(new("G3", "PREFIX_REWRITTEN", $"{part}: calcPr"));
+                }
+                if (oldRoot.DocumentElement.LocalName == "worksheet" && oldRoot.DocumentElement.NamespaceURI == Main)
                 {
                     var oldData = oldRoot.DocumentElement.ChildNodes.OfType<XmlElement>()
                         .SingleOrDefault(element => element.LocalName == "sheetData" && element.NamespaceURI == Main);

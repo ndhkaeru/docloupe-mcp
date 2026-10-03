@@ -178,6 +178,60 @@ public sealed class CorruptionGateTests
             issue => issue.Gate == "G3" && issue.Code == "PREFIX_REWRITTEN");
     }
 
+    [Fact]
+    public void G3RejectsNewCalculationPropertiesUsingUnexpectedPrefix()
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/workbook.xml";
+        var source = fixture.Corrupt(part, xml => xml.Replace(
+            "<workbook ", "<workbook xmlns:a=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" ",
+            StringComparison.Ordinal).Replace("<calcPr calcId=\"191029\"/>", "", StringComparison.Ordinal));
+        static string Rewrite(string xml) => xml.Replace("<calcPr fullCalcOnLoad=\"1\"/>",
+            "<a:calcPr fullCalcOnLoad=\"1\"/>", StringComparison.Ordinal);
+        var edited = Path.Combine(fixture.Directory, "edited-calc.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt(part, Rewrite, edited);
+        var declared = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End,
+            edit.Before, edit.Part.Equals(part, StringComparison.OrdinalIgnoreCase)
+                ? Encoding.UTF8.GetBytes(Rewrite(Encoding.UTF8.GetString(edit.After))) : edit.After)).ToArray();
+        var intent = new CellExpectation("Sheet1", "B1", "number", "100");
+        Assert.Empty(P2aGates.CheckPackage(broken, result.ChangedParts));
+        var schema = DetachedValidator.Check(source, broken, result.ChangedParts);
+        Assert.Empty(schema.Issues);
+        Assert.Empty(schema.Gaps);
+        Assert.Empty(P2aGates.CheckIntent(broken, [intent]));
+        Assert.Empty(P2aGates.CheckPreservation(source, broken, declared, []));
+        Assert.Empty(P2aGates.CheckTouchedCells(source, broken, [intent]));
+        Assert.Empty(P2aGates.CheckSemanticPreservation(source, broken, [intent], declared));
+        Assert.Contains(P2aMarkupGate.Check(source, broken, result.ChangedParts),
+            issue => issue.Gate == "G3" && issue.Code == "PREFIX_REWRITTEN");
+    }
+
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    public void G3AcceptsWriterPrefixForNewCalculationProperties(string variant)
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/workbook.xml";
+        var original = Path.Combine(fixture.Directory, variant + ".xlsx");
+        var source = fixture.Corrupt(part, xml => Regex.Replace(xml,
+            @"<(?:x:)?calcPr calcId=""191029""/>", ""), original);
+        var written = Path.Combine(fixture.Directory, "valid-calc-prefix.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(written);
+        }
+        Assert.Empty(P2aMarkupGate.Check(source, written, result.ChangedParts));
+    }
+
     [Theory]
     [InlineData("default")]
     [InlineData("prefixed-x")]
