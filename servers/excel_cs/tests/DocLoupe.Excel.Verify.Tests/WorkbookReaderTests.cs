@@ -506,6 +506,8 @@ public sealed class WorkbookReaderTests
     [InlineData("<x:row r='1'><x:c r='A1'/><x:c r='A1'/></x:row>", "DUPLICATE_CELL_REFERENCE")]
     [InlineData("<x:row r='1048577'><x:c r='A1'/></x:row>", "INVALID_ROW_REFERENCE")]
     [InlineData("<x:row r='1'><x:c r='XFE1'/></x:row>", "INVALID_CELL_REFERENCE")]
+    [InlineData("<x:row r='1'><x:c r='ZZZZZZZZZZZZZZZZ1'/></x:row>", "INVALID_CELL_REFERENCE")]
+    [InlineData("<x:row r='1'><x:c r=''/></x:row>", "INVALID_CELL_REFERENCE")]
     public void RejectsWorksheetCoordinateCorruption(string content, string code)
     {
         var path = CreateWorkbook("<x:row r='1'><x:c r='A1'/></x:row>", secondSheetContent: content);
@@ -552,6 +554,41 @@ public sealed class WorkbookReaderTests
             var report = WorkbookReader.VerifyPartial(path);
             Assert.Equal("failed", report.Status);
             Assert.Contains(report.PackageIssues, issue => issue.Code == "INVALID_SHARED_STRING_TABLE");
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Theory]
+    [InlineData("<x:row r='2'/><x:row r='1'/><x:row/>", "DUPLICATE_ROW")]
+    [InlineData("<x:row r='1'><x:c r='C1'/><x:c r='B1'/><x:c/></x:row>", "DUPLICATE_CELL_REFERENCE")]
+    [InlineData("<x:row r='2'/><x:row><x:c r='A4'/></x:row>", "CELL_ROW_MISMATCH")]
+    [InlineData("<x:row r='1048576'/><x:row/>", "INVALID_ROW_REFERENCE")]
+    [InlineData("<x:row r='1'><x:c r='XFD1'/><x:c/></x:row>", "INVALID_CELL_REFERENCE")]
+    public void PartialVerifierChecksImpliedCoordinates(string content, string code)
+    {
+        var path = CreateWorkbook(content);
+        try
+        {
+            var report = WorkbookReader.VerifyPartial(path);
+            Assert.Equal("failed", report.Status);
+            Assert.Contains(report.PackageIssues, issue => issue.Code == code);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void PartialVerifierChecksSharedStringIndicesInCellsWithoutReference()
+    {
+        var sharedStrings = "<x:sst xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>" +
+            "<x:si><x:t>good</x:t></x:si></x:sst>";
+        var path = CreateWorkbook("<x:row r='2'><x:c r='A2'/><x:c t='s'><x:v>9</x:v></x:c></x:row>",
+            sharedStringsXml: sharedStrings);
+        try
+        {
+            var report = WorkbookReader.VerifyPartial(path);
+            Assert.Equal("failed", report.Status);
+            Assert.Contains(report.PackageIssues, issue => issue.Code == "INVALID_SHARED_STRING_INDEX"
+                && issue.Detail.Contains("B2"));
         }
         finally { File.Delete(path); }
     }

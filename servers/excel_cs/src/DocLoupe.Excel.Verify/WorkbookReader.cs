@@ -203,6 +203,8 @@ public static class WorkbookReader
         var cells = new HashSet<string>(StringComparer.Ordinal);
         var sheetDataDepth = -1;
         var rowDepth = -1;
+        var previousRow = 0;
+        var previousColumn = 0;
         int? currentRow = null;
         while (reader.Read())
         {
@@ -222,29 +224,42 @@ public static class WorkbookReader
             {
                 rowDepth = reader.IsEmptyElement ? -1 : reader.Depth;
                 currentRow = null;
-                if (reader.GetAttribute("r") is { } rowReference)
+                previousColumn = 0;
+                try
                 {
-                    if (!int.TryParse(rowReference, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedRow)
-                        || parsedRow is < 1 or > 1048576)
-                        issues.Add(new MarkupIssue("INVALID_ROW_REFERENCE", $"{part.FullName}: {rowReference}"));
-                    else if (!rows.Add(parsedRow))
-                        issues.Add(new MarkupIssue("DUPLICATE_ROW", $"{part.FullName}: {rowReference}"));
-                    else currentRow = parsedRow;
+                    var row = ResolveRowNumber(reader, previousRow);
+                    previousRow = row;
+                    currentRow = row;
+                    if (!rows.Add(row))
+                        issues.Add(new MarkupIssue("DUPLICATE_ROW", $"{part.FullName}: {row}"));
+                }
+                catch (InvalidDataException exception)
+                {
+                    issues.Add(new MarkupIssue("INVALID_ROW_REFERENCE", $"{part.FullName}: {exception.Message}"));
                 }
                 continue;
             }
             if (reader.LocalName != "c" || rowDepth < 0 || reader.Depth != rowDepth + 1
-                || reader.GetAttribute("r") is not { } address) continue;
+                || currentRow is not { } rowNumber) continue;
             CellAddress coordinate;
-            try { coordinate = CellAddress.Parse(address); }
-            catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentException)
+            try { coordinate = ResolveCellAddress(reader, rowNumber, previousColumn); }
+            catch (InvalidDataException exception)
             {
-                issues.Add(new MarkupIssue("INVALID_CELL_REFERENCE", $"{part.FullName}: {address}"));
+                var code = "INVALID_CELL_REFERENCE";
+                if (reader.GetAttribute("r") is { } reference)
+                {
+                    try
+                    {
+                        if (CellAddress.Parse(reference).Row != rowNumber) code = "CELL_ROW_MISMATCH";
+                    }
+                    catch (Exception parseException) when (parseException is FormatException or OverflowException or ArgumentException) { }
+                }
+                issues.Add(new MarkupIssue(code, $"{part.FullName}: {exception.Message}"));
                 continue;
             }
-            if (currentRow is { } row && coordinate.Row != row)
-                issues.Add(new MarkupIssue("CELL_ROW_MISMATCH", $"{part.FullName}: {address} in row {row}"));
-            if (!cells.Add(coordinate.ToString()))
+            previousColumn = coordinate.Column;
+            var address = coordinate.ToString();
+            if (!cells.Add(address))
                 issues.Add(new MarkupIssue("DUPLICATE_CELL_REFERENCE", $"{part.FullName}: {address}"));
             if (reader.GetAttribute("t") != "s") continue;
             using var cell = reader.ReadSubtree();
@@ -700,7 +715,10 @@ public static class WorkbookReader
         }
         CellAddress coordinate;
         try { coordinate = CellAddress.Parse(reference); }
-        catch (FormatException exception) { throw new InvalidDataException($"Invalid cell address: {reference}", exception); }
+        catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentException)
+        {
+            throw new InvalidDataException($"Invalid cell address: {reference}", exception);
+        }
         if (coordinate.Row != row)
             throw new InvalidDataException($"Cell {reference} does not belong to row {row}");
         return coordinate;
