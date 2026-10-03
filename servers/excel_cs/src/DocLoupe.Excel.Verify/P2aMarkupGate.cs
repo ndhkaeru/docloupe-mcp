@@ -37,11 +37,15 @@ public static class P2aMarkupGate
                 if (!oldNamespaces.SequenceEqual(newNamespaces)) issues.Add(new("G3", "ROOT_NAMESPACE_CHANGED", part));
                 if (oldRoot.DocumentElement!.NamespaceURI == Main)
                 {
-                    var cells = newRoot.GetElementsByTagName("c", Main).OfType<XmlElement>()
+                    var oldCells = oldRoot.GetElementsByTagName("c", Main).OfType<XmlElement>()
                         .ToDictionary(cell => cell.GetAttribute("r"));
-                    foreach (var cell in oldRoot.GetElementsByTagName("c", Main).OfType<XmlElement>())
-                        if (cells.TryGetValue(cell.GetAttribute("r"), out var edited) && cell.Name != edited.Name)
+                    foreach (var cell in newRoot.GetElementsByTagName("c", Main).OfType<XmlElement>())
+                    {
+                        oldCells.TryGetValue(cell.GetAttribute("r"), out var previous);
+                        if (previous is not null && previous.Name != cell.Name)
                             issues.Add(new("G3", "PREFIX_REWRITTEN", $"{part}: {cell.GetAttribute("r")}"));
+                        CheckCellPrefixShape(previous, cell, part, cell.GetAttribute("r"), issues);
+                    }
                 }
             }
             catch (XmlException exception)
@@ -50,6 +54,27 @@ public static class P2aMarkupGate
             }
         }
         return issues;
+    }
+
+    private static void CheckCellPrefixShape(XmlElement? original, XmlElement written,
+        string part, string address, List<GateIssue> issues)
+    {
+        var oldChildren = original?.ChildNodes.OfType<XmlElement>()
+            .Where(child => child.NamespaceURI == Main)
+            .GroupBy(child => child.LocalName, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal)
+            ?? new Dictionary<string, XmlElement[]>(StringComparer.Ordinal);
+        var indices = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var child in written.ChildNodes.OfType<XmlElement>().Where(child => child.NamespaceURI == Main))
+        {
+            var index = indices.GetValueOrDefault(child.LocalName);
+            indices[child.LocalName] = index + 1;
+            var previous = oldChildren.TryGetValue(child.LocalName, out var matches) && index < matches.Length
+                ? matches[index] : null;
+            if (previous is null ? child.Prefix != written.Prefix : child.Name != previous.Name)
+                issues.Add(new("G3", "PREFIX_REWRITTEN", $"{part}: {address}"));
+            CheckCellPrefixShape(previous, child, part, address, issues);
+        }
     }
 
     private static XmlDocument Parse(byte[] content)

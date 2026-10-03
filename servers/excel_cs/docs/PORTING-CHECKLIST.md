@@ -30,6 +30,7 @@
 - [x] 2026-10-03: ma trận `set_value` local hiển thị riêng 8 fixture và kiểm G1/G2/G3/G4/G5 theo từng file. Windows và Docker Linux đạt **580/580** test sau khi chặn span giả bao metadata, thay đổi lexical trong start tag và whitespace ngoài intent; schema-order và MCP stdio smoke qua cả hai OS. Không khẳng định macOS hoặc CI từ xa đã chạy.
 - [x] 2026-10-03: G5 kiểm độc lập cho phép xóa đúng thẻ calcChain relationship/override rỗng kể cả khi dùng cặp thẻ đóng tường minh, không mở rộng sang nội dung khác. Test đỏ trước khi sửa; sau sửa **581/581** trên Windows và Docker Linux với corpus local. Chưa chạy macOS hoặc CI từ xa.
 - [x] 2026-10-03: G5 chặn thuộc tính/style, phần tử lạ và namespace cục bộ không được yêu cầu trong ô vừa tạo; vẫn chấp nhận khai báo namespace thực sự cần cho serializer trên ô mới/cũ. Ca style/child được xác nhận đỏ trước khi sửa. **585/585** test trên Windows và Docker Linux với corpus local; chưa chạy macOS/CI từ xa.
+- [x] 2026-10-03: G2 có hồi quy che lỗi baseline trên cả worksheet mặc định và prefix `x:`; G3 chặn đổi prefix tại các phần tử con bên trong cell, kể cả khi namespace URI không đổi (test đỏ trước khi sửa). **587/587** test và schema-order đạt trên Windows/Docker Linux với corpus local. Chưa phải kiểm hình dạng G3 tổng quát cho op cấu trúc/rich text; không có kết quả macOS hoặc CI từ xa.
 
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 

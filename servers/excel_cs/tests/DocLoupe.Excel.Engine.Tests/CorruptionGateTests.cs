@@ -27,12 +27,16 @@ public sealed class CorruptionGateTests
         Assert.Contains(DetachedValidator.Check(fixture.Source, broken, ["xl/worksheets/sheet1.xml"]).Issues, issue => issue.Code == "NEW_SCHEMA_ERROR");
     }
 
-    [Fact]
-    public void G2ReportsMaskedParentWhenBaselineCellErrorExists()
+    [Theory]
+    [InlineData("default", "")]
+    [InlineData("prefixed-x", "x:")]
+    public void G2ReportsMaskedParentWhenBaselineCellErrorExists(string variant, string prefix)
     {
         using var fixture = new Fixture();
+        var source = Path.Combine(fixture.Directory, variant + ".xlsx");
         var invalid = fixture.Corrupt("xl/worksheets/sheet1.xml", xml =>
-            Regex.Replace(xml, @"<c r=""B1"" t=""n"">\s*<v>42</v>", "<c r=\"B1\" t=\"n\"><v>42</v><f>3</f>"));
+            Regex.Replace(xml, "<" + prefix + "c r=\"B1\" t=\"n\">\\s*<" + prefix + "v>42</" + prefix + "v>",
+                "<" + prefix + "c r=\"B1\" t=\"n\"><" + prefix + "v>42</" + prefix + "v><" + prefix + "f>3</" + prefix + "f>"), source);
         var written = Path.Combine(fixture.Directory, "masked.xlsx");
         using (var store = new PackageStore(invalid))
         {
@@ -49,6 +53,21 @@ public sealed class CorruptionGateTests
         using var fixture = new Fixture();
         var broken = fixture.Corrupt("xl/worksheets/sheet1.xml", xml => xml.Replace("mc:Ignorable=\"x14ac\"", "mc:Ignorable=\"x14ac absent\"", StringComparison.Ordinal));
         Assert.Contains(P2aMarkupGate.Check(fixture.Source, broken, ["xl/worksheets/sheet1.xml"]), issue => issue.Gate == "G3" && issue.Code == "UNDECLARED_MC_PREFIX");
+    }
+
+    [Fact]
+    public void G3RejectsPrefixRewriteWithinAnEditedCell()
+    {
+        using var fixture = new Fixture();
+        var source = fixture.Corrupt("xl/worksheets/sheet1.xml", xml => xml.Replace(
+            "<worksheet xmlns=", "<worksheet xmlns:a=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns=",
+            StringComparison.Ordinal));
+        var broken = fixture.Corrupt("xl/worksheets/sheet1.xml", xml => xml.Replace(
+            "<v>42</v>", "<a:v>42</a:v>", StringComparison.Ordinal), source);
+        Assert.Empty(P2aGates.CheckTouchedCells(source, broken,
+            [new CellExpectation("Sheet1", "B1", "number", "42")]));
+        Assert.Contains(P2aMarkupGate.Check(source, broken, ["xl/worksheets/sheet1.xml"]),
+            issue => issue.Gate == "G3" && issue.Code == "PREFIX_REWRITTEN");
     }
 
     [Fact]
