@@ -112,10 +112,12 @@ public sealed class ReaderFixtureTests
             using var sessions = new ExcelSessions();
             var verified = sessions.Verify(path, [assertion]);
             Assert.Equal("failed", verified.Summary.Status);
-            Assert.Contains(verified.AssertionIssues!, issue => issue.Code == "ASSERT_READ_ERROR");
+            Assert.Contains(verified.Summary.PackageIssues, issue => issue.Code == "INVALID_SHARED_STRING_INDEX");
+            Assert.Null(verified.AssertionIssues);
             var compared = sessions.Verify(path, path, assertions: [assertion]);
             Assert.Equal("failed", compared.Status);
-            Assert.Contains(compared.AssertionIssues!, issue => issue.Code == "ASSERT_READ_ERROR");
+            Assert.Contains(compared.After.Summary.PackageIssues, issue => issue.Code == "INVALID_SHARED_STRING_INDEX");
+            Assert.Null(compared.AssertionIssues);
             var session = JsonSerializer.SerializeToElement(sessions.Open(path)).GetProperty("session").GetString()!;
             Assert.Throws<InvalidDataException>(() => sessions.Read(session, "Sheet1", ["A1"]));
             sessions.Close(session, false);

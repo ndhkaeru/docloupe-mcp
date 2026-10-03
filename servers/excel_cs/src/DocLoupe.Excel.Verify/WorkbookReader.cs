@@ -84,6 +84,7 @@ public static class WorkbookReader
                     {
                         var relationships = ReadWorkbookRelationships(archive, workbookPart);
                         var sheets = ReadSheets(archive, workbookPart, relationships);
+                        int? sharedStringCount = null;
                         foreach (var sheet in sheets)
                         {
                             if (FindEntry(archive, sheet.Part) is not { } sheetEntry)
@@ -91,10 +92,18 @@ public static class WorkbookReader
                                 packageIssues.Add(new MarkupIssue("MISSING_PART", sheet.Part));
                                 continue;
                             }
-                            try { VerifyWorksheetCoordinates(sheetEntry, packageIssues); }
+                            try
+                            {
+                                VerifyWorksheetCoordinates(sheetEntry, packageIssues,
+                                    () => sharedStringCount ??= CountSharedStrings(archive, workbookPart));
+                            }
                             catch (XmlException exception)
                             {
                                 packageIssues.Add(new MarkupIssue("INVALID_WORKSHEET_XML", $"{sheet.Part}: {exception.Message}"));
+                            }
+                            catch (InvalidDataException exception)
+                            {
+                                packageIssues.Add(new MarkupIssue("INVALID_SHARED_STRING_TABLE", $"{sheet.Part}: {exception.Message}"));
                             }
                         }
                     }
@@ -180,7 +189,8 @@ public static class WorkbookReader
         return null;
     }
 
-    private static void VerifyWorksheetCoordinates(ZipArchiveEntry part, List<MarkupIssue> issues)
+    private static void VerifyWorksheetCoordinates(ZipArchiveEntry part, List<MarkupIssue> issues,
+        Func<int> sharedStringCount)
     {
         using var reader = CreateReader(part);
         reader.MoveToContent();
@@ -236,6 +246,18 @@ public static class WorkbookReader
                 issues.Add(new MarkupIssue("CELL_ROW_MISMATCH", $"{part.FullName}: {address} in row {row}"));
             if (!cells.Add(coordinate.ToString()))
                 issues.Add(new MarkupIssue("DUPLICATE_CELL_REFERENCE", $"{part.FullName}: {address}"));
+            if (reader.GetAttribute("t") != "s") continue;
+            using var cell = reader.ReadSubtree();
+            while (cell.Read())
+            {
+                if (cell.NodeType != XmlNodeType.Element || cell.Depth != 1 || cell.LocalName != "v"
+                    || cell.NamespaceURI != SpreadsheetNamespace) continue;
+                var value = cell.ReadElementContentAsString();
+                if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var index)
+                    || index < 0 || index >= sharedStringCount())
+                    issues.Add(new MarkupIssue("INVALID_SHARED_STRING_INDEX", $"{part.FullName}: {address}={value}"));
+                break;
+            }
         }
     }
 
@@ -661,25 +683,7 @@ public static class WorkbookReader
 
     private static IReadOnlyList<string> ReadSharedStrings(ZipArchive archive, string workbookPart)
     {
-        var relationshipsPart = FindEntry(archive, RelationshipPart(workbookPart))
-            ?? throw new InvalidDataException("Missing workbook relationships");
-        string? target = null;
-        using (var reader = CreateReader(relationshipsPart))
-        {
-            while (reader.Read())
-            {
-                if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "Relationship"
-                    || reader.NamespaceURI != PackageRelationshipNamespace
-                    || reader.GetAttribute("Type") != RelationshipNamespace + "/sharedStrings")
-                    continue;
-                if (reader.GetAttribute("TargetMode") == "External" || target is not null)
-                    throw new InvalidDataException("Invalid shared strings relationship");
-                target = reader.GetAttribute("Target") ?? throw new InvalidDataException("Missing shared strings target");
-            }
-        }
-        if (target is null) throw new InvalidDataException("Missing shared strings relationship");
-        var part = ResolvePartPath(workbookPart, target);
-        var entry = FindEntry(archive, part) ?? throw new InvalidDataException($"Missing shared strings part {part}");
+        var entry = FindSharedStringsEntry(archive, workbookPart);
         var values = new List<string>();
         using var stringsReader = CreateReader(entry);
         stringsReader.MoveToContent();
@@ -715,6 +719,43 @@ public static class WorkbookReader
             values.Add(text.ToString());
         }
         return values;
+    }
+
+    private static int CountSharedStrings(ZipArchive archive, string workbookPart)
+    {
+        using var reader = CreateReader(FindSharedStringsEntry(archive, workbookPart));
+        reader.MoveToContent();
+        if (reader.LocalName != "sst" || reader.NamespaceURI != SpreadsheetNamespace)
+            throw new InvalidDataException("Invalid shared strings root");
+        var count = 0;
+        while (reader.Read())
+            if (reader.NodeType == XmlNodeType.Element && reader.Depth == 1 && reader.LocalName == "si"
+                && reader.NamespaceURI == SpreadsheetNamespace)
+                count = checked(count + 1);
+        return count;
+    }
+
+    private static ZipArchiveEntry FindSharedStringsEntry(ZipArchive archive, string workbookPart)
+    {
+        var relationshipsPart = FindEntry(archive, RelationshipPart(workbookPart))
+            ?? throw new InvalidDataException("Missing workbook relationships");
+        string? target = null;
+        using (var reader = CreateReader(relationshipsPart))
+        {
+            while (reader.Read())
+            {
+                if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "Relationship"
+                    || reader.NamespaceURI != PackageRelationshipNamespace
+                    || reader.GetAttribute("Type") != RelationshipNamespace + "/sharedStrings")
+                    continue;
+                if (reader.GetAttribute("TargetMode") == "External" || target is not null)
+                    throw new InvalidDataException("Invalid shared strings relationship");
+                target = reader.GetAttribute("Target") ?? throw new InvalidDataException("Missing shared strings target");
+            }
+        }
+        if (target is null) throw new InvalidDataException("Missing shared strings relationship");
+        var part = ResolvePartPath(workbookPart, target);
+        return FindEntry(archive, part) ?? throw new InvalidDataException($"Missing shared strings part {part}");
     }
 
     private static ZipArchiveEntry? FindEntry(ZipArchive archive, string part) => archive.Entries

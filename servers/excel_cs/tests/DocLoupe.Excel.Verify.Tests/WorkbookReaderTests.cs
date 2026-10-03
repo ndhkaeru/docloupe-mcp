@@ -518,6 +518,44 @@ public sealed class WorkbookReaderTests
         finally { File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData("0", false)]
+    [InlineData("1", true)]
+    [InlineData("-1", true)]
+    [InlineData("not-an-index", true)]
+    [InlineData(" 0", true)]
+    public void ChecksSharedStringIndicesBeyondFirstSheet(string index, bool invalid)
+    {
+        var sharedStrings = "<x:sst xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>" +
+            "<x:si><x:t>good</x:t></x:si></x:sst>";
+        var path = CreateWorkbook("<x:row r='1'><x:c r='A1'><x:v>1</x:v></x:c></x:row>",
+            sharedStringsXml: sharedStrings, secondSheetContent:
+                $"<x:row r='2'><x:c r='B2' t='s'><x:v>{index}</x:v></x:c></x:row>");
+        try
+        {
+            var report = WorkbookReader.VerifyPartial(path);
+            Assert.Equal(invalid ? "failed" : "unverified", report.Status);
+            if (invalid)
+                Assert.Contains(report.PackageIssues, issue => issue.Code == "INVALID_SHARED_STRING_INDEX"
+                    && issue.Detail.Contains("sheet2.xml"));
+            else Assert.Empty(report.PackageIssues);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void MissingSharedStringRelationshipIsReportedByPartialVerifier()
+    {
+        var path = CreateWorkbook("<x:row r='1'><x:c r='A1' t='s'><x:v>0</x:v></x:c></x:row>");
+        try
+        {
+            var report = WorkbookReader.VerifyPartial(path);
+            Assert.Equal("failed", report.Status);
+            Assert.Contains(report.PackageIssues, issue => issue.Code == "INVALID_SHARED_STRING_TABLE");
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void MissingOptionalCellAndRowReferencesAreNotReportedAsInvalid()
     {
