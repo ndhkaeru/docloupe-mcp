@@ -557,6 +557,34 @@ public sealed class WorkbookReaderTests
     }
 
     [Fact]
+    public void PeekInfersOptionalRowAndCellReferencesWithoutChangingExplicitAddresses()
+    {
+        var path = CreateWorkbook("<x:row r='2'><x:c><x:v>2</x:v></x:c>" +
+            "<x:c r='D2'><x:v>4</x:v></x:c><x:c><x:v>5</x:v></x:c></x:row>" +
+            "<x:row><x:c><x:v>3</x:v></x:c></x:row>");
+        try
+        {
+            var preview = WorkbookReader.Peek(path);
+            Assert.Equal("A2:E3", Assert.Single(preview.Sheets).UsedRange);
+            Assert.Equal(new[] { "A2", "D2", "E2", "A3" },
+                preview.FirstSheetCells.Select(cell => cell.Address));
+            Assert.Equal(new[] { "2", "4", "5", "3" },
+                preview.FirstSheetCells.Select(cell => cell.Value));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Theory]
+    [InlineData("<x:row r='1048576'/><x:row><x:c/></x:row>")]
+    [InlineData("<x:row r='1'><x:c r='XFD1'/><x:c/></x:row>")]
+    public void PeekFailsClosedWhenInferredCoordinateExceedsBounds(string content)
+    {
+        var path = CreateWorkbook(content);
+        try { Assert.Throws<InvalidDataException>(() => WorkbookReader.Peek(path)); }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void MissingOptionalCellAndRowReferencesAreNotReportedAsInvalid()
     {
         var path = CreateWorkbook("<x:row><x:c/></x:row>");

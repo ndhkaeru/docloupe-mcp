@@ -543,7 +543,9 @@ public static class WorkbookReader
             throw new InvalidDataException($"Invalid worksheet root: {part}");
         var sheetDataDepth = -1;
         var rowDepth = -1;
-        int? rowNumber = null;
+        var rowNumber = 0;
+        var lastRow = 0;
+        var columnNumber = 0;
         var minRow = int.MaxValue;
         var minColumn = int.MaxValue;
         var maxRow = 0;
@@ -552,7 +554,7 @@ public static class WorkbookReader
         {
             if (reader.NodeType == XmlNodeType.EndElement)
             {
-                if (reader.Depth == rowDepth) { rowDepth = -1; rowNumber = null; }
+                if (reader.Depth == rowDepth) rowDepth = -1;
                 if (reader.Depth == sheetDataDepth) sheetDataDepth = -1;
                 continue;
             }
@@ -566,24 +568,14 @@ public static class WorkbookReader
             if (reader.LocalName == "row" && reader.Depth == sheetDataDepth + 1)
             {
                 rowDepth = reader.IsEmptyElement ? -1 : reader.Depth;
-                var reference = reader.GetAttribute("r");
-                rowNumber = null;
-                if (reference is not null)
-                {
-                    if (!int.TryParse(reference, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedRow)
-                        || parsedRow is < 1 or > 1048576)
-                        throw new InvalidDataException($"Invalid row reference: {reference}");
-                    rowNumber = parsedRow;
-                }
+                rowNumber = ResolveRowNumber(reader, lastRow);
+                lastRow = rowNumber;
+                columnNumber = 0;
                 continue;
             }
             if (reader.LocalName != "c" || reader.Depth != rowDepth + 1 || rowDepth < 0) continue;
-            var address = reader.GetAttribute("r") ?? throw new InvalidDataException("Cell has no address");
-            CellAddress coordinate;
-            try { coordinate = CellAddress.Parse(address); }
-            catch (FormatException exception) { throw new InvalidDataException($"Invalid cell address: {address}", exception); }
-            if (rowNumber is not null && coordinate.Row != rowNumber)
-                throw new InvalidDataException($"Cell {address} does not belong to row {rowNumber}");
+            var coordinate = ResolveCellAddress(reader, rowNumber, columnNumber);
+            columnNumber = coordinate.Column;
             minRow = Math.Min(minRow, coordinate.Row);
             minColumn = Math.Min(minColumn, coordinate.Column);
             maxRow = Math.Max(maxRow, coordinate.Row);
@@ -607,6 +599,8 @@ public static class WorkbookReader
             throw new InvalidDataException("Invalid worksheet root");
         var sheetDataDepth = -1;
         var rowDepth = -1;
+        var rowNumber = 0;
+        var columnNumber = 0;
         while (cells.Count < maxCells && reader.Read())
         {
             if (reader.NodeType == XmlNodeType.EndElement)
@@ -624,14 +618,15 @@ public static class WorkbookReader
             if (reader.LocalName == "row" && sheetDataDepth >= 0 && reader.Depth == sheetDataDepth + 1)
             {
                 rowDepth = reader.IsEmptyElement ? -1 : reader.Depth;
+                rowNumber = ResolveRowNumber(reader, rowNumber);
+                columnNumber = 0;
                 continue;
             }
             if (reader.LocalName != "c" || rowDepth < 0 || reader.Depth != rowDepth + 1) continue;
-            var address = reader.GetAttribute("r") ?? throw new InvalidDataException("Cell has no address");
-            CellAddress coordinate;
-            try { coordinate = CellAddress.Parse(address); }
-            catch (FormatException exception) { throw new InvalidDataException($"Invalid cell address: {address}", exception); }
+            var coordinate = ResolveCellAddress(reader, rowNumber, columnNumber);
+            columnNumber = coordinate.Column;
             if (coordinate.Row > maxRows || coordinate.Column > maxColumns) continue;
+            var address = coordinate.ToString();
             var type = reader.GetAttribute("t") ?? "n";
             string? value = null;
             string? formula = null;
@@ -679,6 +674,36 @@ public static class WorkbookReader
             cells.Add(new CellSummary(address, type, value, formula, resolved));
         }
         return cells;
+    }
+
+    private static int ResolveRowNumber(XmlReader reader, int previousRow)
+    {
+        var reference = reader.GetAttribute("r");
+        if (reference is null)
+        {
+            if (previousRow >= 1048576) throw new InvalidDataException("Inferred row exceeds worksheet limit");
+            return previousRow + 1;
+        }
+        if (!int.TryParse(reference, NumberStyles.None, CultureInfo.InvariantCulture, out var row)
+            || row is < 1 or > 1048576)
+            throw new InvalidDataException($"Invalid row reference: {reference}");
+        return row;
+    }
+
+    private static CellAddress ResolveCellAddress(XmlReader reader, int row, int previousColumn)
+    {
+        var reference = reader.GetAttribute("r");
+        if (reference is null)
+        {
+            if (previousColumn >= 16384) throw new InvalidDataException("Inferred column exceeds worksheet limit");
+            return new CellAddress(row, previousColumn + 1);
+        }
+        CellAddress coordinate;
+        try { coordinate = CellAddress.Parse(reference); }
+        catch (FormatException exception) { throw new InvalidDataException($"Invalid cell address: {reference}", exception); }
+        if (coordinate.Row != row)
+            throw new InvalidDataException($"Cell {reference} does not belong to row {row}");
+        return coordinate;
     }
 
     private static IReadOnlyList<string> ReadSharedStrings(ZipArchive archive, string workbookPart)
