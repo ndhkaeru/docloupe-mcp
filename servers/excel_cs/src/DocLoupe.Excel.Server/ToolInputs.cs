@@ -224,6 +224,35 @@ public sealed class SetValueRequest
     }
 }
 
+public sealed class FindQueryRequest
+{
+    [JsonPropertyName("text")]
+    public string? Text { get; init; }
+    [JsonPropertyName("regex")]
+    public string? Regex { get; init; }
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Other { get; init; }
+
+    public (string Pattern, bool IsRegex) Normalize()
+    {
+        if (Other is { Count: > 0 } || (Text is null) == (Regex is null))
+            throw new NotSupportedException("Only one of query.text or query.regex is supported");
+        var pattern = Text ?? Regex!;
+        if (pattern.Length is < 1 or > 512) throw new ArgumentException("Search pattern must contain 1..512 characters");
+        return (pattern, Regex is not null);
+    }
+}
+
+public sealed class FindScopeRequest
+{
+    [JsonPropertyName("sheet")]
+    public string? Sheet { get; init; }
+    [JsonPropertyName("target")]
+    public required string Target { get; init; }
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Other { get; init; }
+}
+
 public sealed class SaveAssertionRequest
 {
     [JsonPropertyName("target")]

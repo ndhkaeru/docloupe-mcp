@@ -217,6 +217,63 @@ public sealed class ExcelSessions : IDisposable
         }
     }
 
+    public object Find(string id, string? sheet, string target, string pattern, bool isRegex,
+        string searchIn = "value", bool caseSensitive = false, string normalize = "nfc", int maxResults = 100)
+    {
+        if (searchIn is not ("value" or "formula") || normalize is not ("nfc" or "none"))
+            throw new NotSupportedException("Only value and formula search with nfc or none normalization is supported");
+        if (maxResults is < 1 or > 100 || pattern.Length is < 1 or > 512)
+            throw new ArgumentOutOfRangeException(nameof(maxResults), "Search accepts 1..100 results and a 1..512 character pattern");
+        var bounds = target.Split(':');
+        if (bounds.Length is < 1 or > 2 || bounds.Length == 2 && bounds[1].Contains('!'))
+            throw new FormatException("Invalid search range");
+        var selectedSheet = CellAddress.SheetName(bounds[0]) ?? sheet ?? throw new ArgumentException("Missing search sheet");
+        var first = CellAddress.Parse(bounds[0]);
+        var last = bounds.Length == 2 ? CellAddress.Parse(bounds[1]) : first;
+        if (last.Row < first.Row || last.Column < first.Column) throw new FormatException("Reversed search range");
+        var count = (long)(last.Row - first.Row + 1) * (last.Column - first.Column + 1);
+        if (count > 500) throw new ArgumentException("Search exceeds 500 cells");
+        var addresses = new List<string>((int)count);
+        for (var row = first.Row; row <= last.Row; row++)
+            for (var column = first.Column; column <= last.Column; column++)
+                addresses.Add(new CellAddress(row, column).ToString());
+        var needle = normalize == "nfc" ? pattern.Normalize(System.Text.NormalizationForm.FormC) : pattern;
+        var regex = isRegex ? new System.Text.RegularExpressions.Regex(needle,
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant |
+            (caseSensitive ? System.Text.RegularExpressions.RegexOptions.None : System.Text.RegularExpressions.RegexOptions.IgnoreCase),
+            TimeSpan.FromMilliseconds(100)) : null;
+        var session = Get(id);
+        lock (session.Sync)
+        {
+            session.CheckSource();
+            var source = session.Preview();
+            try
+            {
+                var cells = P2aGates.ReadCells(source, selectedSheet, addresses)
+                    .ToDictionary(cell => cell.Address, StringComparer.Ordinal);
+                var matches = new List<object>();
+                var truncated = false;
+                var scanned = 0;
+                foreach (var address in addresses)
+                {
+                    scanned++;
+                    if (!cells.TryGetValue(address, out var cell)) continue;
+                    var raw = searchIn == "formula" ? cell.Formula : cell.Value;
+                    if (raw is null) continue;
+                    var haystack = normalize == "nfc" ? raw.Normalize(System.Text.NormalizationForm.FormC) : raw;
+                    var found = regex is not null ? regex.IsMatch(haystack) :
+                        haystack.Contains(needle, caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
+                    if (!found) continue;
+                    if (matches.Count == maxResults) { truncated = true; break; }
+                    matches.Add(new { addr = selectedSheet + "!" + address, value = cell.Value, formula = cell.Formula });
+                }
+                return new { session = id, revision = session.Revision, partial = true,
+                    total_scanned = scanned, matches, truncated };
+            }
+            finally { if (source != session.Path) File.Delete(source); }
+        }
+    }
+
     private static string ReadMarkdown(CellAddress first, CellAddress last,
         IReadOnlyDictionary<string, CellRead> cells)
     {

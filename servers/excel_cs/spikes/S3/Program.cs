@@ -150,6 +150,14 @@ try
     if (markdownRead.IsError == true ||
         markdownRead.StructuredContent?.GetProperty("data").GetProperty("markdown").GetString()?.Contains("| 1 | 42 | 2 ƒ =1+1 |", StringComparison.Ordinal) != true)
         throw new InvalidOperationException("Markdown range failed: " + markdownRead.StructuredContent?.GetRawText());
+    var found = await client.CallToolAsync("excel_find", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["query"] = new { text = "HELLO" },
+        ["scope"] = new { sheet = "Sheet1", target = "A1:D3" }, ["in"] = "value"
+    });
+    if (found.IsError == true || found.StructuredContent?.GetProperty("data").GetProperty("partial").GetBoolean() != true ||
+        found.StructuredContent?.GetProperty("data").GetProperty("matches")[0].GetProperty("addr").GetString() != "Sheet1!A1")
+        throw new InvalidOperationException("Bounded find failed: " + found.StructuredContent?.GetRawText());
     var readSchema = tools.Single(tool => tool.Name == "excel_read").ProtocolTool.InputSchema;
     if (readSchema.GetProperty("properties").GetProperty("target").GetProperty("oneOf").GetArrayLength() != 2)
         throw new InvalidOperationException("Read target array is missing from MCP input schema: " + readSchema.GetRawText());
