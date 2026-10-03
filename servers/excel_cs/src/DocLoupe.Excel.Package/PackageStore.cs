@@ -19,20 +19,28 @@ public sealed class PackageStore : IDisposable
     public PackageStore(string path)
     {
         _archive = ZipFile.OpenRead(path);
-        _entries = new Dictionary<string, ZipArchiveEntry>(StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in _archive.Entries)
+        try
         {
-            if (!_entries.TryAdd(entry.FullName, entry))
-                throw new InvalidDataException($"Duplicate OPC part: {entry.FullName}");
+            _entries = new Dictionary<string, ZipArchiveEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in _archive.Entries)
+            {
+                if (!_entries.TryAdd(entry.FullName, entry))
+                    throw new InvalidDataException($"Duplicate OPC part: {entry.FullName}");
+            }
+            if (!_entries.ContainsKey("[Content_Types].xml") || !_entries.ContainsKey("_rels/.rels"))
+                throw new InvalidDataException("Missing OPC root parts");
+            var main = ReadRelationships("").SingleOrDefault(relationship => relationship.Type.EndsWith("/officeDocument", StringComparison.Ordinal));
+            if (main is null || main.External)
+                throw new InvalidDataException("Missing internal officeDocument relationship");
+            WorkbookPart = Resolve("", main.Target);
+            if (!Contains(WorkbookPart) || !Contains(RelationshipPart(WorkbookPart)))
+                throw new InvalidDataException("Missing workbook or workbook relationships");
         }
-        if (!_entries.ContainsKey("[Content_Types].xml") || !_entries.ContainsKey("_rels/.rels"))
-            throw new InvalidDataException("Missing OPC root parts");
-        var main = ReadRelationships("").SingleOrDefault(relationship => relationship.Type.EndsWith("/officeDocument", StringComparison.Ordinal));
-        if (main is null || main.External)
-            throw new InvalidDataException("Missing internal officeDocument relationship");
-        WorkbookPart = Resolve("", main.Target);
-        if (!Contains(WorkbookPart) || !Contains(RelationshipPart(WorkbookPart)))
-            throw new InvalidDataException("Missing workbook or workbook relationships");
+        catch
+        {
+            _archive.Dispose();
+            throw;
+        }
     }
 
     public string WorkbookPart { get; }
