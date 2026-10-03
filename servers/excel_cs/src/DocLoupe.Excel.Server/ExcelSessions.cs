@@ -365,7 +365,8 @@ public sealed class ExcelSessions : IDisposable
                         }
                         if (!found) continue;
                         if (matches.Count == maxResults) { truncated = true; break; }
-                        matches.Add(new { addr = selectedSheet + "!" + address, value = cell?.Value, formula = cell?.Formula });
+                        matches.Add(new { addr = selectedSheet + "!" + address,
+                            value = cell is null ? null : TypedValue(cell), formula = cell?.Formula });
                     }
                     if (truncated) break;
                 }

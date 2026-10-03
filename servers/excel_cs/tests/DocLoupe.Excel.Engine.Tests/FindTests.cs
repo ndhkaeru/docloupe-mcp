@@ -83,6 +83,7 @@ public sealed class FindTests
             Assert.Equal("Sheet1!C1", Assert.Single(result.GetProperty("matches").EnumerateArray())
                 .GetProperty("addr").GetString());
             Assert.Equal(12, result.GetProperty("total_scanned").GetInt32());
+            Assert.Equal(2, result.GetProperty("matches")[0].GetProperty("value").GetInt32());
             Assert.Empty(JsonSerializer.SerializeToElement(sessions.Find(id, "Sheet1", "A1:D3",
                 "1+1", false, searchIn: "value")).GetProperty("matches").EnumerateArray());
             Assert.Equal("Sheet1!C1", Assert.Single(JsonSerializer.SerializeToElement(sessions.Find(id,
@@ -118,6 +119,10 @@ public sealed class FindTests
                     .Select(match => match.GetProperty("addr").GetString()!).ToArray();
             }
 
+            var numericMatch = JsonSerializer.SerializeToElement(sessions.Find(id, "Sheet1", "B1", "",
+                false, expectedValue: JsonSerializer.Deserialize<FindQueryRequest>("""{"value":42.0}""")!
+                    .Normalize().ExpectedValue));
+            Assert.Equal(42, numericMatch.GetProperty("matches")[0].GetProperty("value").GetInt32());
             Assert.Equal(["Sheet1!B1"], Search("A1:C1", """{"value":42.0}"""));
             Assert.Empty(Search("B1", """{"value":"42"}"""));
             Assert.Equal(["Sheet1!C1"], Search("C1", """{"value":2}"""));
@@ -130,6 +135,15 @@ public sealed class FindTests
             Assert.Empty(Search("E4", """{"value":"café"}""", normalize: "none"));
             Assert.Equal(["Sheet1!E5"], Search("E5", """{"value":true}"""));
             Assert.Equal(["Sheet1!E6"], Search("E6", """{"value":{"error":"#N/A"}}"""));
+            var booleanMatch = JsonSerializer.SerializeToElement(sessions.Find(id, "Sheet1", "E5", "true", false));
+            Assert.True(booleanMatch.GetProperty("matches")[0].GetProperty("value").GetBoolean());
+            var errorMatch = JsonSerializer.SerializeToElement(sessions.Find(id, "Sheet1", "E6", "#N/A", false));
+            Assert.Equal("#N/A", errorMatch.GetProperty("matches")[0].GetProperty("value")
+                .GetProperty("error").GetString());
+            var blankMatch = JsonSerializer.SerializeToElement(sessions.Find(id, "Sheet1", "H8", "", false,
+                expectedValue: JsonSerializer.Deserialize<FindQueryRequest>("""{"value":null}""")!
+                    .Normalize().ExpectedValue));
+            Assert.Equal(JsonValueKind.Null, blankMatch.GetProperty("matches")[0].GetProperty("value").ValueKind);
             sessions.Close(id, true);
         }
         finally { Directory.Delete(directory, true); }

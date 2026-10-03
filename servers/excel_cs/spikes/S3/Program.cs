@@ -244,7 +244,9 @@ try
         ["scope"] = new { sheet = "Sheet1", target = "C1" }
     });
     if (formulaMatches.IsError == true || formulaMatches.StructuredContent?.GetProperty("data")
-        .GetProperty("matches")[0].GetProperty("addr").GetString() != "Sheet1!C1")
+        .GetProperty("matches")[0].GetProperty("addr").GetString() != "Sheet1!C1" ||
+        formulaMatches.StructuredContent?.GetProperty("data").GetProperty("matches")[0]
+            .GetProperty("value").GetInt32() != 2)
         throw new InvalidOperationException("MCP formula_contains failed: " + formulaMatches.StructuredContent?.GetRawText());
     var status = await client.CallToolAsync("excel_status", new Dictionary<string, object?> { ["session"] = session });
     if (status.IsError == true || status.StructuredContent?.GetProperty("data").GetProperty("revision").GetInt32() != 1 ||
