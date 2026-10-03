@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Text;
 using System.Text.Json;
 using DocLoupe.Excel.Server;
 using DocLoupe.Excel.Verify;
@@ -20,7 +21,7 @@ public sealed class ReaderFixtureTests
             var sourceBytes = File.ReadAllBytes(source);
             var valid = sessions.Verify(source);
             Assert.Equal(Path.GetFullPath(source), valid.Path);
-            Assert.Equal("unverified", valid.Summary.Status);
+            Assert.True(valid.Summary.Status == "unverified", string.Join("; ", valid.Schema?.Issues.Select(issue => $"{issue.Part}: {issue.Detail}") ?? []));
             Assert.Contains("G2", valid.Summary.UnverifiedGates);
             Assert.Equal(sourceBytes, File.ReadAllBytes(source));
 
@@ -43,6 +44,65 @@ public sealed class ReaderFixtureTests
             var unsupported = Path.Combine(directory, "default.txt");
             File.Copy(source, unsupported);
             Assert.Throws<NotSupportedException>(() => sessions.Verify(unsupported));
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Theory]
+    [InlineData("default", "xl/worksheets/sheet1.xml", "<sheetData>", "<bogus/><sheetData>")]
+    [InlineData("prefixed-x", "xl/worksheets/sheet1.xml", "<x:sheetData>", "<x:bogus/><x:sheetData>")]
+    [InlineData("prefixed-x", "xl/workbook.xml", "<x:calcPr", "<x:bogus/><x:calcPr")]
+    [InlineData("prefixed-x", "xl/sharedStrings.xml", "<x:si>", "<x:bogus/><x:si>")]
+    public void SessionlessVerifyRejectsDetachedSchemaErrors(string variant, string part, string original, string replacement)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-schema-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var path = Path.Combine(directory, variant + ".xlsx");
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+            {
+                var entry = archive.GetEntry(part)!;
+                string xml;
+                using (var reader = new StreamReader(entry.Open())) xml = reader.ReadToEnd();
+                entry.Delete();
+                Assert.Contains(original, xml);
+                using var writer = new StreamWriter(archive.CreateEntry(part).Open(), Encoding.UTF8);
+                writer.Write(xml.Replace(original, replacement, StringComparison.Ordinal));
+            }
+            var bytes = File.ReadAllBytes(path);
+            using var sessions = new ExcelSessions();
+            var result = sessions.Verify(path);
+            Assert.Equal("failed", result.Summary.Status);
+            Assert.Empty(result.Summary.PackageIssues);
+            Assert.Contains(result.Schema!.Issues, issue => issue.Part == part && issue.Code == "SCHEMA_ERROR");
+            Assert.Equal(bytes, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public void SessionlessVerifyReportsUnsupportedRootsAsGaps()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-schema-gap-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var path = Path.Combine(directory, "default.xlsx");
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+            using (var writer = new StreamWriter(archive.CreateEntry("customXml/item1.xml").Open(), Encoding.UTF8))
+                writer.Write("<metadata xmlns='urn:custom'>keep</metadata>");
+            using var sessions = new ExcelSessions();
+            var result = sessions.Verify(path);
+            Assert.Equal("unverified", result.Summary.Status);
+            Assert.Contains("G2", result.Summary.UnverifiedGates);
+            Assert.Contains(result.Schema!.Gaps, issue => issue.Part == "customXml/item1.xml" && issue.Code == "G2_UNSUPPORTED_ROOT");
         }
         finally
         {

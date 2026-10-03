@@ -496,6 +496,8 @@ output data {
 | + `assert` | adds G7 | — |
 | + `declared.transforms` | G5 maps O through the transforms before comparing | — |
 
+**Current implementation (2026-10-03):** only `after_path` is accepted. Read-only verification runs partial G1/G3 and detached G2 on workbook, worksheet, and shared-string XML. `schema_issues` fail the call; `schema_gaps` list unsupported XML roots. `unverified_gates` still includes G2 because this is not full package-wide schema coverage. G4–G7 and compare mode are not implemented for this tool. The file is never changed.
+
 **What a two-file comparison cannot see.** If an edit never reached the file (V-06), W equals O and there is no difference to report. A lost edit is only detectable when the expectation is supplied: through `session`, `declared.effects` or `assert` (e.g. `{ "target": "S!B2", "equals": { "value": "đã sửa" } }`). Likewise, after a row/column insert or delete, every shifted cell differs from O; losses among them are only separable when the transforms are known.
 
 ### 6.2 `excel_render`

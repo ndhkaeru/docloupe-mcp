@@ -71,10 +71,11 @@ static CallToolResult Handle(Func<object> action)
             var summary = verification.Summary;
             var report = new { mode = "validate", files = new { after = verification.Path }, status = summary.Status, partial = true,
                 package_issues = summary.PackageIssues, markup_issues = summary.MarkupIssues,
+                schema_issues = verification.Schema?.Issues ?? [], schema_gaps = verification.Schema?.Gaps ?? [],
                 unverified_gates = summary.UnverifiedGates };
             if (summary.Status == "failed")
                 return Result(new { ok = false, error = new { code = "PACKAGE_INVALID",
-                    message = "Read-only verification found package or markup issues", details = report,
+                    message = "Read-only verification found package, markup or schema issues", details = report,
                     retryable = false } }, true);
             return Result(new { ok = true, data = report, warnings = new[] { "Partial verification only; unverified gates remain" } }, false);
         }

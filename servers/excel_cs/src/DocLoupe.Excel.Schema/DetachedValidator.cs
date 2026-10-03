@@ -11,6 +11,32 @@ public sealed record SchemaReport(IReadOnlyList<SchemaIssue> Issues, IReadOnlyLi
 
 public static class DetachedValidator
 {
+    public static SchemaReport CheckPackage(string path)
+    {
+        using var archive = ZipFile.OpenRead(path);
+        var issues = new List<SchemaIssue>();
+        var gaps = new List<SchemaIssue>();
+        var validator = new OpenXmlValidator(FileFormatVersions.Microsoft365);
+        foreach (var part in archive.Entries.Where(entry => entry.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
+            && !entry.FullName.Equals("[Content_Types].xml", StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                foreach (var error in validator.Validate(Detach(part)))
+                    issues.Add(new SchemaIssue(part.FullName, "SCHEMA_ERROR", Key(error)));
+            }
+            catch (NotSupportedException exception)
+            {
+                gaps.Add(new SchemaIssue(part.FullName, "G2_UNSUPPORTED_ROOT", exception.Message));
+            }
+            catch (XmlException exception)
+            {
+                issues.Add(new SchemaIssue(part.FullName, "INVALID_XML", exception.Message));
+            }
+        }
+        return new SchemaReport(issues, gaps);
+    }
+
     public static SchemaReport Check(string source, string written, IEnumerable<string> touched)
     {
         using var before = ZipFile.OpenRead(source);
@@ -87,12 +113,12 @@ public static class DetachedValidator
         using (var reader = XmlReader.Create(stream, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null }))
             document.Load(reader);
         var root = document.DocumentElement ?? throw new InvalidDataException("Missing XML root");
-        OpenXmlElement detached = root.LocalName switch
+        OpenXmlElement detached = (root.LocalName, root.NamespaceURI) switch
         {
-            "worksheet" => new Worksheet(),
-            "workbook" => new Workbook(),
-            "sst" => new SharedStringTable(),
-            _ => throw new NotSupportedException($"Detached validation not implemented for {part.FullName}: {root.LocalName}")
+            ("worksheet", "http://schemas.openxmlformats.org/spreadsheetml/2006/main") => new Worksheet(),
+            ("workbook", "http://schemas.openxmlformats.org/spreadsheetml/2006/main") => new Workbook(),
+            ("sst", "http://schemas.openxmlformats.org/spreadsheetml/2006/main") => new SharedStringTable(),
+            _ => throw new NotSupportedException($"Detached validation not implemented for {part.FullName}: {{{root.NamespaceURI}}}{root.LocalName}")
         };
         foreach (XmlAttribute attribute in root.Attributes)
         {

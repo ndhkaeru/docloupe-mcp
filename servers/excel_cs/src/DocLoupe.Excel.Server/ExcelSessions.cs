@@ -10,7 +10,7 @@ using DocLoupe.Excel.Verify;
 
 namespace DocLoupe.Excel.Server;
 
-public sealed record ReadOnlyVerification(string Path, VerificationSummary Summary);
+public sealed record ReadOnlyVerification(string Path, VerificationSummary Summary, SchemaReport? Schema);
 
 public sealed class ExcelSessions : IDisposable
 {
@@ -88,7 +88,11 @@ public sealed class ExcelSessions : IDisposable
         if (!File.Exists(full)) throw new FileNotFoundException("Workbook not found", full);
         if (Path.GetExtension(full).ToLowerInvariant() is not (".xlsx" or ".xlsm" or ".xltx" or ".xltm"))
             throw new NotSupportedException("Only OOXML workbooks are supported");
-        return new ReadOnlyVerification(full, WorkbookReader.VerifyPartial(full));
+        var summary = WorkbookReader.VerifyPartial(full);
+        if (summary.Status == "failed") return new ReadOnlyVerification(full, summary, null);
+        var schema = DetachedValidator.CheckPackage(full);
+        var status = schema.Issues.Count > 0 ? "failed" : summary.Status;
+        return new ReadOnlyVerification(full, summary with { Status = status }, schema);
     }
 
     public object Status(string? id = null)
