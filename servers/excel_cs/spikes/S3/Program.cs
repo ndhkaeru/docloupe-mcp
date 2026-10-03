@@ -35,6 +35,16 @@ try
     if (compared.IsError == true || compared.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "unverified" ||
         compared.StructuredContent?.GetProperty("data").GetProperty("differences").GetArrayLength() != 0)
         throw new InvalidOperationException("No-change comparison failed: " + compared.StructuredContent?.GetRawText());
+    var lostEdit = await client.CallToolAsync("excel_verify", new Dictionary<string, object?>
+    {
+        ["after_path"] = source, ["before_path"] = source,
+        ["assert"] = new[] { new { target = "Sheet1!B1", equals = new { value = 99 } } }
+    });
+    if (lostEdit.IsError != true || lostEdit.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "ASSERTION_FAILED" ||
+        lostEdit.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("differences").GetArrayLength() != 0 ||
+        lostEdit.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("assertion_issues")[0]
+            .GetProperty("Code").GetString() != "ASSERT_VALUE_MISMATCH")
+        throw new InvalidOperationException("Lost edit was not caught by verification assertion: " + lostEdit.StructuredContent?.GetRawText());
     var changedWorkbook = Path.Combine(directory, "compare-changed.xlsx");
     File.Copy(source, changedWorkbook);
     using (var archive = ZipFile.Open(changedWorkbook, ZipArchiveMode.Update))

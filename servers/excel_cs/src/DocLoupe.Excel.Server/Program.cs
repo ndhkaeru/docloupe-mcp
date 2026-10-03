@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using DocLoupe.Excel.Engine;
 using DocLoupe.Excel.Server;
+using DocLoupe.Excel.Verify;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -16,8 +17,10 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
     McpServerTool.Create((string path) => Handle(() => sessions.Open(path)), new McpServerToolCreateOptions { Name = "excel_open" }),
     McpServerTool.Create((string path, string detail = "summary", string? sheet = null, int max_rows = 20, int max_cols = 10) =>
         Handle(() => sessions.Peek(path, detail, sheet, max_rows, max_cols)), new McpServerToolCreateOptions { Name = "excel_peek" }),
-    McpServerTool.Create((string after_path, string? before_path = null, int max_differences = 200) =>
-        Handle(() => before_path is null ? sessions.Verify(after_path) : sessions.Verify(after_path, before_path, max_differences)),
+    McpServerTool.Create((string after_path, string? before_path = null, int max_differences = 200, SaveAssertionRequest[]? @assert = null) =>
+        Handle(() => before_path is null
+            ? sessions.Verify(after_path, NormalizeAssertions(@assert))
+            : sessions.Verify(after_path, before_path, max_differences, NormalizeAssertions(@assert))),
         new McpServerToolCreateOptions { Name = "excel_verify" }),
     McpServerTool.Create((string? session = null) => Handle(() => sessions.Status(session)), new McpServerToolCreateOptions { Name = "excel_status" }),
     McpServerTool.Create((string session, string? sheet, JsonElement target) => Handle(() => sessions.Read(session, sheet, ReadTargets(target))),
@@ -52,6 +55,13 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
 try { await builder.Build().RunAsync(); }
 finally { sessions.Dispose(); }
 
+static ValueAssertion[]? NormalizeAssertions(SaveAssertionRequest[]? requests)
+{
+    if (requests is null) return null;
+    if (requests.Length > 500) throw new ArgumentException("At most 500 assertions are supported");
+    return requests.Select(item => item.Normalize()).ToArray();
+}
+
 static string[] ReadTargets(JsonElement target)
 {
     if (target.ValueKind == JsonValueKind.String)
@@ -73,7 +83,8 @@ static CallToolResult Handle(Func<object> action)
             {
                 mode = "compare", files = new { before = comparison.Before.Path, after = comparison.After.Path },
                 status = comparison.Status, partial = true,
-                verified_checks = comparison.Comparison is null ? Array.Empty<string>() : ["G5_PART_BYTES"],
+                checks_run = comparison.Comparison is null ? Array.Empty<string>() :
+                    comparison.AssertionIssues is null ? ["G5_PART_BYTES"] : ["G5_PART_BYTES", "G7_ASSERTIONS"],
                 before = new { package_issues = comparison.Before.Summary.PackageIssues,
                     markup_issues = comparison.Before.Summary.MarkupIssues,
                     schema_issues = comparison.Before.Schema?.Issues ?? [], schema_gaps = comparison.Before.Schema?.Gaps ?? [] },
@@ -83,12 +94,15 @@ static CallToolResult Handle(Func<object> action)
                 differences = comparison.Comparison?.Differences ?? [],
                 new_schema_issues = comparison.SchemaDelta?.Issues ?? [],
                 schema_gaps = comparison.SchemaDelta?.Gaps ?? [],
+                assertion_issues = comparison.AssertionIssues ?? [],
                 truncated = comparison.Comparison?.Truncated ?? false,
                 unverified_gates = new[] { "G1_REMAINING", "G2", "G3_REMAINING", "G4", "G5_REMAINING", "G6", "G7" }
             };
             if (comparison.Status == "failed")
             {
-                var code = comparison.Comparison is null ? "PACKAGE_INVALID" : "PRESERVATION_FAILED";
+                var code = comparison.Comparison is null ? "PACKAGE_INVALID"
+                    : comparison.Comparison.HasDifferences || comparison.SchemaDelta?.Issues.Count > 0
+                        ? "PRESERVATION_FAILED" : "ASSERTION_FAILED";
                 return Result(new { ok = false, error = new { code, message = "Read-only comparison failed",
                     details = report, retryable = false } }, true);
             }
@@ -101,10 +115,12 @@ static CallToolResult Handle(Func<object> action)
             var report = new { mode = "validate", files = new { after = verification.Path }, status = summary.Status, partial = true,
                 package_issues = summary.PackageIssues, markup_issues = summary.MarkupIssues,
                 schema_issues = verification.Schema?.Issues ?? [], schema_gaps = verification.Schema?.Gaps ?? [],
+                assertion_issues = verification.AssertionIssues ?? [],
                 unverified_gates = summary.UnverifiedGates };
             if (summary.Status == "failed")
-                return Result(new { ok = false, error = new { code = "PACKAGE_INVALID",
-                    message = "Read-only verification found package, markup or schema issues", details = report,
+                return Result(new { ok = false, error = new {
+                    code = verification.AssertionIssues is { Count: > 0 } ? "ASSERTION_FAILED" : "PACKAGE_INVALID",
+                    message = "Read-only verification failed", details = report,
                     retryable = false } }, true);
             return Result(new { ok = true, data = report, warnings = new[] { "Partial verification only; unverified gates remain" } }, false);
         }

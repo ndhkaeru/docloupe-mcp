@@ -155,6 +155,39 @@ public sealed class ReaderFixtureTests
     }
 
     [Fact]
+    public void SessionlessAssertionsDetectLostEditsEvenWhenFilesAreIdentical()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-assert-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var before = Path.Combine(directory, "default.xlsx");
+            var after = Path.Combine(directory, "after.xlsx");
+            File.Copy(before, after);
+            var bytes = File.ReadAllBytes(after);
+            using var sessions = new ExcelSessions();
+            var expected = new ValueAssertion("Sheet1", "B1", true, "number", "99", null);
+            var lost = sessions.Verify(after, before, assertions: [expected]);
+            Assert.Equal("failed", lost.Status);
+            Assert.Empty(lost.Comparison!.Differences);
+            Assert.Contains(lost.AssertionIssues!, issue => issue.Code == "ASSERT_VALUE_MISMATCH");
+            var standalone = sessions.Verify(after, [expected]);
+            Assert.Equal("failed", standalone.Summary.Status);
+            Assert.Contains(standalone.AssertionIssues!, issue => issue.Code == "ASSERT_VALUE_MISMATCH");
+            var matching = sessions.Verify(after, before, assertions: [expected with { Value = "42" }]);
+            Assert.Equal("unverified", matching.Status);
+            Assert.Empty(matching.AssertionIssues!);
+            var noSource = sessions.Verify(after, [new ValueAssertion("Sheet1", "B1", false, null, null, null, true)]);
+            Assert.Contains(noSource.AssertionIssues!, issue => issue.Code == "ASSERT_SOURCE_REQUIRED");
+            Assert.Equal(bytes, File.ReadAllBytes(after));
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
     public void SessionlessCompareDoesNotTreatUnchangedBaselineSchemaErrorsAsNew()
     {
         var directory = Path.Combine(Path.GetTempPath(), "docloupe-baseline-" + Guid.NewGuid().ToString("N"));

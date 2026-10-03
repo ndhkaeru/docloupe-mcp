@@ -10,9 +10,10 @@ using DocLoupe.Excel.Verify;
 
 namespace DocLoupe.Excel.Server;
 
-public sealed record ReadOnlyVerification(string Path, VerificationSummary Summary, SchemaReport? Schema);
+public sealed record ReadOnlyVerification(string Path, VerificationSummary Summary, SchemaReport? Schema,
+    IReadOnlyList<GateIssue>? AssertionIssues = null);
 public sealed record ReadOnlyComparison(ReadOnlyVerification Before, ReadOnlyVerification After,
-    PackageComparison? Comparison, SchemaReport? SchemaDelta, string Status);
+    PackageComparison? Comparison, SchemaReport? SchemaDelta, IReadOnlyList<GateIssue>? AssertionIssues, string Status);
 
 public sealed class ExcelSessions : IDisposable
 {
@@ -84,7 +85,7 @@ public sealed class ExcelSessions : IDisposable
         return text.ToString();
     }
 
-    public ReadOnlyVerification Verify(string afterPath)
+    public ReadOnlyVerification Verify(string afterPath, IReadOnlyList<ValueAssertion>? assertions = null)
     {
         var full = Path.GetFullPath(afterPath);
         if (!File.Exists(full)) throw new FileNotFoundException("Workbook not found", full);
@@ -93,22 +94,27 @@ public sealed class ExcelSessions : IDisposable
         var summary = WorkbookReader.VerifyPartial(full);
         if (summary.Status == "failed") return new ReadOnlyVerification(full, summary, null);
         var schema = DetachedValidator.CheckPackage(full);
-        var status = schema.Issues.Count > 0 ? "failed" : summary.Status;
-        return new ReadOnlyVerification(full, summary with { Status = status }, schema);
+        IReadOnlyList<GateIssue>? assertionIssues = assertions is { Count: > 0 } && schema.Issues.Count == 0
+            ? G7Assertions.Check(full, assertions) : null;
+        var status = schema.Issues.Count + (assertionIssues?.Count ?? 0) > 0 ? "failed" : summary.Status;
+        return new ReadOnlyVerification(full, summary with { Status = status }, schema, assertionIssues);
     }
 
-    public ReadOnlyComparison Verify(string afterPath, string beforePath, int maxDifferences = 200)
+    public ReadOnlyComparison Verify(string afterPath, string beforePath, int maxDifferences = 200,
+        IReadOnlyList<ValueAssertion>? assertions = null)
     {
         if (maxDifferences is < 1 or > 5000) throw new ArgumentOutOfRangeException(nameof(maxDifferences));
         var before = Verify(beforePath);
         var after = Verify(afterPath);
         if (before.Summary.PackageIssues.Count + before.Summary.MarkupIssues.Count
             + after.Summary.PackageIssues.Count + after.Summary.MarkupIssues.Count > 0)
-            return new ReadOnlyComparison(before, after, null, null, "failed");
+            return new ReadOnlyComparison(before, after, null, null, null, "failed");
         var comparison = PackageComparator.Compare(before.Path, after.Path, maxDifferences);
         var schemaDelta = DetachedValidator.ComparePackages(before.Path, after.Path);
-        return new ReadOnlyComparison(before, after, comparison, schemaDelta,
-            comparison.HasDifferences || schemaDelta.Issues.Count > 0 ? "failed" : "unverified");
+        IReadOnlyList<GateIssue>? assertionIssues = assertions is { Count: > 0 }
+            ? G7Assertions.Check(after.Path, assertions, before.Path) : null;
+        return new ReadOnlyComparison(before, after, comparison, schemaDelta, assertionIssues,
+            comparison.HasDifferences || schemaDelta.Issues.Count + (assertionIssues?.Count ?? 0) > 0 ? "failed" : "unverified");
     }
 
     public object Status(string? id = null)
