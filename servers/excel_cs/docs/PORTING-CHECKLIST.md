@@ -27,7 +27,7 @@
 - [x] Sáu fixture tổng hợp sinh từ source trong repo: namespace mặc định/`x:`, `ns0:Types`, BOM/CRLF/standalone, shared strings, cache công thức, phonetic, `mc`/`x14ac`, OPC percent/case, workbook lồng. CI không phụ thuộc `D:\data-test`.
 - [x] Workflow `excel-cs.yml` khai báo Windows x64, Linux x64, macOS x64 và macOS arm64, chạy test, schema-order check và MCP smoke. CI remote chưa chạy khi nhánh chưa push; local chỉ kiểm Windows và Docker Linux.
 - [x] 2026-10-03: G5 độc lập so ngữ nghĩa các part liên quan và chặn khai báo span trùm cell không có trong intent; test đối kháng B1/C1 cùng test metadata âm. Mã lỗi MCP có code riêng cho revision/merge/formula text, test local-corpus thiếu biến hiện `Skipped` thay vì `Passed`; XML UTF-8 thiếu encoding và vị trí chèn calcPr đã được sửa.
-- [x] 2026-10-03: ma trận `set_value` local hiển thị riêng 8 fixture và kiểm G1/G2/G3/G4/G5 theo từng file. Windows và Docker Linux đạt **573/573** test khi gắn corpus local; schema-order và MCP stdio smoke qua cả hai OS. Không khẳng định macOS hoặc CI từ xa đã chạy.
+- [x] 2026-10-03: ma trận `set_value` local hiển thị riêng 8 fixture và kiểm G1/G2/G3/G4/G5 theo từng file. Windows và Docker Linux đạt **580/580** test sau khi chặn span giả bao metadata, thay đổi lexical trong start tag và whitespace ngoài intent; schema-order và MCP stdio smoke qua cả hai OS. Không khẳng định macOS hoặc CI từ xa đã chạy.
 
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 

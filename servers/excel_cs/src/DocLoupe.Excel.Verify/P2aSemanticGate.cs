@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
+using DocLoupe.Excel.Model;
 
 namespace DocLoupe.Excel.Verify;
 
@@ -82,7 +83,8 @@ public static partial class P2aGates
                 }
             }
             if (declared is not null)
-                CheckDeclarationScope(oldEntries, oldWorkbook, targets, declared, issues);
+                CheckDeclarationScope(oldEntries, newEntries, oldWorkbook, newWorkbook, targets,
+                    formulaRemoved, declared, issues);
             var oldShared = oldWorkbook.SharedPart;
             var newShared = newWorkbook.SharedPart;
             if (oldShared is not null) handled.Add(oldShared);
@@ -152,16 +154,29 @@ public static partial class P2aGates
     }
 
     private static void CheckDeclarationScope(Dictionary<string, ZipArchiveEntry> entries,
-        SemanticWorkbook workbook, Dictionary<string, HashSet<string>> targets,
+        Dictionary<string, ZipArchiveEntry> writtenEntries,
+        SemanticWorkbook workbook, SemanticWorkbook writtenWorkbook,
+        Dictionary<string, HashSet<string>> targets, bool formulaRemoved,
         IEnumerable<DeclaredByteSpan> declared, List<GateIssue> issues)
     {
         var byPart = workbook.Sheets.ToDictionary(sheet => sheet.Value, sheet => sheet.Key,
             StringComparer.OrdinalIgnoreCase);
         foreach (var group in declared.GroupBy(edit => edit.Part, StringComparer.OrdinalIgnoreCase))
         {
-            if (!byPart.TryGetValue(group.Key, out var sheet)) continue;
-            var source = Read(entries[group.Key]);
+            if (!entries.TryGetValue(group.Key, out var entry))
+            {
+                if (group.Any()) issues.Add(new("G5", "DECLARATION_OUTSIDE_INTENT", group.Key));
+                continue;
+            }
+            var source = Read(entry);
             var text = new UTF8Encoding(false, true).GetString(source);
+            if (!byPart.TryGetValue(group.Key, out var sheet))
+            {
+                var writtenText = new UTF8Encoding(false, true).GetString(Read(writtenEntries[group.Key]));
+                CheckMetadataScope(group.Key, text, writtenText, workbook, writtenWorkbook,
+                    formulaRemoved, group, issues);
+                continue;
+            }
             var allowed = targets.GetValueOrDefault(sheet) ?? [];
             var cellSpans = new List<(int Start, int End, string Address)>();
             foreach (Match opening in Regex.Matches(text,
@@ -184,13 +199,199 @@ public static partial class P2aGates
                 cellSpans.Add((Encoding.UTF8.GetByteCount(text.AsSpan(0, opening.Index)),
                     Encoding.UTF8.GetByteCount(text.AsSpan(0, end)), address.Groups["value"].Value));
             }
+            var insertionOffsets = new HashSet<int>();
+            var rows = TagSpans(text, "row");
+            var sheetData = TagSpans(text, "sheetData").SingleOrDefault();
+            foreach (var address in allowed.Where(address => cellSpans.All(cell => cell.Address != address)))
+            {
+                var target = CellAddress.Parse(address);
+                var row = rows.SingleOrDefault(candidate => RawAttribute(candidate, "r") ==
+                    target.Row.ToString(CultureInfo.InvariantCulture));
+                if (row is not null)
+                {
+                    var end = RowEndTagOffset(text, row);
+                    var nextCell = cellSpans.Where(cell => cell.Start >= row.End && cell.Start < end &&
+                            CellAddress.Parse(cell.Address).Column > target.Column)
+                        .OrderBy(cell => cell.Start).FirstOrDefault();
+                    insertionOffsets.Add(nextCell.Address is null ? end : nextCell.Start);
+                }
+                else if (sheetData is not null)
+                {
+                    var nextRow = rows.Where(candidate => int.Parse(RawAttribute(candidate, "r"),
+                            CultureInfo.InvariantCulture) > target.Row)
+                        .OrderBy(candidate => candidate.Start).FirstOrDefault();
+                    insertionOffsets.Add(nextRow?.Start ?? ClosingTagOffset(text, sheetData));
+                }
+                else
+                    insertionOffsets.Add(ClosingTagOffset(text, TagSpans(text, "worksheet").Single()));
+            }
             foreach (var edit in group)
             {
-                if (edit.Start == edit.End) continue;
-                if (!cellSpans.Any(cell => allowed.Contains(cell.Address) &&
-                    edit.Start >= cell.Start && edit.End <= cell.End))
+                var permitted = edit.Start == edit.End
+                    ? insertionOffsets.Contains(edit.Start)
+                    : cellSpans.Any(cell => allowed.Contains(cell.Address) &&
+                        edit.Start >= cell.Start && edit.End <= cell.End);
+                if (!permitted)
                     issues.Add(new("G5", "DECLARATION_OUTSIDE_INTENT", $"{sheet}: {edit.Start}-{edit.End}"));
             }
+        }
+    }
+
+    private sealed record RawTag(int Start, int End, string Name, string Attributes,
+        int CharStart, int CharEnd);
+
+    private static IReadOnlyList<RawTag> TagSpans(string text, string localName)
+    {
+        var pattern = @"<(?<prefix>[A-Za-z_][\w.-]*:)?" + Regex.Escape(localName) +
+            @"(?=\s|/|>)(?<attributes>(?:""[^""]*""|'[^']*'|[^'""<>])*)>";
+        return Regex.Matches(text, pattern, RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5))
+            .Cast<Match>()
+            .Select(match => new RawTag(Encoding.UTF8.GetByteCount(text.AsSpan(0, match.Index)),
+                Encoding.UTF8.GetByteCount(text.AsSpan(0, match.Index + match.Length)),
+                match.Groups["prefix"].Value + localName, match.Groups["attributes"].Value,
+                match.Index, match.Index + match.Length))
+            .ToArray();
+    }
+
+    private static string RawAttribute(RawTag tag, string name)
+    {
+        var attributes = tag.Attributes;
+        for (var offset = 0; offset < attributes.Length;)
+        {
+            while (offset < attributes.Length && char.IsWhiteSpace(attributes[offset])) offset++;
+            if (offset == attributes.Length || attributes[offset] == '/') break;
+            var start = offset;
+            while (offset < attributes.Length && !char.IsWhiteSpace(attributes[offset]) &&
+                   attributes[offset] is not ('=' or '/')) offset++;
+            var attributeName = attributes[start..offset];
+            while (offset < attributes.Length && char.IsWhiteSpace(attributes[offset])) offset++;
+            if (attributeName.Length == 0 || offset == attributes.Length || attributes[offset++] != '=')
+                throw new InvalidDataException("Malformed package attribute");
+            while (offset < attributes.Length && char.IsWhiteSpace(attributes[offset])) offset++;
+            if (offset == attributes.Length || attributes[offset] is not ('\'' or '"'))
+                throw new InvalidDataException("Malformed package attribute value");
+            var quote = attributes[offset++];
+            var valueStart = offset;
+            while (offset < attributes.Length && attributes[offset] != quote) offset++;
+            if (offset == attributes.Length) throw new InvalidDataException("Unterminated package attribute");
+            var value = attributes[valueStart..offset++];
+            if (attributeName == name) return value;
+        }
+        return "";
+    }
+
+    private static int ClosingTagOffset(string text, RawTag root)
+    {
+        var index = text.LastIndexOf("</" + root.Name, StringComparison.Ordinal);
+        if (index < 0) throw new InvalidDataException("Missing package XML closing tag");
+        return Encoding.UTF8.GetByteCount(text.AsSpan(0, index));
+    }
+
+    private static int RowEndTagOffset(string text, RawTag row)
+    {
+        var index = text.IndexOf("</" + row.Name, row.CharEnd, StringComparison.Ordinal);
+        if (index < 0) throw new InvalidDataException("Missing worksheet row closing tag");
+        return Encoding.UTF8.GetByteCount(text.AsSpan(0, index));
+    }
+
+    private static bool PermittedStartTagChange(string original, string written,
+        string localName, IReadOnlyList<string> allowedAttributes)
+    {
+        var before = TagSpans(original, localName);
+        var after = TagSpans(written, localName);
+        if (before.Count != 1 || after.Count != 1) return false;
+        string WithoutAllowedAttributes(string text, RawTag tag)
+        {
+            var markup = text[tag.CharStart..tag.CharEnd];
+            var prefixEnd = 1 + tag.Name.Length;
+            var result = new StringBuilder(markup[..prefixEnd]);
+            for (var offset = prefixEnd; offset < markup.Length;)
+            {
+                var whitespaceStart = offset;
+                while (offset < markup.Length && char.IsWhiteSpace(markup[offset])) offset++;
+                if (offset == markup.Length || markup[offset] is '/' or '>')
+                {
+                    result.Append(markup.AsSpan(whitespaceStart));
+                    break;
+                }
+                var nameStart = offset;
+                while (offset < markup.Length && !char.IsWhiteSpace(markup[offset]) &&
+                       markup[offset] is not ('=' or '/' or '>')) offset++;
+                var name = markup[nameStart..offset];
+                while (offset < markup.Length && char.IsWhiteSpace(markup[offset])) offset++;
+                if (name.Length == 0 || offset >= markup.Length || markup[offset++] != '=')
+                    throw new InvalidDataException("Malformed package attribute");
+                while (offset < markup.Length && char.IsWhiteSpace(markup[offset])) offset++;
+                if (offset >= markup.Length || markup[offset] is not ('\'' or '"'))
+                    throw new InvalidDataException("Malformed package attribute value");
+                var quote = markup[offset++];
+                while (offset < markup.Length && markup[offset] != quote) offset++;
+                if (offset == markup.Length) throw new InvalidDataException("Unterminated package attribute");
+                offset++;
+                if (!allowedAttributes.Contains(name, StringComparer.Ordinal))
+                    result.Append(markup.AsSpan(whitespaceStart, offset - whitespaceStart));
+            }
+            return result.ToString();
+        }
+        return WithoutAllowedAttributes(original, before[0]) == WithoutAllowedAttributes(written, after[0]);
+    }
+
+    private static void CheckMetadataScope(string part, string text, string writtenText,
+        SemanticWorkbook workbook, SemanticWorkbook writtenWorkbook, bool formulaRemoved,
+        IEnumerable<DeclaredByteSpan> declared, List<GateIssue> issues)
+    {
+        var allowed = new List<RawTag>();
+        var insertionOffsets = new HashSet<int>();
+        var insertCalc = false;
+        var removeChain = formulaRemoved && workbook.CalcChainPart is not null &&
+            writtenWorkbook.CalcChainPart is null;
+        var addShared = workbook.SharedPart is null && writtenWorkbook.SharedPart is not null;
+        if (part.Equals(workbook.Part, StringComparison.OrdinalIgnoreCase))
+        {
+            var calc = TagSpans(text, "calcPr");
+            if (calc.Count > 1) throw new InvalidDataException("Ambiguous calculation properties");
+            if (calc.Count == 1)
+            {
+                allowed.Add(calc[0]);
+                if (!PermittedStartTagChange(text, writtenText, "calcPr", ["fullCalcOnLoad"]))
+                    issues.Add(new("G5", "DECLARATION_OUTSIDE_INTENT", part + ": calcPr attributes"));
+            }
+            else insertCalc = true;
+        }
+        else if (part.Equals(workbook.SharedPart, StringComparison.OrdinalIgnoreCase))
+        {
+            var table = TagSpans(text, "sst").Single();
+            allowed.Add(table);
+            if (!PermittedStartTagChange(text, writtenText, "sst", ["count", "uniqueCount"]))
+                issues.Add(new("G5", "DECLARATION_OUTSIDE_INTENT", part + ": sst attributes"));
+            insertionOffsets.Add(ClosingTagOffset(text, table));
+        }
+        else if (part.Equals(workbook.RelationshipPart, StringComparison.OrdinalIgnoreCase))
+        {
+            if (removeChain)
+                allowed.AddRange(TagSpans(text, "Relationship").Where(tag =>
+                    RawAttribute(tag, "Type") == Office + "/calcChain" &&
+                    Resolve(workbook.Part, RawAttribute(tag, "Target"))
+                        .Equals(workbook.CalcChainPart, StringComparison.OrdinalIgnoreCase)));
+            if (addShared)
+                insertionOffsets.Add(ClosingTagOffset(text, TagSpans(text, "Relationships").Single()));
+        }
+        else if (part.Equals("[Content_Types].xml", StringComparison.OrdinalIgnoreCase))
+        {
+            if (removeChain)
+                allowed.AddRange(TagSpans(text, "Override").Where(tag =>
+                    RawAttribute(tag, "PartName").TrimStart('/')
+                        .Equals(workbook.CalcChainPart, StringComparison.OrdinalIgnoreCase)));
+            if (addShared)
+                insertionOffsets.Add(ClosingTagOffset(text, TagSpans(text, "Types").Single()));
+        }
+        foreach (var edit in declared)
+        {
+            var permitted = edit.Start == edit.End
+                ? insertCalc || insertionOffsets.Contains(edit.Start)
+                : allowed.Any(tag => edit.Start >= tag.Start && edit.End <= tag.End);
+            if (!permitted)
+                issues.Add(new("G5", "DECLARATION_OUTSIDE_INTENT", $"{part}: {edit.Start}-{edit.End}"));
         }
     }
 

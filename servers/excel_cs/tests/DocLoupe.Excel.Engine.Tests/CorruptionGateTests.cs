@@ -172,16 +172,127 @@ public sealed class CorruptionGateTests
         var source = Path.Combine(fixture.Directory, "new-shared-strings.xlsx");
         var edited = Path.Combine(fixture.Directory, "edited.xlsx");
         var intent = new CellExpectation("Sheet1", "B1", "text", "new value");
+        ApplyResult result;
         using (var store = new PackageStore(source))
         {
-            SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "text", "new value")]);
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "text", "new value")]);
             store.Save(edited);
         }
-        Assert.Empty(P2aGates.CheckSemanticPreservation(source, edited, [intent]));
+        var spans = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End,
+            edit.Before, edit.After)).ToArray();
+        Assert.Empty(P2aGates.CheckSemanticPreservation(source, edited, [intent], spans));
         var count = fixture.Corrupt("xl/sharedStrings.xml", xml => xml.Replace("count=\"1\"", "count=\"9\"", StringComparison.Ordinal), edited);
         Assert.Contains(P2aGates.CheckSemanticPreservation(source, count, [intent]), issue => issue.Code == "UNDECLARED_SHARED_STRING_CHANGE");
         var type = fixture.Corrupt("[Content_Types].xml", xml => xml.Replace("spreadsheetml.sharedStrings+xml", "spreadsheetml.styles+xml", StringComparison.Ordinal), edited);
         Assert.Contains(P2aGates.CheckSemanticPreservation(source, type, [intent]), issue => issue.Code == "UNDECLARED_CONTENT_TYPE_CHANGE");
+    }
+
+    [Theory]
+    [InlineData("xl/workbook.xml", "<calcPr ", "calcId=\"191029\"", "calcId='191029'")]
+    [InlineData("xl/sharedStrings.xml", "<sst ", "xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"", "xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'")]
+    public void G5RejectsUnexpectedLexicalChangesInsideAnOtherwisePermittedStartTag(
+        string part, string tag, string from, string to)
+    {
+        using var fixture = new Fixture();
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(fixture.Source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt(part, xml => xml.Replace(from, to, StringComparison.Ordinal), edited);
+        static byte[] Bytes(string path, string name)
+        {
+            using var archive = ZipFile.OpenRead(path);
+            using var input = archive.GetEntry(name)!.Open();
+            using var output = new MemoryStream();
+            input.CopyTo(output);
+            return output.ToArray();
+        }
+        static (int Start, int End) TagSpan(byte[] bytes, string tag)
+        {
+            var xml = Encoding.UTF8.GetString(bytes);
+            var start = xml.IndexOf(tag, StringComparison.Ordinal);
+            Assert.True(start >= 0);
+            var end = xml.IndexOf('>', start) + 1;
+            return (Encoding.UTF8.GetByteCount(xml[..start]), Encoding.UTF8.GetByteCount(xml[..end]));
+        }
+        var original = Bytes(fixture.Source, part);
+        var modified = Bytes(broken, part);
+        var before = TagSpan(original, tag);
+        var after = TagSpan(modified, tag);
+        var spans = result.Edits.Where(edit => !edit.Part.Equals(part, StringComparison.OrdinalIgnoreCase))
+            .Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After))
+            .Append(new DeclaredByteSpan(part, before.Start, before.End,
+                original[before.Start..before.End], modified[after.Start..after.End])).ToArray();
+        Assert.Empty(P2aGates.CheckPreservation(fixture.Source, broken, spans, []));
+        Assert.Contains(P2aGates.CheckSemanticPreservation(fixture.Source, broken,
+            [new CellExpectation("Sheet1", "B1", "number", "100")], spans),
+            issue => issue.Code == "DECLARATION_OUTSIDE_INTENT");
+    }
+
+    [Fact]
+    public void G5RejectsUndeclaredWhitespaceInsertedBesideAnUnrelatedCell()
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(fixture.Source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt(part, xml => xml.Replace("<c r=\"C1\"", "  <c r=\"C1\"", StringComparison.Ordinal), edited);
+        using var archive = ZipFile.OpenRead(fixture.Source);
+        using var stream = archive.GetEntry(part)!.Open();
+        using var memory = new MemoryStream();
+        stream.CopyTo(memory);
+        var before = memory.ToArray();
+        var offset = Encoding.UTF8.GetByteCount(Encoding.UTF8.GetString(before).Split("<c r=\"C1\"", 2)[0]);
+        var spans = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End,
+            edit.Before, edit.After)).Append(new DeclaredByteSpan(part, offset, offset, [], Encoding.UTF8.GetBytes("  "))).ToArray();
+        Assert.Empty(P2aGates.CheckPreservation(fixture.Source, broken, spans, []));
+        Assert.Contains(P2aGates.CheckSemanticPreservation(fixture.Source, broken,
+            [new CellExpectation("Sheet1", "B1", "number", "100")], spans),
+            issue => issue.Code == "DECLARATION_OUTSIDE_INTENT");
+    }
+
+    [Theory]
+    [InlineData("xl/sharedStrings.xml", "<t>hello</t>", "<t>&#104;ello</t>")]
+    [InlineData("xl/workbook.xml", "calcId=\"191029\"", "calcId='191029'")]
+    [InlineData("xl/_rels/workbook.xml.rels", "Id=\"rId1\"", "Id='rId1'")]
+    [InlineData("[Content_Types].xml", "Extension=\"rels\"", "Extension='rels'")]
+    public void G5RejectsBroadSpansInMetadataPartsEvenWhenXmlIsSemanticallyIdentical(
+        string part, string from, string to)
+    {
+        using var fixture = new Fixture();
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(fixture.Source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt(part, xml => xml.Replace(from, to, StringComparison.Ordinal), edited);
+        static byte[] Bytes(string path, string name)
+        {
+            using var archive = ZipFile.OpenRead(path);
+            using var input = archive.GetEntry(name)!.Open();
+            using var output = new MemoryStream();
+            input.CopyTo(output);
+            return output.ToArray();
+        }
+        var original = Bytes(fixture.Source, part);
+        var modified = Bytes(broken, part);
+        var spans = result.Edits.Where(edit => !edit.Part.Equals(part, StringComparison.OrdinalIgnoreCase))
+            .Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After))
+            .Append(new DeclaredByteSpan(part, 0, original.Length, original, modified)).ToArray();
+        Assert.Empty(P2aGates.CheckPreservation(fixture.Source, broken, spans, []));
+        Assert.Contains(P2aGates.CheckSemanticPreservation(fixture.Source, broken,
+            [new CellExpectation("Sheet1", "B1", "number", "100")], spans),
+            issue => issue.Gate == "G5" && issue.Code == "DECLARATION_OUTSIDE_INTENT");
     }
 
     [Fact]

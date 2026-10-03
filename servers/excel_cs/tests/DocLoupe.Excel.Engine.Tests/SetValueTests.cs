@@ -174,9 +174,12 @@ public sealed class SetValueTests
         using var store = new PackageStore(source);
         var result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "text", "new"), new SetValueOp("Sheet1", "C1", "number", "8")]);
         store.Save(output);
+        var expected = result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value));
+        var spans = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End,
+            edit.Before, edit.After)).ToArray();
         Assert.Empty(P2aGates.CheckPackage(output, result.ChangedParts));
-        Assert.Empty(P2aGates.CheckPreservation(source, output, result.Edits.Select(edit =>
-            new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)), ["xl/calcChain.xml", "xl/sharedStrings.xml"]));
+        Assert.Empty(P2aGates.CheckPreservation(source, output, spans, ["xl/calcChain.xml", "xl/sharedStrings.xml"]));
+        Assert.Empty(P2aGates.CheckSemanticPreservation(source, output, expected, spans));
     }
 
     private static void AddBeforeClose(ZipArchive archive, string part, string closing, string addition)
