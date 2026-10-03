@@ -110,6 +110,57 @@ public sealed class ReaderFixtureTests
         }
     }
 
+    [Fact]
+    public void SessionlessCompareRejectsUndeclaredByteChangesAndInvalidBaseline()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-compare-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var before = Path.Combine(directory, "default.xlsx");
+            var after = Path.Combine(directory, "after.xlsx");
+            File.Copy(before, after);
+            using var sessions = new ExcelSessions();
+            var unchanged = sessions.Verify(after, before);
+            Assert.Equal("unverified", unchanged.Status);
+            Assert.False(unchanged.Comparison!.HasDifferences);
+            ReplacePart(after, "xl/worksheets/sheet1.xml", "<v>42</v>", "<v>43</v>");
+            var writtenBytes = File.ReadAllBytes(after);
+            var result = sessions.Verify(after, before);
+            Assert.Equal("failed", result.Status);
+            Assert.Equal("unverified", result.Before.Summary.Status);
+            Assert.Equal("unverified", result.After.Summary.Status);
+            var difference = Assert.Single(result.Comparison!.Differences);
+            Assert.Equal("changed_part", difference.Category);
+            Assert.Equal("xl/worksheets/sheet1.xml", difference.Part);
+            Assert.Equal("undeclared", difference.Classification);
+            Assert.NotEqual(difference.BeforeSha256, difference.AfterSha256);
+            Assert.Equal(writtenBytes, File.ReadAllBytes(after));
+            using (var archive = ZipFile.Open(before, ZipArchiveMode.Update))
+                archive.GetEntry("_rels/.rels")!.Delete();
+            var invalid = sessions.Verify(after, before);
+            Assert.Equal("failed", invalid.Status);
+            Assert.Null(invalid.Comparison);
+            Assert.Contains(invalid.Before.Summary.PackageIssues, issue => issue.Code == "MISSING_PART");
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    private static void ReplacePart(string path, string part, string original, string replacement)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
+        var entry = archive.GetEntry(part)!;
+        string xml;
+        using (var reader = new StreamReader(entry.Open())) xml = reader.ReadToEnd();
+        entry.Delete();
+        Assert.Contains(original, xml);
+        using var writer = new StreamWriter(archive.CreateEntry(part).Open(), Encoding.UTF8);
+        writer.Write(xml.Replace(original, replacement, StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("opc-percent-case")]
     [InlineData("nested-workbook")]

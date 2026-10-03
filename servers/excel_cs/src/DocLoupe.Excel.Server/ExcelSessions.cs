@@ -11,6 +11,8 @@ using DocLoupe.Excel.Verify;
 namespace DocLoupe.Excel.Server;
 
 public sealed record ReadOnlyVerification(string Path, VerificationSummary Summary, SchemaReport? Schema);
+public sealed record ReadOnlyComparison(ReadOnlyVerification Before, ReadOnlyVerification After,
+    PackageComparison? Comparison, string Status);
 
 public sealed class ExcelSessions : IDisposable
 {
@@ -93,6 +95,18 @@ public sealed class ExcelSessions : IDisposable
         var schema = DetachedValidator.CheckPackage(full);
         var status = schema.Issues.Count > 0 ? "failed" : summary.Status;
         return new ReadOnlyVerification(full, summary with { Status = status }, schema);
+    }
+
+    public ReadOnlyComparison Verify(string afterPath, string beforePath, int maxDifferences = 200)
+    {
+        if (maxDifferences is < 1 or > 5000) throw new ArgumentOutOfRangeException(nameof(maxDifferences));
+        var before = Verify(beforePath);
+        var after = Verify(afterPath);
+        if (before.Summary.Status == "failed" || after.Summary.Status == "failed")
+            return new ReadOnlyComparison(before, after, null, "failed");
+        var comparison = PackageComparator.Compare(before.Path, after.Path, maxDifferences);
+        return new ReadOnlyComparison(before, after, comparison,
+            comparison.HasDifferences ? "failed" : "unverified");
     }
 
     public object Status(string? id = null)

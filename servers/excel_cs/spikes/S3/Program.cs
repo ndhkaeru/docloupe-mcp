@@ -26,6 +26,33 @@ try
         verified.StructuredContent?.GetProperty("data").GetProperty("unverified_gates").GetArrayLength() == 0 ||
         verified.StructuredContent?.GetProperty("warnings").GetArrayLength() == 0)
         throw new InvalidOperationException("Read-only verification claimed full success: " + verified.StructuredContent?.GetRawText());
+    if (verified.StructuredContent?.GetProperty("data").GetProperty("schema_issues").GetArrayLength() != 0)
+        throw new InvalidOperationException("Synthetic fixture must be schema-valid: " + verified.StructuredContent?.GetRawText());
+    var compared = await client.CallToolAsync("excel_verify", new Dictionary<string, object?>
+    {
+        ["after_path"] = source, ["before_path"] = source
+    });
+    if (compared.IsError == true || compared.StructuredContent?.GetProperty("data").GetProperty("status").GetString() != "unverified" ||
+        compared.StructuredContent?.GetProperty("data").GetProperty("differences").GetArrayLength() != 0)
+        throw new InvalidOperationException("No-change comparison failed: " + compared.StructuredContent?.GetRawText());
+    var changedWorkbook = Path.Combine(directory, "compare-changed.xlsx");
+    File.Copy(source, changedWorkbook);
+    using (var archive = ZipFile.Open(changedWorkbook, ZipArchiveMode.Update))
+    {
+        var entry = archive.GetEntry("xl/worksheets/sheet1.xml")!;
+        string xml;
+        using (var reader = new StreamReader(entry.Open())) xml = reader.ReadToEnd();
+        entry.Delete();
+        using var writer = new StreamWriter(archive.CreateEntry("xl/worksheets/sheet1.xml").Open());
+        writer.Write(xml.Replace("<v>42</v>", "<v>43</v>", StringComparison.Ordinal));
+    }
+    var comparedChange = await client.CallToolAsync("excel_verify", new Dictionary<string, object?>
+    {
+        ["after_path"] = changedWorkbook, ["before_path"] = source, ["max_differences"] = 1
+    });
+    if (comparedChange.IsError != true || comparedChange.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PRESERVATION_FAILED" ||
+        comparedChange.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("differences").GetArrayLength() != 1)
+        throw new InvalidOperationException("Undeclared change passed comparison: " + comparedChange.StructuredContent?.GetRawText());
     var broken = Path.Combine(directory, "broken.xlsx");
     File.Copy(source, broken);
     using (var archive = ZipFile.Open(broken, ZipArchiveMode.Update))

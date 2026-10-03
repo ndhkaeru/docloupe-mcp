@@ -16,7 +16,8 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
     McpServerTool.Create((string path) => Handle(() => sessions.Open(path)), new McpServerToolCreateOptions { Name = "excel_open" }),
     McpServerTool.Create((string path, string detail = "summary", string? sheet = null, int max_rows = 20, int max_cols = 10) =>
         Handle(() => sessions.Peek(path, detail, sheet, max_rows, max_cols)), new McpServerToolCreateOptions { Name = "excel_peek" }),
-    McpServerTool.Create((string after_path) => Handle(() => sessions.Verify(after_path)),
+    McpServerTool.Create((string after_path, string? before_path = null, int max_differences = 200) =>
+        Handle(() => before_path is null ? sessions.Verify(after_path) : sessions.Verify(after_path, before_path, max_differences)),
         new McpServerToolCreateOptions { Name = "excel_verify" }),
     McpServerTool.Create((string? session = null) => Handle(() => sessions.Status(session)), new McpServerToolCreateOptions { Name = "excel_status" }),
     McpServerTool.Create((string session, string? sheet, JsonElement target) => Handle(() => sessions.Read(session, sheet, ReadTargets(target))),
@@ -66,6 +67,32 @@ static CallToolResult Handle(Func<object> action)
     try
     {
         var data = action();
+        if (data is ReadOnlyComparison comparison)
+        {
+            var report = new
+            {
+                mode = "compare", files = new { before = comparison.Before.Path, after = comparison.After.Path },
+                status = comparison.Status, partial = true,
+                verified_checks = comparison.Comparison is null ? Array.Empty<string>() : ["G5_PART_BYTES"],
+                before = new { package_issues = comparison.Before.Summary.PackageIssues,
+                    markup_issues = comparison.Before.Summary.MarkupIssues,
+                    schema_issues = comparison.Before.Schema?.Issues ?? [], schema_gaps = comparison.Before.Schema?.Gaps ?? [] },
+                after = new { package_issues = comparison.After.Summary.PackageIssues,
+                    markup_issues = comparison.After.Summary.MarkupIssues,
+                    schema_issues = comparison.After.Schema?.Issues ?? [], schema_gaps = comparison.After.Schema?.Gaps ?? [] },
+                differences = comparison.Comparison?.Differences ?? [],
+                truncated = comparison.Comparison?.Truncated ?? false,
+                unverified_gates = new[] { "G1_REMAINING", "G2", "G3_REMAINING", "G4", "G5_REMAINING", "G6", "G7" }
+            };
+            if (comparison.Status == "failed")
+            {
+                var code = comparison.Comparison is null ? "PACKAGE_INVALID" : "PRESERVATION_FAILED";
+                return Result(new { ok = false, error = new { code, message = "Read-only comparison failed",
+                    details = report, retryable = false } }, true);
+            }
+            return Result(new { ok = true, data = report,
+                warnings = new[] { "Part bytes only; ZIP metadata and semantic equivalence are not verified" } }, false);
+        }
         if (data is ReadOnlyVerification verification)
         {
             var summary = verification.Summary;
