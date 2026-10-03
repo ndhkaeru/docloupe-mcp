@@ -69,7 +69,7 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
                 formulaContains ? "formula" : @in, case_sensitive, normalize,
                 max_results, expectedValue);
         }), new McpServerToolCreateOptions { Name = "excel_find" }),
-    McpServerTool.Create((string session, int base_revision, SetValueRequest[] ops, string? sheet = null, bool dry_run = false) => Handle(() => sessions.Apply(session, base_revision, ops.SelectMany((op, index) => op.NormalizeMany(sheet).Select(cell => cell with { SourceIndex = index })).ToArray(), dry_run)), new McpServerToolCreateOptions { Name = "excel_apply" }),
+    McpServerTool.Create((string session, int base_revision, SetValueRequest[] ops, string? sheet = null, bool dry_run = false, int max_diff_items = 200) => Handle(() => sessions.Apply(session, base_revision, ops.SelectMany((op, index) => op.NormalizeMany(sheet).Select(cell => cell with { SourceIndex = index })).ToArray(), dry_run, max_diff_items)), new McpServerToolCreateOptions { Name = "excel_apply" }),
     McpServerTool.Create((string session, string mode, string? path = null, SaveAssertionRequest[]? @assert = null) =>
         Handle(() => sessions.Save(session, path, NormalizeAssertions(@assert), mode)),
         new McpServerToolCreateOptions { Name = "excel_save" }),

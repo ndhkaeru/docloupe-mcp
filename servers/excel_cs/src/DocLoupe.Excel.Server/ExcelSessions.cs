@@ -467,13 +467,15 @@ public sealed class ExcelSessions : IDisposable
         return document.RootElement.Clone();
     }
 
-    public object Apply(string id, int baseRevision, SetValueOp[] operations, bool dryRun = false)
+    public object Apply(string id, int baseRevision, SetValueOp[] operations, bool dryRun = false,
+        int maxDiffItems = 200)
     {
         var session = Get(id);
         lock (session.Sync)
         {
             session.CheckSource();
             if (operations.Length is < 1 or > 500) throw new ArgumentOutOfRangeException(nameof(operations));
+            if (maxDiffItems is < 1 or > 500) throw new ArgumentOutOfRangeException(nameof(maxDiffItems));
             if (baseRevision != session.Revision) throw new InvalidOperationException("REVISION_CONFLICT");
             if (operations.Any(operation => operation.Expect is not null))
             {
@@ -504,6 +506,11 @@ public sealed class ExcelSessions : IDisposable
             var next = Coalesce(session.Operations.Concat(operations));
             var result = SetValueEngine.Apply(candidate, next);
             var readback = Readback(candidate, operations);
+            IReadOnlyDictionary<string, CellRead?> previous;
+            var priorPath = session.Preview();
+            try { previous = Readback(priorPath, operations); }
+            finally { if (priorPath != session.BasePath) File.Delete(priorPath); }
+            var (diff, diffSummary) = DescribeDiff(previous, readback, maxDiffItems);
             var results = operations.Select((operation, index) => new
             {
                 index = operation.SourceIndex < 0 ? index : operation.SourceIndex,
@@ -514,7 +521,8 @@ public sealed class ExcelSessions : IDisposable
             if (dryRun)
                 return new { session = id, dry_run = true, revision = session.Revision,
                     revision_before = baseRevision, revision_after = baseRevision,
-                    intent = result.Intent, changed_parts = result.ChangedParts, readback, results };
+                    intent = result.Intent, changed_parts = result.ChangedParts, readback, results,
+                    diff, diff_summary = diffSummary };
             session.Operations.AddRange(operations);
             session.RevisionLengths.Add(operations.Length);
             session.Revision++;
@@ -523,7 +531,8 @@ public sealed class ExcelSessions : IDisposable
             session.Publish();
             return new { session = id, dry_run = false, revision = session.Revision,
                 revision_before = baseRevision, revision_after = session.Revision,
-                intent = result.Intent, changed_parts = result.ChangedParts, readback, results };
+                intent = result.Intent, changed_parts = result.ChangedParts, readback, results,
+                diff, diff_summary = diffSummary };
         }
     }
 
@@ -533,18 +542,67 @@ public sealed class ExcelSessions : IDisposable
         try
         {
             candidate.Save(staging);
-            var readback = new Dictionary<string, CellRead?>(StringComparer.Ordinal);
-            foreach (var group in operations.GroupBy(operation => operation.Sheet, StringComparer.Ordinal))
-            {
-                var addresses = group.Select(operation => operation.Address).Distinct(StringComparer.Ordinal).ToArray();
-                var cells = P2aGates.ReadCells(staging, group.Key, addresses)
-                    .ToDictionary(cell => cell.Address, StringComparer.Ordinal);
-                foreach (var address in addresses)
-                    readback[group.Key + "!" + address] = cells.GetValueOrDefault(address);
-            }
-            return readback;
+            return Readback(staging, operations);
         }
         finally { if (File.Exists(staging)) File.Delete(staging); }
+    }
+
+    private static IReadOnlyDictionary<string, CellRead?> Readback(string path, SetValueOp[] operations)
+    {
+        var readback = new Dictionary<string, CellRead?>(StringComparer.Ordinal);
+        foreach (var group in operations.GroupBy(operation => operation.Sheet, StringComparer.Ordinal))
+        {
+            var addresses = group.Select(operation => operation.Address).Distinct(StringComparer.Ordinal).ToArray();
+            var cells = P2aGates.ReadCells(path, group.Key, addresses)
+                .ToDictionary(cell => cell.Address, StringComparer.Ordinal);
+            foreach (var address in addresses)
+                readback[group.Key + "!" + address] = cells.GetValueOrDefault(address);
+        }
+        return readback;
+    }
+
+    private static (object[] Diff, object Summary) DescribeDiff(
+        IReadOnlyDictionary<string, CellRead?> previous, IReadOnlyDictionary<string, CellRead?> readback,
+        int maxDiffItems)
+    {
+        var changes = new List<(string Path, string Facet, object? Before, object? After,
+            string BeforeJson, string AfterJson)>();
+        foreach (var (target, after) in readback)
+        {
+            previous.TryGetValue(target, out var before);
+            Add("present", before is not null, after is not null);
+            Add("type", before?.Kind, after?.Kind);
+            Add("value", before?.Value, after?.Value);
+            Add("formula", before?.Formula, after?.Formula);
+            Add("cache", before?.Formula is null ? null : new { type = before.CacheType, raw = before.CacheRawValue },
+                after?.Formula is null ? null : new { type = after.CacheType, raw = after.CacheRawValue });
+
+            void Add(string facet, object? oldValue, object? newValue)
+            {
+                var oldJson = JsonSerializer.Serialize(oldValue);
+                var newJson = JsonSerializer.Serialize(newValue);
+                if (oldJson != newJson)
+                    changes.Add((target + "." + facet, facet, oldValue, newValue, oldJson, newJson));
+            }
+        }
+        var diff = changes.Take(maxDiffItems).Select(change => new
+        {
+            id = "d_" + Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+                change.Path + change.BeforeJson + change.AfterJson))).ToLowerInvariant()[..10],
+            path = change.Path,
+            before = change.Before,
+            after = change.After
+        }).ToArray();
+        var summary = new
+        {
+            facets_changed = changes.Count,
+            cells_touched = readback.Count,
+            by_category = changes.GroupBy(change => change.Facet, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
+            truncated = changes.Count > maxDiffItems,
+            partial = true
+        };
+        return (diff, summary);
     }
 
     public UndoResult Undo(string id, int baseRevision, int toRevision)

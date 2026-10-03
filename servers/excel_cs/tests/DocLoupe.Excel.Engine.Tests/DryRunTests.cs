@@ -48,6 +48,15 @@ public sealed class DryRunTests
             Assert.Equal(2, plannedCells.EnumerateObject().Count());
             Assert.Equal("replacement", plannedCells.GetProperty("Sheet1!B1").GetProperty("Value").GetString());
             Assert.Equal("true", plannedCells.GetProperty("Sheet1!G4").GetProperty("Value").GetString());
+            var differences = plan.GetProperty("diff").EnumerateArray().ToArray();
+            var valueChange = Assert.Single(differences, item =>
+                item.GetProperty("path").GetString() == "Sheet1!B1.value");
+            Assert.Equal("42", valueChange.GetProperty("before").GetString());
+            Assert.Equal("replacement", valueChange.GetProperty("after").GetString());
+            Assert.StartsWith("d_", valueChange.GetProperty("id").GetString());
+            Assert.DoesNotContain(differences, item => item.GetProperty("path").GetString()!.Contains("F4"));
+            Assert.True(plan.GetProperty("diff_summary").GetProperty("partial").GetBoolean());
+            Assert.False(plan.GetProperty("diff_summary").GetProperty("truncated").GetBoolean());
             Assert.Equal(1, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("ledger").GetArrayLength());
             Assert.Empty(JsonSerializer.SerializeToElement(sessions.Read(id, "Sheet1", ["G4"]))
                 .GetProperty("cells").EnumerateArray());
@@ -59,6 +68,7 @@ public sealed class DryRunTests
             Assert.Equal(plan.GetProperty("intent").GetRawText(), applied.GetProperty("intent").GetRawText());
             Assert.Equal(plan.GetProperty("changed_parts").GetRawText(), applied.GetProperty("changed_parts").GetRawText());
             Assert.Equal(plannedCells.GetRawText(), applied.GetProperty("readback").GetRawText());
+            Assert.Equal(plan.GetProperty("diff").GetRawText(), applied.GetProperty("diff").GetRawText());
             Assert.Equal("applied", applied.GetProperty("results")[0].GetProperty("status").GetString());
             var output = Path.Combine(directory, "saved.xlsx");
             sessions.Save(id, output);
@@ -83,9 +93,43 @@ public sealed class DryRunTests
             var request = Request("""{"op":"clear","target":"Sheet1!B1","remove_cells":true}""");
             var plan = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, [request], dryRun: true));
             Assert.Equal(JsonValueKind.Null, plan.GetProperty("readback").GetProperty("Sheet1!B1").ValueKind);
+            var removed = Assert.Single(plan.GetProperty("diff").EnumerateArray(), item =>
+                item.GetProperty("path").GetString() == "Sheet1!B1.present");
+            Assert.True(removed.GetProperty("before").GetBoolean());
+            Assert.False(removed.GetProperty("after").GetBoolean());
             var applied = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, [request]));
             Assert.Equal(JsonValueKind.Null, applied.GetProperty("readback").GetProperty("Sheet1!B1").ValueKind);
             sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void DiffCapReportsTotalChangesWithoutSilentlyDroppingThem()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-dry-diff-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, "default.xlsx")))
+                .GetProperty("session").GetString()!;
+            var operations = new[]
+            {
+                Request("""{"op":"set_value","target":"Sheet1!B1","value":"changed"}"""),
+                Request("""{"op":"set_value","target":"Sheet1!F4","value":3}""")
+            };
+            var plan = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, operations,
+                dryRun: true, maxDiffItems: 1));
+            Assert.Equal(1, plan.GetProperty("diff").GetArrayLength());
+            var summary = plan.GetProperty("diff_summary");
+            Assert.True(summary.GetProperty("truncated").GetBoolean());
+            Assert.True(summary.GetProperty("facets_changed").GetInt32() > 1);
+            Assert.Equal(2, summary.GetProperty("cells_touched").GetInt32());
+            Assert.Equal(2, plan.GetProperty("readback").EnumerateObject().Count());
+            Assert.Throws<ArgumentOutOfRangeException>(() => sessions.Apply(id, 0, operations,
+                dryRun: true, maxDiffItems: 0));
+            sessions.Close(id, false);
         }
         finally { Directory.Delete(directory, true); }
     }

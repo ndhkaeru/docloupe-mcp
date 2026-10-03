@@ -220,8 +220,20 @@ try
         planned.StructuredContent?.GetProperty("data").GetProperty("revision_after").GetInt32() != 0 ||
         planned.StructuredContent?.GetProperty("data").GetProperty("intent").GetArrayLength() != 1 ||
         planned.StructuredContent?.GetProperty("data").GetProperty("readback").GetProperty("Sheet1!B1").GetProperty("Value").GetString() != "99" ||
-        planned.StructuredContent?.GetProperty("data").GetProperty("results")[0].GetProperty("status").GetString() != "planned")
+        planned.StructuredContent?.GetProperty("data").GetProperty("results")[0].GetProperty("status").GetString() != "planned" ||
+        planned.StructuredContent?.GetProperty("data").GetProperty("diff")[0].GetProperty("path").GetString() != "Sheet1!B1.value")
         throw new InvalidOperationException("MCP dry run failed: " + planned.StructuredContent?.GetRawText());
+    var cappedPlan = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1", ["dry_run"] = true,
+        ["max_diff_items"] = 1,
+        ["ops"] = new[] { new { op = "set_value", target = "B1", value = "bounded" } }
+    });
+    if (cappedPlan.IsError == true ||
+        cappedPlan.StructuredContent?.GetProperty("data").GetProperty("diff").GetArrayLength() != 1 ||
+        cappedPlan.StructuredContent?.GetProperty("data").GetProperty("diff_summary").GetProperty("truncated").GetBoolean() != true ||
+        cappedPlan.StructuredContent?.GetProperty("data").GetProperty("diff_summary").GetProperty("partial").GetBoolean() != true)
+        throw new InvalidOperationException("MCP capped diff failed: " + cappedPlan.StructuredContent?.GetRawText());
     var applied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
