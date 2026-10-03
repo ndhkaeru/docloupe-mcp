@@ -348,10 +348,15 @@ try
     var created = await client.CallToolAsync("excel_create", new Dictionary<string, object?>
     {
         ["target_path"] = createdPath, ["format"] = "xlsm", ["sheets"] = new[] { "Sheet1", "Data" },
-        ["active_sheet"] = "Data"
+        ["active_sheet"] = "Data", ["document_properties"] = new { core = new { title = "S3 & workbook", creator = "probe" } }
     });
     if (created.IsError == true || created.StructuredContent?.GetProperty("data").GetProperty("new").GetBoolean() != true)
         throw new InvalidOperationException("MCP create failed: " + created.StructuredContent?.GetRawText());
+    using (var archive = ZipFile.OpenRead(createdPath))
+    using (var coreStream = archive.GetEntry("docProps/core.xml")?.Open() ?? throw new InvalidOperationException("MCP create omitted core properties"))
+    using (var reader = new StreamReader(coreStream))
+        if (!(await reader.ReadToEndAsync()).Contains("S3 &amp; workbook", StringComparison.Ordinal))
+            throw new InvalidOperationException("MCP create did not escape core properties");
     var createdId = created.StructuredContent!.Value.GetProperty("data").GetProperty("session").GetString()!;
     var initialEdit = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {

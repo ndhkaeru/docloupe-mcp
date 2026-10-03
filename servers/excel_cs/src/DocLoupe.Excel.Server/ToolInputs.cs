@@ -286,6 +286,31 @@ public sealed class FindScopeRequest
     public Dictionary<string, JsonElement>? Other { get; init; }
 }
 
+public sealed class CreatePropertiesRequest
+{
+    [JsonPropertyName("core")]
+    public Dictionary<string, JsonElement>? Core { get; init; }
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Other { get; init; }
+
+    public IReadOnlyDictionary<string, string> Normalize()
+    {
+        if (Other is { Count: > 0 }) throw new NotSupportedException("Only core document properties are supported");
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (name, value) in Core ?? [])
+        {
+            if (name is not ("title" or "subject" or "creator" or "description" or "keywords" or
+                "category" or "contentStatus" or "lastModifiedBy"))
+                throw new NotSupportedException("Unsupported core document property: " + name);
+            if (value.ValueKind != JsonValueKind.String || value.GetString() is not { Length: <= 4096 } text)
+                throw new ArgumentException("Core document properties must be strings of at most 4096 characters");
+            System.Xml.XmlConvert.VerifyXmlChars(text);
+            result.Add(name, text);
+        }
+        return result;
+    }
+}
+
 public sealed class SaveAssertionRequest
 {
     [JsonPropertyName("target")]

@@ -1,6 +1,9 @@
+using System.IO.Compression;
 using System.Text.Json;
+using System.Xml;
 using DocLoupe.Excel.Engine;
 using DocLoupe.Excel.Server;
+using DocLoupe.Excel.Schema;
 using DocLoupe.Excel.Verify;
 using Xunit;
 
@@ -101,6 +104,114 @@ public sealed class CreateTests
                 Path.Combine(directory, format == "xlsx" ? "different.xlsm" : "different.xlsx")));
         }
         finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("xlsx")]
+    [InlineData("xlsm")]
+    [InlineData("xltx")]
+    [InlineData("xltm")]
+    public void NewWorkbookCorePropertiesSurviveVerifiedEdits(string format)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-create-core-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var created = Path.Combine(directory, "created." + format);
+            var properties = JsonSerializer.Deserialize<CreatePropertiesRequest>(
+                """{"core":{"title":"Đề <tài>","creator":"Ada","keywords":"a & b","category":"audit","lastModifiedBy":"Bé"}}""")!.Normalize();
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.CreateNew(created, coreProperties: properties))
+                .GetProperty("session").GetString()!;
+            var sourceBytes = ReadPart(created, "docProps/core.xml");
+            var document = new XmlDocument();
+            document.LoadXml(System.Text.Encoding.UTF8.GetString(sourceBytes));
+            Assert.Equal("http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
+                document.DocumentElement!.NamespaceURI);
+            Assert.Equal("Đề <tài>", document.GetElementsByTagName("title", "http://purl.org/dc/elements/1.1/")[0]!.InnerText);
+            Assert.Equal("a & b", document.GetElementsByTagName("keywords", document.DocumentElement.NamespaceURI)[0]!.InnerText);
+            Assert.Contains("core-properties", System.Text.Encoding.UTF8.GetString(ReadPart(created, "_rels/.rels")));
+            Assert.Contains("core-properties+xml", System.Text.Encoding.UTF8.GetString(ReadPart(created, "[Content_Types].xml")));
+            sessions.Apply(id, 0, [new SetValueOp("Sheet1", "A1", "text", "updated")]);
+            var saved = Path.Combine(directory, "saved." + format);
+            Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(id, saved))
+                .GetProperty("status").GetString());
+            Assert.Equal(sourceBytes, ReadPart(saved, "docProps/core.xml"));
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void CoreValidatorRejectsDuplicateAndReportsUnsupportedProperties()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-core-invalid-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var created = Path.Combine(directory, "source.xlsx");
+            using var sessions = new ExcelSessions();
+            var properties = JsonSerializer.Deserialize<CreatePropertiesRequest>(
+                """{"core":{"title":"original"}}""")!.Normalize();
+            var id = JsonSerializer.SerializeToElement(sessions.CreateNew(created, coreProperties: properties))
+                .GetProperty("session").GetString()!;
+            sessions.Close(id, false);
+            var duplicate = Path.Combine(directory, "duplicate.xlsx");
+            File.Copy(created, duplicate);
+            ReplaceCore(duplicate, document =>
+            {
+                var element = document.CreateElement("dc", "title", "http://purl.org/dc/elements/1.1/");
+                element.InnerText = "duplicate";
+                document.DocumentElement!.AppendChild(element);
+            });
+            Assert.Contains(DetachedValidator.CheckPackage(duplicate).Issues,
+                issue => issue.Code == "CORE_DUPLICATE_FIELD");
+            var unsupported = Path.Combine(directory, "unsupported.xlsx");
+            File.Copy(created, unsupported);
+            ReplaceCore(unsupported, document =>
+            {
+                var element = document.CreateElement("dc", "language", "http://purl.org/dc/elements/1.1/");
+                element.InnerText = "en";
+                document.DocumentElement!.AppendChild(element);
+            });
+            Assert.Contains(DetachedValidator.CheckPackage(unsupported).Gaps,
+                gap => gap.Code == "G2_CORE_UNSUPPORTED_FIELD");
+            Assert.Empty(DetachedValidator.CheckPackage(created).Gaps);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    private static void ReplaceCore(string path, Action<XmlDocument> change)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
+        var original = archive.GetEntry("docProps/core.xml")!;
+        var document = new XmlDocument();
+        using (var stream = original.Open()) document.Load(stream);
+        change(document);
+        original.Delete();
+        using var output = archive.CreateEntry("docProps/core.xml").Open();
+        document.Save(output);
+    }
+
+    [Fact]
+    public void CreatePropertiesRejectUnsupportedAndInvalidValues()
+    {
+        foreach (var input in new[]
+        {
+            """{"app":{"company":"x"}}""", """{"custom":[]}""",
+            """{"core":{"created":"today"}}""", """{"core":{"title":17}}""",
+            """{"core":{"title":null}}""", "{\"core\":{\"title\":\"bad\\u0000text\"}}"
+        })
+            Assert.ThrowsAny<Exception>(() => JsonSerializer.Deserialize<CreatePropertiesRequest>(input)!.Normalize());
+    }
+
+    private static byte[] ReadPart(string path, string part)
+    {
+        using var archive = ZipFile.OpenRead(path);
+        using var stream = archive.GetEntry(part)!.Open();
+        using var output = new MemoryStream();
+        stream.CopyTo(output);
+        return output.ToArray();
     }
 
     [Fact]

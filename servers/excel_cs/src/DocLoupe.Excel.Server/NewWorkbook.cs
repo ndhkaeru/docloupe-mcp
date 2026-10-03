@@ -10,8 +10,11 @@ internal static class NewWorkbook
     private const string Office = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private const string Relationships = "http://schemas.openxmlformats.org/package/2006/relationships";
     private const string Types = "http://schemas.openxmlformats.org/package/2006/content-types";
+    private const string Core = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
+    private const string DublinCore = "http://purl.org/dc/elements/1.1/";
 
-    public static string[] Write(string path, string[]? requestedSheets, string? activeSheet, string format)
+    public static string[] Write(string path, string[]? requestedSheets, string? activeSheet, string format,
+        IReadOnlyDictionary<string, string>? coreProperties = null)
     {
         var workbookContentType = format switch
         {
@@ -39,6 +42,9 @@ internal static class NewWorkbook
             WriteContentType(writer, "Default", "Extension", "rels", "application/vnd.openxmlformats-package.relationships+xml");
             WriteContentType(writer, "Default", "Extension", "xml", "application/xml");
             WriteContentType(writer, "Override", "PartName", "/xl/workbook.xml", workbookContentType);
+            if (coreProperties is { Count: > 0 })
+                WriteContentType(writer, "Override", "PartName", "/docProps/core.xml",
+                    "application/vnd.openxmlformats-package.core-properties+xml");
             for (var index = 0; index < sheets.Length; index++)
                 WriteContentType(writer, "Override", "PartName", $"/xl/worksheets/sheet{index + 1}.xml",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml");
@@ -48,8 +54,22 @@ internal static class NewWorkbook
         {
             writer.WriteStartElement("Relationships", Relationships);
             WriteRelationship(writer, "rId1", Office + "/officeDocument", "xl/workbook.xml");
+            if (coreProperties is { Count: > 0 })
+                WriteRelationship(writer, "rId2", Relationships + "/metadata/core-properties", "docProps/core.xml");
             writer.WriteEndElement();
         });
+        if (coreProperties is { Count: > 0 })
+            Add(archive, "docProps/core.xml", writer =>
+            {
+                writer.WriteStartElement("cp", "coreProperties", Core);
+                writer.WriteAttributeString("xmlns", "dc", null, DublinCore);
+                foreach (var (name, value) in coreProperties)
+                {
+                    var dublinCore = name is "title" or "subject" or "creator" or "description";
+                    writer.WriteElementString(dublinCore ? "dc" : "cp", name, dublinCore ? DublinCore : Core, value);
+                }
+                writer.WriteEndElement();
+            });
         Add(archive, "xl/workbook.xml", writer =>
         {
             writer.WriteStartElement("workbook", Main);

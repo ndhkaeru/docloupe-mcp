@@ -22,6 +22,13 @@ public static class DetachedValidator
         {
             try
             {
+                if (part.FullName.Equals("docProps/core.xml", StringComparison.OrdinalIgnoreCase))
+                {
+                    var core = CheckCoreProperties(part);
+                    issues.AddRange(core.Issues);
+                    gaps.AddRange(core.Gaps);
+                    continue;
+                }
                 foreach (var error in validator.Validate(Detach(part)))
                     issues.Add(new SchemaIssue(part.FullName, "SCHEMA_ERROR", Key(error)));
             }
@@ -88,6 +95,50 @@ public static class DetachedValidator
             {
                 gaps.Add(new SchemaIssue(part, "G2_UNSUPPORTED_ROOT", exception.Message));
             }
+        }
+        return new SchemaReport(issues, gaps);
+    }
+
+    private static SchemaReport CheckCoreProperties(ZipArchiveEntry part)
+    {
+        const string coreNamespace = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
+        const string dublinNamespace = "http://purl.org/dc/elements/1.1/";
+        var issues = new List<SchemaIssue>();
+        var gaps = new List<SchemaIssue>();
+        var document = new XmlDocument { XmlResolver = null, PreserveWhitespace = true };
+        using (var stream = part.Open())
+        using (var reader = XmlReader.Create(stream, new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null
+        }))
+            document.Load(reader);
+        var root = document.DocumentElement;
+        if (root is null || root.LocalName != "coreProperties" || root.NamespaceURI != coreNamespace)
+            return new SchemaReport([new SchemaIssue(part.FullName, "CORE_INVALID_ROOT", "Invalid core properties root")], []);
+        if (root.Attributes.OfType<XmlAttribute>().Any(attribute => attribute.NamespaceURI != "http://www.w3.org/2000/xmlns/"))
+            gaps.Add(new SchemaIssue(part.FullName, "G2_CORE_UNSUPPORTED_ATTRIBUTE", "Core properties root attributes"));
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (XmlNode node in root.ChildNodes)
+        {
+            if (node is not XmlElement element)
+            {
+                if (node is XmlText text && !string.IsNullOrWhiteSpace(text.Value))
+                    issues.Add(new SchemaIssue(part.FullName, "CORE_INVALID_TEXT", "Text outside core property"));
+                continue;
+            }
+            var dublin = element.LocalName is "title" or "subject" or "creator" or "description";
+            var supported = dublin || element.LocalName is "keywords" or "category" or "contentStatus" or "lastModifiedBy";
+            if (!supported || element.NamespaceURI != (dublin ? dublinNamespace : coreNamespace))
+            {
+                gaps.Add(new SchemaIssue(part.FullName, "G2_CORE_UNSUPPORTED_FIELD", element.LocalName));
+                continue;
+            }
+            if (!seen.Add(element.LocalName))
+                issues.Add(new SchemaIssue(part.FullName, "CORE_DUPLICATE_FIELD", element.LocalName));
+            if (element.Attributes.OfType<XmlAttribute>().Any(attribute => attribute.NamespaceURI != "http://www.w3.org/2000/xmlns/"))
+                gaps.Add(new SchemaIssue(part.FullName, "G2_CORE_UNSUPPORTED_ATTRIBUTE", element.LocalName));
+            if (element.ChildNodes.OfType<XmlElement>().Any() || element.InnerText.Length > 4096)
+                issues.Add(new SchemaIssue(part.FullName, "CORE_INVALID_VALUE", element.LocalName));
         }
         return new SchemaReport(issues, gaps);
     }

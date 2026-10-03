@@ -68,7 +68,8 @@ public sealed class ExcelSessions : IDisposable
         finally { if (File.Exists(staging)) File.Delete(staging); }
     }
 
-    public object CreateNew(string targetPath, string[]? sheets = null, string? activeSheet = null)
+    public object CreateNew(string targetPath, string[]? sheets = null, string? activeSheet = null,
+        IReadOnlyDictionary<string, string>? coreProperties = null)
     {
         var destination = Path.GetFullPath(targetPath);
         var format = Path.GetExtension(destination).TrimStart('.').ToLowerInvariant();
@@ -81,14 +82,15 @@ public sealed class ExcelSessions : IDisposable
             "." + Guid.NewGuid().ToString("N") + ".staging");
         try
         {
-            var createdSheets = NewWorkbook.Write(staging, sheets, activeSheet, format);
+            var createdSheets = NewWorkbook.Write(staging, sheets, activeSheet, format, coreProperties);
             using (var package = new PackageStore(staging))
                 if (!package.SheetNames().SequenceEqual(createdSheets))
                     throw new InvalidDataException("Created worksheets disagree with package relationships");
             var issues = P2aGates.CheckPackage(staging, [], Path.GetExtension(destination));
             var schema = DetachedValidator.CheckPackage(staging);
             if (issues.Count > 0 || schema.Issues.Count > 0 || schema.Gaps.Count > 0)
-                throw new InvalidDataException("Created workbook failed OPC or schema validation");
+                throw new InvalidDataException("Created workbook failed OPC or schema validation: " +
+                    JsonSerializer.Serialize(new { Package = issues, Schema = schema.Issues, schema.Gaps }));
             return PublishCreated(staging, destination, createdSheets, Fingerprint(staging));
         }
         finally { if (File.Exists(staging)) File.Delete(staging); }

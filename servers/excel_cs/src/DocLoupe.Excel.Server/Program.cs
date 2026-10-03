@@ -16,17 +16,18 @@ builder.Logging.ClearProviders();
 builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
     McpServerTool.Create((string path) => Handle(() => sessions.Open(path)), new McpServerToolCreateOptions { Name = "excel_open" }),
     McpServerTool.Create((string target_path, string? template_path = null, string[]? sheets = null,
-        string? active_sheet = null, string? format = null) => Handle(() =>
+        string? active_sheet = null, string? format = null,
+        CreatePropertiesRequest? document_properties = null) => Handle(() =>
         {
             if (format is not null && !Path.GetExtension(target_path).Equals("." + format, StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("format must match target_path extension");
             if (template_path is not null)
             {
-                if (sheets is not null || active_sheet is not null)
-                    throw new NotSupportedException("Template creation does not support sheet changes");
+                if (sheets is not null || active_sheet is not null || document_properties is not null)
+                    throw new NotSupportedException("Template creation does not support sheet or document-property changes");
                 return sessions.CreateFromTemplate(template_path, target_path);
             }
-            return sessions.CreateNew(target_path, sheets, active_sheet);
+            return sessions.CreateNew(target_path, sheets, active_sheet, document_properties?.Normalize());
         }), new McpServerToolCreateOptions { Name = "excel_create" }),
     McpServerTool.Create((string path, string detail = "summary", string? sheet = null, int max_rows = 20, int max_cols = 10) =>
         Handle(() => sessions.Peek(path, detail, sheet, max_rows, max_cols)), new McpServerToolCreateOptions { Name = "excel_peek" }),
