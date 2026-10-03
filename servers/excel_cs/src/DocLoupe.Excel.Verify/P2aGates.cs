@@ -14,7 +14,7 @@ public sealed record CellRead(string Address, string Kind, string? Value, string
     [property: JsonIgnore] string? CellMarkup = null, [property: JsonIgnore] string? SharedMarkup = null);
 public sealed record GateIssue(string Gate, string Code, string Detail);
 
-public static class P2aGates
+public static partial class P2aGates
 {
     private const string Main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     private const string Office = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";

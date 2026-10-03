@@ -92,6 +92,98 @@ public sealed class CorruptionGateTests
         }
     }
 
+    [Fact]
+    public void G5RejectsUnrelatedFormulaHiddenInsideWriterDeclaredSpan()
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        ApplyResult result;
+        using (var store = new PackageStore(fixture.Source))
+        {
+            result = SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt(part, xml => xml.Replace("<f>1+1</f>", "<f>9*9</f>", StringComparison.Ordinal), edited);
+        static byte[] PartBytes(string path, string name)
+        {
+            using var archive = ZipFile.OpenRead(path);
+            using var stream = archive.GetEntry(name)!.Open();
+            using var output = new MemoryStream();
+            stream.CopyTo(output);
+            return output.ToArray();
+        }
+        static (int Start, int End) CellSpan(string xml)
+        {
+            var start = xml.IndexOf("<c r=\"B1\"", StringComparison.Ordinal);
+            var formula = xml.IndexOf("<c r=\"C1\"", start, StringComparison.Ordinal);
+            var end = xml.IndexOf("</c>", formula, StringComparison.Ordinal) + "</c>".Length;
+            Assert.True(start >= 0 && formula > start && end > formula);
+            return (Encoding.UTF8.GetByteCount(xml[..start]), Encoding.UTF8.GetByteCount(xml[..end]));
+        }
+        var before = PartBytes(fixture.Source, part);
+        var after = PartBytes(broken, part);
+        var (start, end) = CellSpan(Encoding.UTF8.GetString(before));
+        var (writtenStart, writtenEnd) = CellSpan(Encoding.UTF8.GetString(after));
+        var declared = result.Edits.Where(edit => !edit.Part.Equals(part, StringComparison.OrdinalIgnoreCase))
+            .Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After))
+            .Append(new DeclaredByteSpan(part, start, end, before[start..end], after[writtenStart..writtenEnd])).ToArray();
+        var intent = new CellExpectation("Sheet1", "B1", "number", "100");
+        var issues = new List<GateIssue>();
+        issues.AddRange(P2aGates.CheckPackage(broken, result.ChangedParts));
+        var schema = DetachedValidator.Check(fixture.Source, broken, result.ChangedParts);
+        Assert.Empty(schema.Gaps);
+        issues.AddRange(schema.Issues.Select(issue => new GateIssue("G2", issue.Code, issue.Detail)));
+        issues.AddRange(P2aMarkupGate.Check(fixture.Source, broken, result.ChangedParts));
+        issues.AddRange(P2aGates.CheckIntent(broken, [intent]));
+        issues.AddRange(P2aGates.CheckPreservation(fixture.Source, broken, declared, []));
+        issues.AddRange(P2aGates.CheckTouchedCells(fixture.Source, broken, [intent]));
+        issues.AddRange(P2aGates.CheckSemanticPreservation(fixture.Source, broken, [intent], declared));
+        Assert.Contains(issues, issue => issue.Gate == "G5" && issue.Code == "DECLARATION_OUTSIDE_INTENT");
+        issues.AddRange(AdvancedPartGate.Check(fixture.Source, broken, [intent]));
+        Assert.Contains(issues, issue => issue.Gate == "G5" && issue.Detail.Contains("C1", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("xl/workbook.xml", "calcId=\"191029\"", "calcId=\"1\"", "UNDECLARED_WORKBOOK_CHANGE")]
+    [InlineData("xl/sharedStrings.xml", "count=\"1\"", "count=\"9\"", "UNDECLARED_SHARED_STRING_CHANGE")]
+    [InlineData("xl/sharedStrings.xml", "<t>hello</t>", "<t>corrupted</t>", "UNDECLARED_SHARED_STRING_CHANGE")]
+    [InlineData("xl/_rels/workbook.xml.rels", "/sharedStrings\"", "/styles\"", "UNDECLARED_RELATIONSHIP_CHANGE")]
+    [InlineData("[Content_Types].xml", "spreadsheetml.sharedStrings+xml", "spreadsheetml.styles+xml", "UNDECLARED_CONTENT_TYPE_CHANGE")]
+    [InlineData("_rels/.rels", "Id=\"rId1\"", "Id=\"rId9\"", "UNDECLARED_PART_CHANGE")]
+    public void G5RejectsUnintendedChangesToOtherParts(string part, string from, string to, string code)
+    {
+        using var fixture = new Fixture();
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        using (var store = new PackageStore(fixture.Source))
+        {
+            SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt(part, xml => xml.Replace(from, to, StringComparison.Ordinal), edited);
+        Assert.Contains(P2aGates.CheckSemanticPreservation(fixture.Source, broken,
+            [new CellExpectation("Sheet1", "B1", "number", "100")]), issue => issue.Code == code);
+    }
+
+    [Fact]
+    public void G5RejectsFabricatedSharedStringsMetadataAndRelationship()
+    {
+        using var fixture = new Fixture();
+        var source = Path.Combine(fixture.Directory, "new-shared-strings.xlsx");
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        var intent = new CellExpectation("Sheet1", "B1", "text", "new value");
+        using (var store = new PackageStore(source))
+        {
+            SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "text", "new value")]);
+            store.Save(edited);
+        }
+        Assert.Empty(P2aGates.CheckSemanticPreservation(source, edited, [intent]));
+        var count = fixture.Corrupt("xl/sharedStrings.xml", xml => xml.Replace("count=\"1\"", "count=\"9\"", StringComparison.Ordinal), edited);
+        Assert.Contains(P2aGates.CheckSemanticPreservation(source, count, [intent]), issue => issue.Code == "UNDECLARED_SHARED_STRING_CHANGE");
+        var type = fixture.Corrupt("[Content_Types].xml", xml => xml.Replace("spreadsheetml.sharedStrings+xml", "spreadsheetml.styles+xml", StringComparison.Ordinal), edited);
+        Assert.Contains(P2aGates.CheckSemanticPreservation(source, type, [intent]), issue => issue.Code == "UNDECLARED_CONTENT_TYPE_CHANGE");
+    }
+
     private sealed class Fixture : IDisposable
     {
         public string Directory { get; } = Path.Combine(Path.GetTempPath(), "docloupe-corrupt-" + Guid.NewGuid().ToString("N"));

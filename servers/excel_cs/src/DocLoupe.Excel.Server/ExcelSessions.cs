@@ -588,6 +588,10 @@ public sealed class ExcelSessions : IDisposable
                 reports.AddRange(P2aGates.CheckTouchedCells(session.BasePath, staging,
                     result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
                     item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null))));
+                reports.AddRange(P2aGates.CheckSemanticPreservation(session.BasePath, staging,
+                    result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
+                    item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null)),
+                    result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After))));
                 reports.AddRange(AdvancedPartGate.Check(session.BasePath, staging,
                     result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
                     item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null))));

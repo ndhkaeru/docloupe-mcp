@@ -23,7 +23,7 @@
 - [x] Bộ ghi `set_value`: phân tích A1, định vị theo namespace và `r`, chèn row/cell theo thứ tự schema, ghép nhiều byte-span từ offset giảm dần, hỗ trợ số/chuỗi/shared string/inline string/công thức trong phạm vi P2a.
 - [x] Chuỗi mới dùng shared strings; cell inline hiện hữu giữ inline. Đổi giá trị bật `fullCalcOnLoad`; chỉ xoá `calcChain` khi ghi đè/xoá công thức hiện hữu.
 - [x] `excel_open` → `excel_read` (cell đích) → `excel_apply` → `excel_save` (**copy ra đường dẫn mới**) → `excel_close` chạy qua MCP stdio; save ghi staging, chạy gate rồi mới chuyển ra đích.
-- [x] G1 (liên kết/`r:id`), G2 (validate tách rời và báo lỗi mới/lỗi bị che), G3 (namespace/markup), G4 (ý định và đọc lại, kể cả ca mất edit), G5 (byte ngoài span và cell đụng tới) có test phá hỏng cố ý trong phạm vi writer hiện có; **không đánh dấu là verifier tổng quát**.
+- [x] G1 (liên kết/`r:id`), G2 (validate tách rời và báo lỗi mới/lỗi bị che), G3 (namespace/markup), G4 (ý định và đọc lại, kể cả ca mất edit), G5 (byte ngoài span, giới hạn span worksheet theo cell đích, so ngữ nghĩa độc lập toàn sheet và các part liên quan) có test phá hỏng cố ý, gồm giả mạo span B1–C1 và sửa lén công thức C1; **không đánh dấu là verifier tổng quát**.
 - [x] Sáu fixture tổng hợp sinh từ source trong repo: namespace mặc định/`x:`, `ns0:Types`, BOM/CRLF/standalone, shared strings, cache công thức, phonetic, `mc`/`x14ac`, OPC percent/case, workbook lồng. CI không phụ thuộc `D:\data-test`.
 - [x] Workflow `excel-cs.yml` khai báo Windows x64, Linux x64, macOS x64 và macOS arm64, chạy test, schema-order check và MCP smoke.
 
