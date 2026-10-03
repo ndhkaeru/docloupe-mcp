@@ -42,7 +42,7 @@ public static class P2aMarkupGate
                     foreach (var cell in newRoot.GetElementsByTagName("c", Main).OfType<XmlElement>())
                     {
                         oldCells.TryGetValue(cell.GetAttribute("r"), out var previous);
-                        if (previous is not null && previous.Name != cell.Name)
+                        if (previous is null ? cell.Prefix != newRoot.DocumentElement!.Prefix : previous.Name != cell.Name)
                             issues.Add(new("G3", "PREFIX_REWRITTEN", $"{part}: {cell.GetAttribute("r")}"));
                         CheckCellPrefixShape(previous, cell, part, cell.GetAttribute("r"), issues);
                     }

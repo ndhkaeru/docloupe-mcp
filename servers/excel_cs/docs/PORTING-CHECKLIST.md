@@ -40,6 +40,8 @@
 
 - [x] 2026-10-03: G5 giới hạn thuộc tính và prefix của `<si>/<t>` mới theo markup bộ ghi tạo (cho phép namespace prefix cần thiết và `xml:space` chỉ khi chuỗi có khoảng trắng biên); chặn namespace/`xml:space` thừa dù G1–G4 và byte-span đều qua. **600/600** test, schema-order và ma trận 13 pass/1 G2 gap đạt trên Windows và Docker Linux với corpus local. Chưa chạy CI remote/macOS.
 
+- [x] G3 chặn cell mới dùng prefix khác prefix root dù namespace URI, ý định, G1/G2/G4/G5 và byte-span đều hợp lệ; test đối kháng đã đỏ ở G3 trước khi sửa, đối chứng writer trên fixture mặc định và `prefixed-x` qua. Windows và Docker Linux đạt **603/603** test với corpus local; schema-order đạt, ma trận 13 pass/1 G2 gap/0 failed. Chưa kiểm CI remote/macOS.
+
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 
 - [x] `excel_status` (revision, dirty, thay đổi source, busy, ledger 20 mục) và `excel_undo` bằng phát lại những revision cell-content còn giữ; copy-save **không** đánh dấu phiên là đã lưu, `save_as`/`overwrite` cập nhật `saved_revision` nhưng vẫn cho undo xuống dưới nó bằng baseline riêng.
