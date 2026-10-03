@@ -44,6 +44,34 @@ public sealed class ReadRangeTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Fact]
+    public void ReadCanIncludeMissingCellsInRequestedOrder()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-read-blanks-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var session = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, "default.xlsx")))
+                .GetProperty("session").GetString()!;
+            var cells = JsonSerializer.SerializeToElement(sessions.Read(session, "Sheet1", ["B2", "A1:B2"], false))
+                .GetProperty("cells").EnumerateArray().ToArray();
+            Assert.Equal(new[] { "B2", "A1", "B1", "A2", "B2" },
+                cells.Select(cell => cell.GetProperty("Address").GetString()));
+            Assert.All(cells.Where(cell => cell.GetProperty("Address").GetString() is "B2" or "A2"),
+                cell =>
+                {
+                    Assert.Equal("blank", cell.GetProperty("Kind").GetString());
+                    Assert.Equal(JsonValueKind.Null, cell.GetProperty("Value").ValueKind);
+                });
+            Assert.Equal("hello", cells[1].GetProperty("Value").GetString());
+            Assert.Single(JsonSerializer.SerializeToElement(sessions.Read(session, "Sheet1", ["A1:B2"]))
+                .GetProperty("cells").EnumerateArray(), cell => cell.GetProperty("Address").GetString() == "A1");
+            sessions.Close(session, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     [Theory]
     [InlineData("B2:A2")]
     [InlineData("B1:A2")]

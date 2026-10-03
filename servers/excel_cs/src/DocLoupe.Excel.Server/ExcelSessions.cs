@@ -147,7 +147,7 @@ public sealed class ExcelSessions : IDisposable
                 summary = entry.Summary }).ToArray(), server = ServerInfo };
     }
 
-    public object Read(string id, string? sheet, string[] addresses)
+    public object Read(string id, string? sheet, string[] addresses, bool skipEmpty = true)
     {
         var session = Get(id);
         lock (session.Sync)
@@ -176,8 +176,21 @@ public sealed class ExcelSessions : IDisposable
             if (targets.Any(target => target.Sheet != selectedSheet))
                 throw new ArgumentException("All cells in a read must belong to one sheet");
             var source = session.Preview();
-            try { return new { session = id, revision = session.Revision, sheet = selectedSheet, view = "cells",
-                cells = P2aGates.ReadCells(source, selectedSheet, targets.Select(target => target.Address)) }; }
+            try
+            {
+                var existing = P2aGates.ReadCells(source, selectedSheet, targets.Select(target => target.Address));
+                IReadOnlyList<CellRead> cells = existing;
+                if (!skipEmpty)
+                {
+                    var indexed = new Dictionary<string, CellRead>(StringComparer.Ordinal);
+                    foreach (var cell in existing)
+                        if (!indexed.TryAdd(cell.Address, cell))
+                            throw new InvalidDataException($"Duplicate cell address: {selectedSheet}!{cell.Address}");
+                    cells = targets.Select(target => indexed.TryGetValue(target.Address, out var cell)
+                        ? cell : new CellRead(target.Address, "blank", null, null)).ToArray();
+                }
+                return new { session = id, revision = session.Revision, sheet = selectedSheet, view = "cells", cells };
+            }
             finally { if (source != session.Path) File.Delete(source); }
         }
     }

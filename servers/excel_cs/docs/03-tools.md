@@ -187,7 +187,7 @@ output data {
 | `cells` | Before editing | Values, display strings, rich markup, formulas, sparse style, hash |
 | `full` | Debugging formatting | Everything, plus `xf_id`, `text_form`, color sources, formula attributes |
 
-**Current P2b read slice:** `excel_read` accepts a sheet-qualified or default-sheet A1 cell, bounded rectangular target (`A1:C3`), or nonempty array of up to 500 such strings, returns only existing cells in `cells` view from the current revision, and rejects reversed, malformed, cross-sheet, or >500-cell ranges. It does not yet provide typed 2D `values`, empty-cell placeholders, hashes, pagination, rich/style projections, or the other views above.
+**Current P2b read slice:** `excel_read` accepts a sheet-qualified or default-sheet A1 cell, bounded rectangular target (`A1:C3`), or nonempty array of up to 500 such strings, returns only existing cells by default in `cells` view from the current revision (`skip_empty=false` includes addressable `blank` placeholders in target order), and rejects reversed, malformed, cross-sheet, or >500-cell ranges. It does not yet provide typed 2D `values`, hashes, pagination, rich/style projections, or the other views above.
 
 ### 3.2 `excel_find`
 
