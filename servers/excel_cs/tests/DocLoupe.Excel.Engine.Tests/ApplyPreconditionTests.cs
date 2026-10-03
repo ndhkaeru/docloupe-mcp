@@ -48,6 +48,47 @@ public sealed class ApplyPreconditionTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void ExpectEmptyChecksContentAndFormulaWithoutUsingItsCache(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-empty-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            sessions.Apply(id, 0, [Request("""{"op":"set_value","target":"Sheet1!E5","value":7,"expect":{"empty":true,"value":null}}""")]);
+            var failure = Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 1,
+            [
+                Request("""{"op":"clear","target":"Sheet1!B1"}"""),
+                Request("""{"op":"set_value","target":"Sheet1!E5","value":9,"expect":{"empty":true}}""")
+            ]));
+            Assert.Equal(1, failure.Index);
+            Assert.True(failure.Expected.Empty);
+            Assert.Equal("7", failure.Actual?.Value);
+            Assert.Equal(1, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            Assert.Equal("42", Assert.Single(P2aGates.ReadCells(Path.Combine(directory, variant + ".xlsx"), "Sheet1", ["B1"])).Value);
+
+            sessions.Apply(id, 1, [Request("""{"op":"set_formula","target":"Sheet1!C1","formula":"=3+3","cache":"clear","expect":{"empty":false}}""")]);
+            var formula = Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 2,
+                [Request("""{"op":"clear","target":"Sheet1!C1","expect":{"empty":true,"value":null}}""")]));
+            Assert.Equal("3+3", formula.Actual?.Formula);
+            sessions.Apply(id, 2, [Request("""{"op":"set_value","target":"Sheet1!B1","value":12,"expect":{"empty":false,"value":42}}""")]);
+            sessions.Apply(id, 3, [Request("""{"op":"clear","target":"Sheet1!E5","expect":{"empty":false}}""")]);
+            sessions.Apply(id, 4, [Request("""{"op":"set_value","target":"Sheet1!E5","value":8,"expect":{"empty":true}}""")], dryRun: true);
+            Assert.Equal(4, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     [Fact]
     public void ExpectValueChecksMissingAndFormulaCacheWithoutEvaluatingFormula()
     {
@@ -156,6 +197,11 @@ public sealed class ApplyPreconditionTests
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":null}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":""}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"empty":null}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"empty":1}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"empty":true,"empty":false}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"empty":true,"display":"42"}}""")]
+    [InlineData("""{"op":"clear","target":"Sheet1!B1:C1","expect":{"empty":true}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":7}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":"=1+1","value":{}}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":"1+1","formula":"2+2"}}""")]

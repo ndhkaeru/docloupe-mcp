@@ -127,9 +127,27 @@ public sealed class SetValueRequest
     {
         if (Expect.ValueKind == JsonValueKind.Undefined) return null;
         if (Expect.ValueKind != JsonValueKind.Object)
-            throw new NotSupportedException("Only expect.value and expect.formula are supported");
-        var assertion = new SaveAssertionRequest { Target = sheet + "!" + address, Expected = Expect }.Normalize();
-        return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula);
+            throw new NotSupportedException("Only expect.value, expect.formula and expect.empty are supported");
+        var properties = Expect.EnumerateObject().ToArray();
+        if (properties.Length == 0 || properties.GroupBy(property => property.Name).Any(group => group.Count() > 1) ||
+            properties.Any(property => property.Name is not ("value" or "formula" or "empty")))
+            throw new NotSupportedException("Unsupported expect fields");
+        bool? empty = null;
+        if (Expect.TryGetProperty("empty", out var expectedEmpty))
+            empty = expectedEmpty.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                _ => throw new ArgumentException("expect.empty must be a boolean")
+            };
+        var valueAndFormula = properties.Where(property => property.Name != "empty").ToArray();
+        if (valueAndFormula.Length == 0) return new CellPrecondition(false, null, null, null, empty);
+        var assertion = new SaveAssertionRequest
+        {
+            Target = sheet + "!" + address,
+            Expected = JsonSerializer.SerializeToElement(valueAndFormula.ToDictionary(property => property.Name, property => property.Value))
+        }.Normalize();
+        return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula, empty);
     }
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)

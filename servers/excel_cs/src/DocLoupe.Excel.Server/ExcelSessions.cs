@@ -399,12 +399,16 @@ public sealed class ExcelSessions : IDisposable
                     {
                         var operation = operations[index];
                         if (operation.Expect is not { } expected) continue;
-                        var assertion = new ValueAssertion(operation.Sheet, operation.Address, expected.CheckValue,
-                            expected.Kind, expected.Value, expected.Formula);
-                        if (G7Assertions.Check(basePath, [assertion]).Count == 0) continue;
+                        var assertionMatches = !expected.CheckValue && expected.Formula is null ||
+                            G7Assertions.Check(basePath, [new ValueAssertion(operation.Sheet, operation.Address,
+                                expected.CheckValue, expected.Kind, expected.Value, expected.Formula)]).Count == 0;
+                        if (assertionMatches && expected.Empty is null) continue;
                         CellRead? actual;
+                        var sheetMissing = false;
                         try { actual = P2aGates.ReadCells(basePath, operation.Sheet, [operation.Address]).SingleOrDefault(); }
-                        catch (InvalidOperationException) { actual = null; }
+                        catch (InvalidOperationException) { actual = null; sheetMissing = true; }
+                        var isEmpty = actual is null || actual.Kind == "blank" && actual.Formula is null;
+                        if (assertionMatches && !sheetMissing && expected.Empty == isEmpty) continue;
                         throw new PreconditionFailedException(operation.SourceIndex < 0 ? index : operation.SourceIndex,
                             operation.Sheet + "!" + operation.Address, expected, actual);
                     }
