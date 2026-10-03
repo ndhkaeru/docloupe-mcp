@@ -248,7 +248,7 @@ public sealed class FindScopeRequest
     [JsonPropertyName("sheet")]
     public string? Sheet { get; init; }
     [JsonPropertyName("target")]
-    public required string Target { get; init; }
+    public string? Target { get; init; }
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Other { get; init; }
 }

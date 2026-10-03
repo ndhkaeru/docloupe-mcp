@@ -210,7 +210,7 @@ output data {
 }
 ```
 
-**Current P1 find slice:** `excel_find` requires `scope.target` as one explicit A1 cell/range on one sheet (at most 500 cells; `scope.sheet` or a qualified target), with exactly one of `query.text` and `query.regex`. Search is limited to raw `value` or `formula` text, with optional NFC normalization, case sensitivity, a 100 ms regex timeout and at most 100 results. Output marks `partial: true`, reports addresses, raw value/formula and `total_scanned`; display, hash, grapheme spans, cursor, whole-workbook search and all other query facets are not available yet and fail closed. In this slice the `in` default is `value`, not the final contract's `display`.
+**Current P1 find slice:** `excel_find` accepts an optional `scope`: a single A1 cell/range on one sheet (`scope.sheet` or a qualified target), a whole sheet, or a whole workbook when omitted. Unscoped searches use the independent reader's explicit-cell used ranges, and fail closed if any range or the total exceeds 500 cells. Exactly one of `query.text` and `query.regex` is required. Search is limited to raw `value` or `formula` text, with optional NFC normalization, case sensitivity, a 100 ms regex timeout and at most 100 results. Output marks `partial: true`, reports addresses, raw value/formula and the count scanned; display, hash, grapheme spans, cursor, large-workbook paging and all other query facets are not available yet and fail closed. In this slice the `in` default is `value`, not the final contract's `display`.
 
 ### 3.3 `excel_inspect`
 

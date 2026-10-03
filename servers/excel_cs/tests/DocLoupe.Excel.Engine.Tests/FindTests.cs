@@ -28,6 +28,12 @@ public sealed class FindTests
             Assert.Equal(12, initial.GetProperty("total_scanned").GetInt32());
             Assert.Equal("Sheet1!A1", Assert.Single(initial.GetProperty("matches").EnumerateArray()).GetProperty("addr").GetString());
             Assert.False(initial.GetProperty("truncated").GetBoolean());
+            var wholeWorkbook = JsonSerializer.SerializeToElement(sessions.Find(id, null, null, "HELLO", false));
+            Assert.Equal("Sheet1!A1", Assert.Single(wholeWorkbook.GetProperty("matches").EnumerateArray())
+                .GetProperty("addr").GetString());
+            Assert.Equal(12, wholeWorkbook.GetProperty("total_scanned").GetInt32());
+            var sheetOnly = JsonSerializer.SerializeToElement(sessions.Find(id, "Sheet1", null, "hello", false));
+            Assert.Single(sheetOnly.GetProperty("matches").EnumerateArray());
             Assert.Empty(JsonSerializer.SerializeToElement(sessions.Find(id, "Sheet1", "A1:D3", "HELLO", false,
                 caseSensitive: true)).GetProperty("matches").EnumerateArray());
             Assert.Equal("Sheet1!C1", Assert.Single(JsonSerializer.SerializeToElement(sessions.Find(id, null,
@@ -68,6 +74,7 @@ public sealed class FindTests
                 })
                 Assert.ThrowsAny<Exception>(() => JsonSerializer.Deserialize<FindQueryRequest>(json)!.Normalize());
             Assert.ThrowsAny<Exception>(() => sessions.Find(id, "Sheet1", "A1:A501", "x", false));
+            Assert.Throws<KeyNotFoundException>(() => sessions.Find(id, "NotASheet", null, "x", false));
             Assert.Throws<NotSupportedException>(() => sessions.Find(id, "Sheet1", "A1", "x", false, searchIn: "display"));
             Assert.ThrowsAny<Exception>(() => sessions.Find(id, "Sheet1", "A1", "[", true));
             Assert.ThrowsAny<Exception>(() => sessions.Find(id, "Sheet1", "A1", "x", false, maxResults: 101));

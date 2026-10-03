@@ -158,6 +158,13 @@ try
     if (found.IsError == true || found.StructuredContent?.GetProperty("data").GetProperty("partial").GetBoolean() != true ||
         found.StructuredContent?.GetProperty("data").GetProperty("matches")[0].GetProperty("addr").GetString() != "Sheet1!A1")
         throw new InvalidOperationException("Bounded find failed: " + found.StructuredContent?.GetRawText());
+    var workbookFind = await client.CallToolAsync("excel_find", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["query"] = new { text = "HELLO" }
+    });
+    if (workbookFind.IsError == true ||
+        workbookFind.StructuredContent?.GetProperty("data").GetProperty("matches")[0].GetProperty("addr").GetString() != "Sheet1!A1")
+        throw new InvalidOperationException("Unscoped bounded find failed: " + workbookFind.StructuredContent?.GetRawText());
     var readSchema = tools.Single(tool => tool.Name == "excel_read").ProtocolTool.InputSchema;
     if (readSchema.GetProperty("properties").GetProperty("target").GetProperty("oneOf").GetArrayLength() != 2)
         throw new InvalidOperationException("Read target array is missing from MCP input schema: " + readSchema.GetRawText());
