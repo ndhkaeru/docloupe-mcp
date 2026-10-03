@@ -260,16 +260,22 @@ public sealed class ExcelSessions : IDisposable
             try
             {
                 var summary = target is null ? WorkbookReader.Peek(source, maxCells: 0) : null;
-                var ranges = target is not null ? new[] { FindTargets(sheet, target) } :
-                    summary!.Sheets
-                        .Where(item => sheet is null || item.Name == sheet)
-                        .Where(item => item.UsedRange is not null)
-                        .Select(item => FindTargets(item.Name, item.UsedRange!)).ToArray();
-                if (target is null && sheet is not null && ranges.Length == 0 &&
-                    !summary!.Sheets.Any(item => item.Name == sheet))
-                    throw new KeyNotFoundException("Sheet not found: " + sheet);
-                if (ranges.Sum(item => item.Addresses.Length) > 500)
-                    throw new ArgumentException("Search exceeds 500 cells; supply a smaller scope.target");
+                var ranges = new List<(string Sheet, string[] Addresses)>();
+                if (target is not null)
+                    ranges.Add(FindTargets(sheet, target));
+                else
+                {
+                    if (sheet is not null && !summary!.Sheets.Any(item => item.Name == sheet))
+                        throw new KeyNotFoundException("Sheet not found: " + sheet);
+                    var remaining = 500;
+                    foreach (var item in summary!.Sheets.Where(item => sheet is null || item.Name == sheet))
+                    {
+                        if (item.UsedRange is null) continue;
+                        var range = FindTargets(item.Name, item.UsedRange, remaining);
+                        remaining -= range.Addresses.Length;
+                        ranges.Add(range);
+                    }
+                }
                 var matches = new List<object>();
                 var truncated = false;
                 var scanned = 0;
@@ -299,7 +305,7 @@ public sealed class ExcelSessions : IDisposable
         }
     }
 
-    private static (string Sheet, string[] Addresses) FindTargets(string? sheet, string target)
+    private static (string Sheet, string[] Addresses) FindTargets(string? sheet, string target, int maxCells = 500)
     {
         var bounds = target.Split(':');
         if (bounds.Length is < 1 or > 2 || bounds.Length == 2 && bounds[1].Contains('!'))
@@ -309,7 +315,7 @@ public sealed class ExcelSessions : IDisposable
         var last = bounds.Length == 2 ? CellAddress.Parse(bounds[1]) : first;
         if (last.Row < first.Row || last.Column < first.Column) throw new FormatException("Reversed search range");
         var count = (long)(last.Row - first.Row + 1) * (last.Column - first.Column + 1);
-        if (count > 500) throw new ArgumentException("Search exceeds 500 cells");
+        if (count > maxCells) throw new ArgumentException("Search exceeds 500 cells; supply a smaller scope.target");
         var addresses = new List<string>((int)count);
         for (var row = first.Row; row <= last.Row; row++)
             for (var column = first.Column; column <= last.Column; column++)
