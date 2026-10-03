@@ -89,3 +89,4 @@ dotnet run --project servers/excel_cs/spikes/S3/S3.csproj --configuration Releas
 ```
 
 **Thứ tự công việc tiếp theo:** (1) mở rộng [kịch bản parity](../tools/PARITY.md) cho rich/style và corpus độc lập; (2) hoàn tất reader và các op rich/style kèm G4–G7; (3) đóng tiêu chí P0/P1/P2b chưa đạt; (4) P3 → P7 theo [roadmap](06-testing-and-roadmap.md#4-roadmap). Mỗi mục chỉ chuyển thành `[x]` khi có test/báo cáo dẫn chứng và commit tương ứng; không push nếu chưa được yêu cầu.
+- [x] 2026-10-03: MCP SDK smoke `excel_create(.xlsm)` → `expect.empty` → `save_as` → `excel_find(query.value)` → `expect.value` → `overwrite` + backup → `excel_close` đạt trên Windows và Docker Linux; S3 vẫn **chưa** xác nhận forwarding tới model của Claude/VS Code.

@@ -333,5 +333,57 @@ try
         ["session"] = session
     });
     if (closed.IsError == true) throw new InvalidOperationException("Close failed");
+
+    var createdPath = Path.Combine(directory, "created.xlsm");
+    var created = await client.CallToolAsync("excel_create", new Dictionary<string, object?>
+    {
+        ["target_path"] = createdPath, ["format"] = "xlsm", ["sheets"] = new[] { "Sheet1", "Data" },
+        ["active_sheet"] = "Data"
+    });
+    if (created.IsError == true || created.StructuredContent?.GetProperty("data").GetProperty("new").GetBoolean() != true)
+        throw new InvalidOperationException("MCP create failed: " + created.StructuredContent?.GetRawText());
+    var createdId = created.StructuredContent!.Value.GetProperty("data").GetProperty("session").GetString()!;
+    var initialEdit = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = createdId, ["base_revision"] = 0,
+        ["ops"] = new[] { new { op = "set_value", sheet = "Data", target = "A1", value = "new", expect = new { empty = true } } }
+    });
+    if (initialEdit.IsError == true) throw new InvalidOperationException("MCP create edit failed: " + initialEdit.StructuredContent?.GetRawText());
+    var followedPath = Path.Combine(directory, "followed.xlsm");
+    var followed = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
+    {
+        ["session"] = createdId, ["mode"] = "save_as", ["path"] = followedPath
+    });
+    if (followed.IsError == true || followed.StructuredContent?.GetProperty("data").GetProperty("revision_saved").GetInt32() != 1)
+        throw new InvalidOperationException("MCP save_as failed: " + followed.StructuredContent?.GetRawText());
+    var typedFind = await client.CallToolAsync("excel_find", new Dictionary<string, object?>
+    {
+        ["session"] = createdId, ["query"] = new { value = "new" },
+        ["scope"] = new { sheet = "Data", target = "A1" }
+    });
+    if (typedFind.IsError == true || typedFind.StructuredContent?.GetProperty("data").GetProperty("matches")[0]
+        .GetProperty("addr").GetString() != "Data!A1")
+        throw new InvalidOperationException("MCP typed find failed: " + typedFind.StructuredContent?.GetRawText());
+    var changedAgain = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = createdId, ["base_revision"] = 1,
+        ["ops"] = new[] { new { op = "set_value", sheet = "Data", target = "A1", value = "next", expect = new { value = "new" } } }
+    });
+    if (changedAgain.IsError == true) throw new InvalidOperationException("MCP follow edit failed: " + changedAgain.StructuredContent?.GetRawText());
+    var overwritten = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
+    {
+        ["session"] = createdId, ["mode"] = "overwrite"
+    });
+    if (overwritten.IsError == true || overwritten.StructuredContent is null)
+        throw new InvalidOperationException("MCP overwrite failed: " + overwritten.StructuredContent?.GetRawText());
+    var backupPath = overwritten.StructuredContent.Value.GetProperty("data").GetProperty("backup").GetProperty("path").GetString();
+    if (backupPath is null || !File.Exists(backupPath) ||
+        overwritten.StructuredContent.Value.GetProperty("data").GetProperty("revision_saved").GetInt32() != 2)
+        throw new InvalidOperationException("MCP overwrite/backup failed: " + overwritten.StructuredContent?.GetRawText());
+    var createdClosed = await client.CallToolAsync("excel_close", new Dictionary<string, object?>
+    {
+        ["session"] = createdId
+    });
+    if (createdClosed.IsError == true) throw new InvalidOperationException("Followed session close failed");
 }
 finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
