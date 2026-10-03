@@ -497,7 +497,8 @@ public static partial class P2aGates
             if (!allowedIndices.Contains(index))
                 issues.Add(new("G5", "UNDECLARED_SHARED_STRING_CHANGE", $"orphan <si> index {index}"));
             var children = afterItems[index].ChildNodes.OfType<XmlElement>().ToArray();
-            if (children.Length != 1 || children[0].LocalName != "t" || children[0].NamespaceURI != Main ||
+            if (HasUnmodeledNode(afterItems[index]) ||
+                children.Length != 1 || children[0].LocalName != "t" || children[0].NamespaceURI != Main ||
                 !expectations.Any(item => item.Kind == "text" && item.Value == children[0].InnerText))
                 issues.Add(new("G5", "UNDECLARED_SHARED_STRING_CHANGE", $"unexpected <si> index {index}"));
         }

@@ -141,12 +141,12 @@ public static partial class P2aGates
         return issues;
     }
 
+    private static bool HasUnmodeledNode(XmlNode node) => node.ChildNodes.OfType<XmlNode>().Any(child =>
+        child.NodeType is XmlNodeType.Comment or XmlNodeType.ProcessingInstruction or XmlNodeType.CDATA or
+            XmlNodeType.EntityReference || HasUnmodeledNode(child));
+
     public static IReadOnlyList<GateIssue> CheckTouchedCells(string source, string written, IEnumerable<CellExpectation> expected)
     {
-        static bool HasUnmodeledNode(XmlNode node) => node.ChildNodes.OfType<XmlNode>().Any(child =>
-            child.NodeType is XmlNodeType.Comment or XmlNodeType.ProcessingInstruction or XmlNodeType.CDATA or
-                XmlNodeType.EntityReference || HasUnmodeledNode(child));
-
         static bool GeneratedNamespace(XmlAttribute attribute, XmlElement cell, XmlElement? originalScope)
         {
             if (attribute.NamespaceURI != "http://www.w3.org/2000/xmlns/" || originalScope is null)
