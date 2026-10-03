@@ -218,7 +218,9 @@ try
     });
     if (planned.IsError == true || planned.StructuredContent?.GetProperty("data").GetProperty("dry_run").GetBoolean() != true ||
         planned.StructuredContent?.GetProperty("data").GetProperty("revision_after").GetInt32() != 0 ||
-        planned.StructuredContent?.GetProperty("data").GetProperty("intent").GetArrayLength() != 1)
+        planned.StructuredContent?.GetProperty("data").GetProperty("intent").GetArrayLength() != 1 ||
+        planned.StructuredContent?.GetProperty("data").GetProperty("readback").GetProperty("Sheet1!B1").GetProperty("Value").GetString() != "99" ||
+        planned.StructuredContent?.GetProperty("data").GetProperty("results")[0].GetProperty("status").GetString() != "planned")
         throw new InvalidOperationException("MCP dry run failed: " + planned.StructuredContent?.GetRawText());
     var applied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
@@ -238,6 +240,14 @@ try
             new { op = "set_formula", sheet = "Sheet1", target = "Q11", formula = "1/0", cache = (object)new { value = new { error = "#DIV/0!" } } } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
+    var appliedData = applied.StructuredContent!.Value.GetProperty("data");
+    var expandedResult = appliedData.GetProperty("results").EnumerateArray()
+        .Single(item => item.GetProperty("resolved").GetString() == "Sheet1!G5");
+    if (appliedData.GetProperty("readback").GetProperty("Sheet1!D3").ValueKind != System.Text.Json.JsonValueKind.Null ||
+        appliedData.GetProperty("readback").GetProperty("Sheet1!C1").GetProperty("Formula").GetString() != "B1+2" ||
+        expandedResult.GetProperty("index").GetInt32() != 3 ||
+        expandedResult.GetProperty("status").GetString() != "applied")
+        throw new InvalidOperationException("MCP apply readback or expanded result failed: " + appliedData.GetRawText());
     var conflicted = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
