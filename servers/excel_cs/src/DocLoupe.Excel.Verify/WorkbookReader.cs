@@ -53,6 +53,9 @@ public static class WorkbookReader
         var packageIssues = new List<MarkupIssue>();
         var markupIssues = new List<MarkupIssue>();
         using var archive = ZipFile.OpenRead(path);
+        if (!CheckZipLimits(archive, packageIssues))
+            return new VerificationSummary("failed", packageIssues, markupIssues,
+                ["G1_REMAINING", "G2", "G4", "G5", "G6", "G7"]);
         var duplicates = archive.Entries.GroupBy(entry => entry.FullName, StringComparer.OrdinalIgnoreCase)
             .Where(group => group.Count() > 1);
         foreach (var duplicate in duplicates)
@@ -123,6 +126,50 @@ public static class WorkbookReader
 
         var status = packageIssues.Count + markupIssues.Count > 0 ? "failed" : "unverified";
         return new VerificationSummary(status, packageIssues, markupIssues, ["G1_REMAINING", "G2", "G4", "G5", "G6", "G7"]);
+    }
+
+    private static bool CheckZipLimits(ZipArchive archive, List<MarkupIssue> issues)
+    {
+        var maxParts = ReadPositiveLong("DOCLOUPE_EXCEL_MAX_PARTS", 20_000, issues);
+        var maxBytes = ReadPositiveLong("DOCLOUPE_EXCEL_MAX_UNCOMPRESSED_BYTES", 4_000_000_000L, issues);
+        var configuredRatio = Environment.GetEnvironmentVariable("DOCLOUPE_EXCEL_MAX_COMPRESSION_RATIO");
+        var maxRatio = 200d;
+        if (configuredRatio is not null && (!double.TryParse(configuredRatio, NumberStyles.Float,
+            CultureInfo.InvariantCulture, out maxRatio) || !double.IsFinite(maxRatio) || maxRatio <= 0))
+            issues.Add(new MarkupIssue("INVALID_LIMIT_CONFIGURATION", "DOCLOUPE_EXCEL_MAX_COMPRESSION_RATIO"));
+        if (maxParts is null || maxBytes is null || issues.Count > 0) return false;
+        if (archive.Entries.Count > maxParts)
+        {
+            issues.Add(new MarkupIssue("LIMIT_PART_COUNT", archive.Entries.Count.ToString(CultureInfo.InvariantCulture)));
+            return false;
+        }
+        long totalBytes = 0;
+        foreach (var entry in archive.Entries)
+        {
+            if (entry.Length > maxBytes - totalBytes)
+            {
+                issues.Add(new MarkupIssue("LIMIT_UNCOMPRESSED_BYTES", entry.FullName));
+                return false;
+            }
+            totalBytes += entry.Length;
+            if (entry.Length > 1_000_000 && (entry.CompressedLength == 0 ||
+                entry.Length / (double)entry.CompressedLength > maxRatio))
+            {
+                issues.Add(new MarkupIssue("LIMIT_COMPRESSION_RATIO", entry.FullName));
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static long? ReadPositiveLong(string name, long defaultValue, List<MarkupIssue> issues)
+    {
+        var configured = Environment.GetEnvironmentVariable(name);
+        if (configured is null) return defaultValue;
+        if (long.TryParse(configured, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) && value > 0)
+            return value;
+        issues.Add(new MarkupIssue("INVALID_LIMIT_CONFIGURATION", name));
+        return null;
     }
 
     private static void VerifyContentTypes(ZipArchive archive, ZipArchiveEntry manifest, string? workbookPart,

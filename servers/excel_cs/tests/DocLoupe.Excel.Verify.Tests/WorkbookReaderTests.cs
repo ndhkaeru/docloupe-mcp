@@ -461,6 +461,45 @@ public sealed class WorkbookReaderTests
         }
     }
 
+    [Theory]
+    [InlineData(1_000_000, null)]
+    [InlineData(1_000_001, "LIMIT_COMPRESSION_RATIO")]
+    public void RejectsOnlyHighlyCompressedEntriesAboveOneMegabyte(int bytes, string? expectedCode)
+    {
+        var path = CreateWorkbook("");
+        try
+        {
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+            using (var stream = archive.CreateEntry("xl/large.xml", CompressionLevel.Optimal).Open())
+            using (var writer = new StreamWriter(stream))
+                writer.Write("<root>" + new string('a', bytes - 13) + "</root>");
+            var result = WorkbookReader.VerifyPartial(path);
+            if (expectedCode is null)
+                Assert.Equal("unverified", result.Status);
+            else
+            {
+                Assert.Equal("failed", result.Status);
+                Assert.Contains(result.PackageIssues, issue => issue.Code == expectedCode);
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void RejectsMoreThanTwentyThousandZipEntries()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, $"read-probe-{Guid.NewGuid():N}.xlsx");
+        try
+        {
+            using (var archive = new ZipArchive(File.Create(path), ZipArchiveMode.Create))
+                for (var index = 0; index <= 20_000; index++) archive.CreateEntry($"part-{index}");
+            var result = WorkbookReader.VerifyPartial(path);
+            Assert.Equal("failed", result.Status);
+            Assert.Contains(result.PackageIssues, issue => issue.Code == "LIMIT_PART_COUNT");
+        }
+        finally { File.Delete(path); }
+    }
+
     private static string CreateWorkbook(string sheetDataContent, string workbookPart = "xl/workbook.xml",
         string? workbookTarget = null, string sheetTarget = "worksheets/sheet1.xml",
         string sheetPart = "xl/worksheets/sheet1.xml", bool includeRoot = true,

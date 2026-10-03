@@ -60,6 +60,16 @@ try
         !wrongTypeResult.StructuredContent.Value.GetProperty("error").GetProperty("details").GetProperty("package_issues")
             .EnumerateArray().Any(issue => issue.GetProperty("Code").GetString() == "WORKBOOK_CONTENT_TYPE_MISMATCH"))
         throw new InvalidOperationException("Wrong workbook content type was accepted: " + wrongTypeResult.StructuredContent?.GetRawText());
+    var compressed = Path.Combine(directory, "compressed.xlsx");
+    File.Copy(source, compressed);
+    using (var archive = ZipFile.Open(compressed, ZipArchiveMode.Update))
+    using (var writer = new StreamWriter(archive.CreateEntry("xl/compressed.xml", CompressionLevel.Optimal).Open()))
+        writer.Write("<root>" + new string('a', 1_000_001 - 13) + "</root>");
+    var compressedResult = await client.CallToolAsync("excel_verify", new Dictionary<string, object?> { ["after_path"] = compressed });
+    if (compressedResult.IsError != true || compressedResult.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PACKAGE_INVALID" ||
+        compressedResult.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("package_issues")
+            .EnumerateArray().Any(issue => issue.GetProperty("Code").GetString() == "LIMIT_COMPRESSION_RATIO") != true)
+        throw new InvalidOperationException("High-compression ZIP was accepted: " + compressedResult.StructuredContent?.GetRawText());
     var peek = await client.CallToolAsync("excel_peek", new Dictionary<string, object?>
     {
         ["path"] = source, ["detail"] = "preview", ["sheet"] = "Sheet1", ["max_rows"] = 3, ["max_cols"] = 4
