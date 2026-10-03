@@ -168,7 +168,9 @@ static CallToolResult Handle(Func<object> action)
     }
     catch (Exception error)
     {
-        return Result(new { ok = false, error = new { code = "P2A_ERROR", message = error.Message, retryable = false } }, true);
+        var mapped = ToolErrors.FromException(error);
+        return Result(new { ok = false, error = new { code = mapped.Code, message = mapped.Message,
+            retryable = mapped.Retryable } }, true);
     }
 }
 

@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Text.RegularExpressions;
 using System.Xml;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Spreadsheet;
@@ -84,7 +85,8 @@ public static class DetachedValidator
                     var writtenParents = ChildLists(newEntry);
                     foreach (var baselineError in baseline)
                     {
-                        var location = baselineError.Split('|')[0];
+                        var location = Regex.Replace(baselineError.Split('|')[0],
+                            @"(?<=/)[A-Za-z_][\w.-]*:(?=[^/\[]+\[\d+\])", "");
                         if (originalParents.TryGetValue(location, out var oldChildren)
                             && (!writtenParents.TryGetValue(location, out var newChildren) || !oldChildren.SequenceEqual(newChildren)))
                             gaps.Add(new SchemaIssue(part, "G2_MASKED_BY_BASELINE_ERROR", location));
@@ -159,13 +161,13 @@ public static class DetachedValidator
             var counts = new Dictionary<string, int>(StringComparer.Ordinal);
             foreach (var child in children)
             {
-                var name = child.NamespaceURI + ":" + child.LocalName;
+                var name = child.LocalName;
                 counts[name] = counts.GetValueOrDefault(name) + 1;
-                Walk(child, path + "/x:" + child.LocalName + "[" + counts[name] + "]");
+                Walk(child, path + "/" + name + "[" + counts[name] + "]");
             }
         }
         var root = document.DocumentElement ?? throw new InvalidDataException("Missing XML root");
-        Walk(root, "/x:" + root.LocalName + "[1]");
+        Walk(root, "/" + root.LocalName + "[1]");
         return lists;
     }
 

@@ -8,13 +8,31 @@ using Xunit;
 
 namespace DocLoupe.Excel.Engine.Tests;
 
+public sealed class LocalFixtureFactAttribute : FactAttribute
+{
+    public LocalFixtureFactAttribute()
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES")))
+            Skip = "Set DOCLOUPE_P2A_LOCAL_FIXTURES to run the local corpus";
+    }
+}
+
+public sealed class LocalFixtureTheoryAttribute : TheoryAttribute
+{
+    public LocalFixtureTheoryAttribute()
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES")))
+            Skip = "Set DOCLOUPE_P2A_LOCAL_FIXTURES to run the local corpus";
+    }
+}
+
 public sealed class LocalFixtureTests
 {
-    [Fact]
+    [LocalFixtureFact]
     public void LocalSourcesSupportSessionlessPeek()
     {
         var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
-        if (string.IsNullOrWhiteSpace(directory)) return;
+        if (string.IsNullOrWhiteSpace(directory)) throw new InvalidOperationException("Local fixture path disappeared after discovery");
         var sources = Directory.GetFiles(directory, "*.*")
             .Where(path => Path.GetExtension(path) is ".xlsx" or ".xlsm")
             .Where(path => !Path.GetFileName(path).StartsWith("07-external-", StringComparison.Ordinal))
@@ -28,48 +46,51 @@ public sealed class LocalFixtureTests
         }
     }
 
-    [Fact]
-    public void LocalSourcesAcceptMultiCellSetValueMatrix()
+    [LocalFixtureTheory]
+    [InlineData("00-base.xlsx")]
+    [InlineData("01-audit-87-source.xlsx")]
+    [InlineData("02-table-metadata-source.xlsx")]
+    [InlineData("03-print-area-source.xlsx")]
+    [InlineData("04-rich-text-phonetic-source.xlsx")]
+    [InlineData("05-advanced-package-source.xlsm")]
+    [InlineData("06-book1-richtext-source.xlsm")]
+    [InlineData("07-real-package-source.xlsx")]
+    public void LocalSourcesAcceptMultiCellSetValueMatrix(string fileName)
     {
-        var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
-        if (string.IsNullOrWhiteSpace(directory)) return;
-        var sources = Directory.GetFiles(directory, "*.*")
-            .Where(path => Path.GetExtension(path) is ".xlsx" or ".xlsm")
-            .Where(path => !Path.GetFileName(path).StartsWith("07-external-", StringComparison.Ordinal))
-            .OrderBy(path => path).ToArray();
-        Assert.Equal(8, sources.Length);
-        foreach (var source in sources)
+        var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES")
+            ?? throw new InvalidOperationException("Local fixture path disappeared after discovery");
+        var source = Path.Combine(directory, fileName);
+        Assert.True(File.Exists(source), fileName);
+        var output = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(source));
+        try
         {
-            var output = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(source));
-            try
-            {
-                using var store = new PackageStore(source);
-                var sheet = store.SheetNames()[0];
-                var unusual = Path.GetFileName(source).StartsWith("06", StringComparison.Ordinal) ||
-                    Path.GetFileName(source).StartsWith("07", StringComparison.Ordinal);
-                SetValueOp[] ops = unusual
-                    ? [new(sheet, "A1", "text", "new text"), new(sheet, "B1", "number", "9")]
-                    : [new(sheet, "B3", "text", "converted"), new(sheet, "A4", "number", "4"), new(sheet, "C4", "inline", "new inline")];
-                var result = SetValueEngine.Apply(store, ops);
-                store.Save(output);
-                Assert.Empty(P2aGates.CheckPackage(output, result.ChangedParts));
-                Assert.Empty(P2aGates.CheckIntent(output, result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value))));
-                Assert.Empty(P2aGates.CheckPreservation(source, output, result.Edits.Select(edit =>
-                    new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)), AddedOrRemoved(source, store, result.ChangedParts)));
-                Assert.Empty(P2aMarkupGate.Check(source, output, result.ChangedParts));
-                Assert.Empty(DetachedValidator.Check(source, output, result.ChangedParts).Issues);
-            }
-            finally { if (File.Exists(output)) File.Delete(output); }
+            using var store = new PackageStore(source);
+            var sheet = store.SheetNames()[0];
+            var unusual = fileName.StartsWith("06", StringComparison.Ordinal) ||
+                fileName.StartsWith("07", StringComparison.Ordinal);
+            SetValueOp[] ops = unusual
+                ? [new(sheet, "A1", "text", "new text"), new(sheet, "B1", "number", "9")]
+                : [new(sheet, "B3", "text", "converted"), new(sheet, "A4", "number", "4"), new(sheet, "C4", "inline", "new inline")];
+            var result = SetValueEngine.Apply(store, ops);
+            store.Save(output);
+            Assert.Empty(P2aGates.CheckPackage(output, result.ChangedParts));
+            Assert.Empty(P2aGates.CheckIntent(output, result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value))));
+            Assert.Empty(P2aGates.CheckPreservation(source, output, result.Edits.Select(edit =>
+                new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)), AddedOrRemoved(source, store, result.ChangedParts)));
+            AssertSemantic(source, output, result);
+            Assert.Empty(P2aMarkupGate.Check(source, output, result.ChangedParts));
+            Assert.Empty(DetachedValidator.Check(source, output, result.ChangedParts).Issues);
         }
+        finally { if (File.Exists(output)) File.Delete(output); }
     }
 
-    [Theory]
+    [LocalFixtureTheory]
     [InlineData(false)]
     [InlineData(true)]
     public void LocalSourcesAcceptClearValuesWithoutCreatingAbsentCells(bool removeCells)
     {
         var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
-        if (string.IsNullOrWhiteSpace(directory)) return;
+        if (string.IsNullOrWhiteSpace(directory)) throw new InvalidOperationException("Local fixture path disappeared after discovery");
         var sources = Directory.GetFiles(directory, "*.*")
             .Where(path => Path.GetExtension(path) is ".xlsx" or ".xlsm")
             .Where(path => !Path.GetFileName(path).StartsWith("07-external-", StringComparison.Ordinal))
@@ -100,6 +121,7 @@ public sealed class LocalFixtureTests
                 Assert.Empty(P2aGates.CheckPreservation(source, output, result.Edits.Select(edit =>
                     new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)),
                     AddedOrRemoved(source, store, result.ChangedParts)));
+                AssertSemantic(source, output, result);
                 Assert.Empty(P2aMarkupGate.Check(source, output, result.ChangedParts));
                 Assert.Empty(DetachedValidator.Check(source, output, result.ChangedParts).Issues);
             }
@@ -107,11 +129,11 @@ public sealed class LocalFixtureTests
         }
     }
 
-    [Fact]
+    [LocalFixtureFact]
     public void LocalSourcesAcceptErrorValues()
     {
         var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
-        if (string.IsNullOrWhiteSpace(directory)) return;
+        if (string.IsNullOrWhiteSpace(directory)) throw new InvalidOperationException("Local fixture path disappeared after discovery");
         var sources = Directory.GetFiles(directory, "*.*")
             .Where(path => Path.GetExtension(path) is ".xlsx" or ".xlsm")
             .Where(path => !Path.GetFileName(path).StartsWith("07-external-", StringComparison.Ordinal))
@@ -139,6 +161,7 @@ public sealed class LocalFixtureTests
                 Assert.Empty(P2aGates.CheckPreservation(source, output, result.Edits.Select(edit =>
                     new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)),
                     AddedOrRemoved(source, store, result.ChangedParts)));
+                AssertSemantic(source, output, result);
                 Assert.Empty(P2aMarkupGate.Check(source, output, result.ChangedParts));
                 Assert.Empty(DetachedValidator.Check(source, output, result.ChangedParts).Issues);
             }
@@ -146,11 +169,11 @@ public sealed class LocalFixtureTests
         }
     }
 
-    [Fact]
+    [LocalFixtureFact]
     public void LocalSourcesAcceptExactDecimalFill()
     {
         var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
-        if (string.IsNullOrWhiteSpace(directory)) return;
+        if (string.IsNullOrWhiteSpace(directory)) throw new InvalidOperationException("Local fixture path disappeared after discovery");
         var sources = Directory.GetFiles(directory, "*.*")
             .Where(path => Path.GetExtension(path) is ".xlsx" or ".xlsm")
             .Where(path => !Path.GetFileName(path).StartsWith("07-external-", StringComparison.Ordinal))
@@ -179,11 +202,23 @@ public sealed class LocalFixtureTests
                 Assert.Empty(P2aGates.CheckPreservation(source, output, result.Edits.Select(edit =>
                     new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)),
                     AddedOrRemoved(source, store, result.ChangedParts)));
+                AssertSemantic(source, output, result);
                 Assert.Empty(P2aMarkupGate.Check(source, output, result.ChangedParts));
                 Assert.Empty(DetachedValidator.Check(source, output, result.ChangedParts).Issues);
             }
             finally { if (File.Exists(output)) File.Delete(output); }
         }
+    }
+
+    private static void AssertSemantic(string source, string output, ApplyResult result)
+    {
+        var expected = result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind,
+            item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
+            item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null));
+        var spans = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End,
+            edit.Before, edit.After));
+        var issues = P2aGates.CheckSemanticPreservation(source, output, expected, spans);
+        Assert.True(issues.Count == 0, $"{Path.GetFileName(source)} G5: {string.Join("; ", issues)}");
     }
 
     private static IEnumerable<string> AddedOrRemoved(string source, PackageStore store, IEnumerable<string> changedParts)
@@ -193,11 +228,11 @@ public sealed class LocalFixtureTests
         return changedParts.Where(part => !store.Contains(part) || !originalParts.Contains(part)).ToArray();
     }
 
-    [Fact]
+    [LocalFixtureFact]
     public void SignedLocalOriginalBlocksSaveWithoutOutput()
     {
         var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
-        if (string.IsNullOrWhiteSpace(directory)) return;
+        if (string.IsNullOrWhiteSpace(directory)) throw new InvalidOperationException("Local fixture path disappeared after discovery");
         var source = Path.Combine(directory, "05-advanced-package-source.xlsm");
         using var sessions = new ExcelSessions();
         var opened = sessions.Open(source);
@@ -210,11 +245,11 @@ public sealed class LocalFixtureTests
         sessions.Close(id, true);
     }
 
-    [Fact]
+    [LocalFixtureFact]
     public void LocalSourcesAreNeverUsedByCiUnlessExplicitlySelected()
     {
         var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES");
-        if (string.IsNullOrWhiteSpace(directory)) return;
+        if (string.IsNullOrWhiteSpace(directory)) throw new InvalidOperationException("Local fixture path disappeared after discovery");
         var sourceFiles = Directory.GetFiles(directory, "*.*")
             .Where(path => Path.GetExtension(path) is ".xlsx" or ".xlsm")
             .Where(path => !Path.GetFileName(path).StartsWith("07-external-", StringComparison.Ordinal))
@@ -236,6 +271,7 @@ public sealed class LocalFixtureTests
                 Assert.Empty(P2aGates.CheckIntent(temporary, [new CellExpectation(sheet, address, "number", "19")]));
                 Assert.Empty(P2aGates.CheckPreservation(source, temporary, result.Edits.Select(edit =>
                     new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)), AddedOrRemoved(source, package, result.ChangedParts)));
+                AssertSemantic(source, temporary, result);
                 Assert.Empty(P2aMarkupGate.Check(source, temporary, result.ChangedParts));
                 Assert.Empty(DetachedValidator.Check(source, temporary, result.ChangedParts).Issues);
             }

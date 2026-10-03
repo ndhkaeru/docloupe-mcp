@@ -238,6 +238,23 @@ try
             new { op = "set_formula", sheet = "Sheet1", target = "Q11", formula = "1/0", cache = (object)new { value = new { error = "#DIV/0!" } } } }
     });
     if (applied.IsError == true) throw new InvalidOperationException("Apply failed: " + applied.StructuredContent?.GetRawText());
+    var conflicted = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
+        ["ops"] = new[] { new { op = "set_value", target = "B1", value = 100 } }
+    });
+    if (conflicted.IsError != true ||
+        conflicted.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "REVISION_CONFLICT" ||
+        conflicted.StructuredContent?.GetProperty("error").GetProperty("retryable").GetBoolean() != true)
+        throw new InvalidOperationException("Revision conflict was not actionable: " + conflicted.StructuredContent?.GetRawText());
+    var ambiguousText = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 1, ["sheet"] = "Sheet1",
+        ["ops"] = new[] { new { op = "set_value", target = "R12", value = "=B1" } }
+    });
+    if (ambiguousText.IsError != true ||
+        ambiguousText.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "AMBIGUOUS_FORMULA_TEXT")
+        throw new InvalidOperationException("Formula-like text had no actionable code: " + ambiguousText.StructuredContent?.GetRawText());
     var formulaMatches = await client.CallToolAsync("excel_find", new Dictionary<string, object?>
     {
         ["session"] = session, ["query"] = new { formula_contains = "B1+2" },

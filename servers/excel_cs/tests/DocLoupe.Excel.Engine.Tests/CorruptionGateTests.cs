@@ -184,6 +184,42 @@ public sealed class CorruptionGateTests
         Assert.Contains(P2aGates.CheckSemanticPreservation(source, type, [intent]), issue => issue.Code == "UNDECLARED_CONTENT_TYPE_CHANGE");
     }
 
+    [Fact]
+    public void WriterAcceptsUtf8DeclarationWithoutEncoding()
+    {
+        using var fixture = new Fixture();
+        var source = fixture.Corrupt("xl/worksheets/sheet1.xml", xml =>
+            xml.Replace(" encoding=\"UTF-8\"", "", StringComparison.Ordinal));
+        var output = Path.Combine(fixture.Directory, "without-encoding.xlsx");
+        using (var store = new PackageStore(source))
+        {
+            SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(output);
+        }
+        Assert.Empty(P2aGates.CheckIntent(output, [new CellExpectation("Sheet1", "B1", "number", "100")]));
+    }
+
+    [Fact]
+    public void WorkbookCalculationFlagIsNotInsertedIntoAnAttributeValue()
+    {
+        using var fixture = new Fixture();
+        var source = fixture.Corrupt("xl/workbook.xml", xml =>
+            xml.Replace("<calcPr calcId=", "<calcPr xmlns:p=\"urn:calcPr\" calcId=", StringComparison.Ordinal));
+        var output = Path.Combine(fixture.Directory, "calculation.xlsx");
+        using (var store = new PackageStore(source))
+        {
+            SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B1", "number", "100")]);
+            store.Save(output);
+        }
+        using var archive = ZipFile.OpenRead(output);
+        using var stream = archive.GetEntry("xl/workbook.xml")!.Open();
+        var document = new System.Xml.XmlDocument();
+        document.Load(stream);
+        var calculation = document.GetElementsByTagName("calcPr", "http://schemas.openxmlformats.org/spreadsheetml/2006/main")[0]!;
+        Assert.Equal("1", calculation.Attributes!["fullCalcOnLoad"]!.Value);
+        Assert.Equal("urn:calcPr", calculation.Attributes["xmlns:p"]!.Value);
+    }
+
     private sealed class Fixture : IDisposable
     {
         public string Directory { get; } = Path.Combine(Path.GetTempPath(), "docloupe-corrupt-" + Guid.NewGuid().ToString("N"));

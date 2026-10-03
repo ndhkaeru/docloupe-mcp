@@ -18,10 +18,19 @@ internal sealed class LexicalPart
     {
         _original = content;
         _text = Utf8.GetString(content);
-        if (_text.Contains('\0') || _text.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase)
-            && !_text.AsSpan(0, Math.Min(120, _text.Length)).Contains("UTF-8", StringComparison.OrdinalIgnoreCase)
-            && !_text.AsSpan(0, Math.Min(120, _text.Length)).Contains("UTF8", StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException("Only UTF-8 XML parts can be spliced");
+        if (_text.Contains('\0')) throw new NotSupportedException("Only UTF-8 XML parts can be spliced");
+        var declarationStart = _text.Length > 0 && _text[0] == '\uFEFF' ? 1 : 0;
+        if (_text.AsSpan(declarationStart).StartsWith("<?xml", StringComparison.OrdinalIgnoreCase))
+        {
+            var declarationEnd = _text.IndexOf("?>", declarationStart, StringComparison.Ordinal);
+            if (declarationEnd < 0) throw new InvalidDataException("Unterminated XML declaration");
+            var declaration = _text[declarationStart..declarationEnd];
+            var encoding = System.Text.RegularExpressions.Regex.Match(declaration,
+                "(?<![\\w:])encoding\\s*=\\s*(['\"])(?<value>[^'\"]+)\\1");
+            if (encoding.Success && !encoding.Groups["value"].Value.Equals("UTF-8", StringComparison.OrdinalIgnoreCase) &&
+                !encoding.Groups["value"].Value.Equals("UTF8", StringComparison.OrdinalIgnoreCase))
+                throw new NotSupportedException("Only UTF-8 XML parts can be spliced");
+        }
         Document = PackageStore.Parse(content);
         Index();
     }

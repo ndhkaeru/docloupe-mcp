@@ -42,30 +42,44 @@ public static partial class P2aGates
                 var original = Load(oldEntries[oldPart]);
                 var candidate = Load(newEntries[newPart]);
                 var selected = targets.GetValueOrDefault(name) ?? [];
-                foreach (var document in new[] { original, candidate })
-                    foreach (var address in selected)
-                        if (document.GetElementsByTagName("c", Main).OfType<XmlElement>()
-                            .Count(cell => cell.GetAttribute("r") == address) > 1)
-                            issues.Add(new("G5", "AMBIGUOUS_TARGET", $"{name}!{address}"));
+                Dictionary<string, XmlElement> SelectedCells(XmlDocument document)
+                {
+                    var groups = document.GetElementsByTagName("c", Main).OfType<XmlElement>()
+                        .Where(cell => selected.Contains(cell.GetAttribute("r")))
+                        .GroupBy(cell => cell.GetAttribute("r"), StringComparer.Ordinal);
+                    var cells = new Dictionary<string, XmlElement>(StringComparer.Ordinal);
+                    foreach (var group in groups)
+                    {
+                        if (group.Skip(1).Any()) issues.Add(new("G5", "AMBIGUOUS_TARGET", $"{name}!{group.Key}"));
+                        cells[group.Key] = group.First();
+                    }
+                    return cells;
+                }
+                var beforeTargets = SelectedCells(original);
+                var afterTargets = SelectedCells(candidate);
                 foreach (var address in selected)
                 {
-                    var oldCell = FindCell(original, address);
-                    var newCell = FindCell(candidate, address);
+                    beforeTargets.TryGetValue(address, out var oldCell);
+                    afterTargets.TryGetValue(address, out var newCell);
                     if (oldCell?.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName == "f" && child.NamespaceURI == Main) == true &&
                         newCell?.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName == "f" && child.NamespaceURI == Main) != true)
                         formulaRemoved = true;
                 }
-                var differingCell = original.GetElementsByTagName("c", Main).OfType<XmlElement>()
-                    .Concat(candidate.GetElementsByTagName("c", Main).OfType<XmlElement>())
-                    .Select(cell => cell.GetAttribute("r")).Distinct(StringComparer.Ordinal)
-                    .Where(address => !selected.Contains(address))
-                    .FirstOrDefault(address => !Equivalent(FindCell(original, address), FindCell(candidate, address)));
                 var originalRows = original.GetElementsByTagName("row", Main).OfType<XmlElement>()
                     .Select(row => row.GetAttribute("r")).ToHashSet(StringComparer.Ordinal);
                 StripSelectedCells(original, selected, originalRows);
                 StripSelectedCells(candidate, selected, originalRows);
                 if (!Equivalent(original.DocumentElement, candidate.DocumentElement))
+                {
+                    var oldCells = original.GetElementsByTagName("c", Main).OfType<XmlElement>()
+                        .ToDictionary(cell => cell.GetAttribute("r"), StringComparer.Ordinal);
+                    var newCells = candidate.GetElementsByTagName("c", Main).OfType<XmlElement>()
+                        .ToDictionary(cell => cell.GetAttribute("r"), StringComparer.Ordinal);
+                    var differingCell = oldCells.Keys.Union(newCells.Keys, StringComparer.Ordinal)
+                        .FirstOrDefault(address => !Equivalent(oldCells.GetValueOrDefault(address),
+                            newCells.GetValueOrDefault(address)));
                     issues.Add(new("G5", "UNDECLARED_SHEET_CHANGE", $"{name}!{differingCell ?? "sheetData"}"));
+                }
             }
             if (declared is not null)
                 CheckDeclarationScope(oldEntries, oldWorkbook, targets, declared, issues);

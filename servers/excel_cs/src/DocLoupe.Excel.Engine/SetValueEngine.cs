@@ -321,7 +321,7 @@ public static class SetValueEngine
             var original = lexical.StartTag(calc);
             var match = Regex.Match(original, "(?<![\\w:])fullCalcOnLoad\\s*=\\s*(['\"]).*?\\1", RegexOptions.CultureInvariant);
             var changed = match.Success ? original[..match.Index] + "fullCalcOnLoad=\"1\"" + original[(match.Index + match.Length)..] :
-                original.Insert(original.LastIndexOf(calc.Name, StringComparison.Ordinal) + calc.Name.Length, " fullCalcOnLoad=\"1\"");
+                original.Insert(original.IndexOf(calc.Name, 1, StringComparison.Ordinal) + calc.Name.Length, " fullCalcOnLoad=\"1\"");
             if (changed != original) lexical.ReplaceStartTag(calc, changed);
         }
         var result = lexical.Finish(part);

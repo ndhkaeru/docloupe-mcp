@@ -151,8 +151,10 @@ public sealed class SetValueTests
             using var zip = ZipFile.OpenRead(output);
             Assert.Equal(!expectedRemoval, zip.GetEntry("xl/calcChain.xml") is not null);
             Assert.Empty(P2aGates.CheckPackage(output, result.ChangedParts));
-            Assert.Empty(P2aGates.CheckPreservation(source, output, result.Edits.Select(edit =>
-                new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)), expectedRemoval ? ["xl/calcChain.xml"] : []));
+            var spans = result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)).ToArray();
+            Assert.Empty(P2aGates.CheckPreservation(source, output, spans, expectedRemoval ? ["xl/calcChain.xml"] : []));
+            Assert.Empty(P2aGates.CheckSemanticPreservation(source, output,
+                [new CellExpectation("Sheet1", address, kind, value)], spans));
         }
     }
 
