@@ -241,11 +241,13 @@ public sealed class ExcelSessions : IDisposable
     }
 
     public object Find(string id, string? sheet, string? target, string pattern, bool isRegex,
-        string searchIn = "value", bool caseSensitive = false, string normalize = "nfc", int maxResults = 100)
+        string searchIn = "value", bool caseSensitive = false, string normalize = "nfc", int maxResults = 100,
+        ValueAssertion? expectedValue = null)
     {
-        if (searchIn is not ("value" or "formula") || normalize is not ("nfc" or "none"))
+        if (searchIn is not ("value" or "formula") || normalize is not ("nfc" or "none") ||
+            expectedValue is not null && (searchIn != "value" || isRegex || pattern.Length != 0))
             throw new NotSupportedException("Only value and formula search with nfc or none normalization is supported");
-        if (maxResults is < 1 or > 100 || pattern.Length is < 1 or > 512)
+        if (maxResults is < 1 or > 100 || expectedValue is null && pattern.Length is < 1 or > 512)
             throw new ArgumentOutOfRangeException(nameof(maxResults), "Search accepts 1..100 results and a 1..512 character pattern");
         var needle = normalize == "nfc" ? pattern.Normalize(System.Text.NormalizationForm.FormC) : pattern;
         var regex = isRegex ? new System.Text.RegularExpressions.Regex(needle,
@@ -286,15 +288,21 @@ public sealed class ExcelSessions : IDisposable
                     foreach (var address in addresses)
                     {
                         scanned++;
-                        if (!cells.TryGetValue(address, out var cell)) continue;
-                        var raw = searchIn == "formula" ? cell.Formula : cell.Value;
-                        if (raw is null) continue;
-                        var haystack = normalize == "nfc" ? raw.Normalize(System.Text.NormalizationForm.FormC) : raw;
-                        var found = regex is not null ? regex.IsMatch(haystack) :
-                            haystack.Contains(needle, caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
+                        cells.TryGetValue(address, out var cell);
+                        var found = false;
+                        if (expectedValue is not null)
+                            found = FindValueMatches(cell, expectedValue, caseSensitive, normalize);
+                        else if (cell is not null)
+                        {
+                            var raw = searchIn == "formula" ? cell.Formula : cell.Value;
+                            if (raw is null) continue;
+                            var haystack = normalize == "nfc" ? raw.Normalize(System.Text.NormalizationForm.FormC) : raw;
+                            found = regex is not null ? regex.IsMatch(haystack) :
+                                haystack.Contains(needle, caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
+                        }
                         if (!found) continue;
                         if (matches.Count == maxResults) { truncated = true; break; }
-                        matches.Add(new { addr = selectedSheet + "!" + address, value = cell.Value, formula = cell.Formula });
+                        matches.Add(new { addr = selectedSheet + "!" + address, value = cell?.Value, formula = cell?.Formula });
                     }
                     if (truncated) break;
                 }
@@ -303,6 +311,17 @@ public sealed class ExcelSessions : IDisposable
             }
             finally { if (source != session.Path) File.Delete(source); }
         }
+    }
+
+    private static bool FindValueMatches(CellRead? cell, ValueAssertion expected, bool caseSensitive, string normalize)
+    {
+        if (expected.Kind != "text") return G7Assertions.ValueMatches(cell, expected);
+        var text = cell?.Kind == "formula" && cell.CacheType == "str" ? cell.CacheRawValue :
+            cell?.Kind is "text" or "inline" ? cell.Value : null;
+        if (text is null) return false;
+        var actual = normalize == "nfc" ? text.Normalize(System.Text.NormalizationForm.FormC) : text;
+        var wanted = normalize == "nfc" ? expected.Value!.Normalize(System.Text.NormalizationForm.FormC) : expected.Value!;
+        return string.Equals(actual, wanted, caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
     }
 
     private static (string Sheet, string[] Addresses) FindTargets(string? sheet, string target, int maxCells = 500)

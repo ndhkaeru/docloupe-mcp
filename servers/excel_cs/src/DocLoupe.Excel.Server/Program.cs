@@ -48,8 +48,9 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
         Handle(() =>
         {
             if (scope?.Other is { Count: > 0 }) throw new NotSupportedException("Unsupported find scope fields");
-            var (pattern, isRegex) = query.Normalize();
-            return sessions.Find(session, scope?.Sheet, scope?.Target, pattern, isRegex, @in, case_sensitive, normalize, max_results);
+            var (pattern, isRegex, expectedValue) = query.Normalize();
+            return sessions.Find(session, scope?.Sheet, scope?.Target, pattern, isRegex, @in, case_sensitive, normalize,
+                max_results, expectedValue);
         }), new McpServerToolCreateOptions { Name = "excel_find" }),
     McpServerTool.Create((string session, int base_revision, SetValueRequest[] ops, string? sheet = null, bool dry_run = false) => Handle(() => sessions.Apply(session, base_revision, ops.SelectMany((op, index) => op.NormalizeMany(sheet).Select(cell => cell with { SourceIndex = index })).ToArray(), dry_run)), new McpServerToolCreateOptions { Name = "excel_apply" }),
     McpServerTool.Create((string session, string mode, string path, SaveAssertionRequest[]? @assert = null) => Handle(() => mode == "copy" ? sessions.Save(session, path, @assert?.Select(item => item.Normalize()).ToArray()) : throw new NotSupportedException("P2a save supports copy mode only")), new McpServerToolCreateOptions { Name = "excel_save" }),

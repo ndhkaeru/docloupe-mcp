@@ -249,16 +249,28 @@ public sealed class FindQueryRequest
     public string? Text { get; init; }
     [JsonPropertyName("regex")]
     public string? Regex { get; init; }
+    [JsonPropertyName("value")]
+    public JsonElement Value { get; init; }
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Other { get; init; }
 
-    public (string Pattern, bool IsRegex) Normalize()
+    public (string Pattern, bool IsRegex, DocLoupe.Excel.Verify.ValueAssertion? ExpectedValue) Normalize()
     {
-        if (Other is { Count: > 0 } || (Text is null) == (Regex is null))
-            throw new NotSupportedException("Only one of query.text or query.regex is supported");
+        if (Other is { Count: > 0 } || (Text is null ? 0 : 1) + (Regex is null ? 0 : 1) +
+            (Value.ValueKind == JsonValueKind.Undefined ? 0 : 1) != 1)
+            throw new NotSupportedException("Exactly one of query.text, query.regex or query.value is supported");
+        if (Value.ValueKind != JsonValueKind.Undefined)
+        {
+            var assertion = new SaveAssertionRequest
+            {
+                Target = "Sheet1!A1",
+                Expected = JsonSerializer.SerializeToElement(new Dictionary<string, JsonElement> { ["value"] = Value })
+            }.Normalize();
+            return ("", false, assertion);
+        }
         var pattern = Text ?? Regex!;
         if (pattern.Length is < 1 or > 512) throw new ArgumentException("Search pattern must contain 1..512 characters");
-        return (pattern, Regex is not null);
+        return (pattern, Regex is not null, null);
     }
 }
 

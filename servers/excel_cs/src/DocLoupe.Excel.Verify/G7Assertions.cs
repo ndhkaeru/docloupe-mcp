@@ -68,7 +68,7 @@ public static class G7Assertions
         return issues;
     }
 
-    private static bool ValueMatches(CellRead? actual, ValueAssertion assertion)
+    public static bool ValueMatches(CellRead? actual, ValueAssertion assertion)
     {
         if (actual?.Kind == "formula") return FormulaCacheMatches(actual, assertion);
         if (assertion.Kind == "blank") return actual is null || actual.Kind == "blank";

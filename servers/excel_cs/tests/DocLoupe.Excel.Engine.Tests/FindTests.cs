@@ -59,6 +59,48 @@ public sealed class FindTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void TypedValueSearchChecksKindsAndMissingCells(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-find-value-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            string[] Search(string target, string query, bool caseSensitive = false, string normalize = "nfc")
+            {
+                var (pattern, isRegex, expected) = JsonSerializer.Deserialize<FindQueryRequest>(query)!.Normalize();
+                var result = sessions.Find(id, "Sheet1", target, pattern, isRegex,
+                    caseSensitive: caseSensitive, normalize: normalize, expectedValue: expected);
+                return JsonSerializer.SerializeToElement(result).GetProperty("matches").EnumerateArray()
+                    .Select(match => match.GetProperty("addr").GetString()!).ToArray();
+            }
+
+            Assert.Equal(["Sheet1!B1"], Search("A1:C1", """{"value":42.0}"""));
+            Assert.Empty(Search("B1", """{"value":"42"}"""));
+            Assert.Equal(["Sheet1!C1"], Search("C1", """{"value":2}"""));
+            Assert.Equal(["Sheet1!H8"], Search("H8", """{"value":null}"""));
+            sessions.Apply(id, 0, [new SetValueOp("Sheet1", "E4", "text", "cafe\u0301"),
+                new SetValueOp("Sheet1", "E5", "boolean", "true"),
+                new SetValueOp("Sheet1", "E6", "error", "#N/A")]);
+            Assert.Equal(["Sheet1!E4"], Search("E4", """{"value":"CAFÉ"}"""));
+            Assert.Empty(Search("E4", """{"value":"CAFÉ"}""", caseSensitive: true));
+            Assert.Empty(Search("E4", """{"value":"café"}""", normalize: "none"));
+            Assert.Equal(["Sheet1!E5"], Search("E5", """{"value":true}"""));
+            Assert.Equal(["Sheet1!E6"], Search("E6", """{"value":{"error":"#N/A"}}"""));
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     [Fact]
     public void UnscopedSearchTraversesAllSheetsInWorkbookOrder()
     {
@@ -146,7 +188,9 @@ public sealed class FindTests
             foreach (var json in new[]
                 {
                     "{}", "{\"text\":\"x\",\"regex\":\"y\"}",
-                    "{\"text\":\"x\",\"style\":{}}", "{\"regex\":\"\"}"
+                    "{\"text\":\"x\",\"style\":{}}", "{\"regex\":\"\"}",
+                    "{\"value\":[]}", "{\"value\":{}}", "{\"value\":1e2147483648}",
+                    "{\"value\":42,\"regex\":\"x\"}"
                 })
                 Assert.ThrowsAny<Exception>(() => JsonSerializer.Deserialize<FindQueryRequest>(json)!.Normalize());
             Assert.ThrowsAny<Exception>(() => sessions.Find(id, "Sheet1", "A1:A501", "x", false));
