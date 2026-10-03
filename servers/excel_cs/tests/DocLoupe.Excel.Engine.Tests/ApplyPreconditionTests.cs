@@ -194,6 +194,61 @@ public sealed class ApplyPreconditionTests
     }
 
     [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("bom-crlf-standalone")]
+    [InlineData("opc-percent-case")]
+    [InlineData("new-shared-strings")]
+    [InlineData("nested-workbook")]
+    public void BulkPreconditionsCheckEveryCellBeforeTheBatch(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-bulk-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, variant + ".xlsx")))
+                .GetProperty("session").GetString()!;
+            var initial = new[]
+            {
+                """{"op":"set_value","target":"Sheet1!E5:F5","value":7,"expect":{"empty":true}}""",
+                """{"op":"fill","target":"Sheet1!E6:F6","series":{"start":1,"step":1},"expect":{"empty":true}}""",
+                """{"op":"set_values","target":"Sheet1!E7","values":[[3,4]],"expect":{"empty":true}}"""
+            }.SelectMany((json, index) => JsonSerializer.Deserialize<SetValueRequest>(json)!.NormalizeMany(null)
+                .Select(cell => cell with { SourceIndex = index })).ToArray();
+            Assert.Equal(6, initial.Length);
+            Assert.All(initial, operation => Assert.True(operation.Expect?.Empty));
+            sessions.Apply(id, 0, initial);
+
+            var invalid = new[]
+            {
+                """{"op":"set_value","target":"Sheet1!I9:J9","value":9,"expect":{"empty":true}}""",
+                """{"op":"fill","target":"Sheet1!B1:C1","series":{"start":5,"step":1},"expect":{"value":42}}"""
+            }.SelectMany((json, index) => JsonSerializer.Deserialize<SetValueRequest>(json)!.NormalizeMany(null)
+                .Select(cell => cell with { SourceIndex = index })).ToArray();
+            var failure = Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 1, invalid));
+            Assert.Equal(1, failure.Index);
+            Assert.Equal("Sheet1!C1", failure.Target);
+            Assert.Equal(1, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            Assert.Empty(JsonSerializer.SerializeToElement(sessions.Read(id, "Sheet1", ["I9", "J9"]))
+                .GetProperty("cells").EnumerateArray());
+
+            var clear = JsonSerializer.Deserialize<SetValueRequest>("""{"op":"clear","target":"Sheet1!B1:C1","expect":{"empty":false}}""")!
+                .NormalizeMany(null);
+            sessions.Apply(id, 1, clear);
+            var reset = JsonSerializer.Deserialize<SetValueRequest>("""{"op":"set_values","target":"Sheet1!B1:C1","values":[[11,12]],"expect":{"empty":true}}""")!
+                .NormalizeMany(null);
+            sessions.Apply(id, 2, reset);
+            var output = Path.Combine(directory, "verified.xlsx");
+            sessions.Save(id, output);
+            Assert.Equal(["11", "12"], P2aGates.ReadCells(output, "Sheet1", ["B1", "C1"])
+                .Select(cell => cell.Value!).ToArray());
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":null}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":""}}""")]
@@ -201,15 +256,14 @@ public sealed class ApplyPreconditionTests
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"empty":1}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"empty":true,"empty":false}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"empty":true,"display":"42"}}""")]
-    [InlineData("""{"op":"clear","target":"Sheet1!B1:C1","expect":{"empty":true}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":7}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":"=1+1","value":{}}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":"1+1","formula":"2+2"}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"value":42,"rich":"x"}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"value":1e2147483648}}""")]
-    [InlineData("""{"op":"set_value","target":"Sheet1!B1:C1","value":1,"expect":{"value":42}}""")]
-    [InlineData("""{"op":"set_values","target":"Sheet1!B1","values":[[1]],"expect":{"value":42}}""")]
-    [InlineData("""{"op":"fill","target":"Sheet1!B1:C1","value":1,"expect":{"value":42}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1:C1","value":1,"expect":{"rich":"x"}}""")]
+    [InlineData("""{"op":"set_values","target":"Sheet1!B1","values":[[1]],"expect":{"style":{}}}""")]
+    [InlineData("""{"op":"fill","target":"Sheet1!B1:C1","value":1,"expect":{"empty":null}}""")]
     public void UnsupportedPreconditionShapesFailClosed(string json)
     {
         var error = Record.Exception(() => Request(json));

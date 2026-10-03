@@ -152,8 +152,8 @@ public sealed class SetValueRequest
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)
     {
-        if (Expect.ValueKind != JsonValueKind.Undefined && (Op is not ("set_value" or "set_formula" or "clear") || Target.Contains(':')))
-            throw new NotSupportedException("expect requires a single-cell operation");
+        if (Expect.ValueKind != JsonValueKind.Undefined && Op is not ("set_value" or "set_values" or "set_formula" or "fill" or "clear"))
+            throw new NotSupportedException("expect requires a supported cell operation");
         var hasValue = Value.ValueKind != JsonValueKind.Undefined;
         var hasSeries = Series.ValueKind != JsonValueKind.Undefined;
         if (Op == "set_value" && hasSeries) throw new NotSupportedException("series requires fill");
@@ -178,12 +178,13 @@ public sealed class SetValueRequest
                         broadcast.Add(new SetValueRequest
                         {
                             Op = "clear", Sheet = sheet, Target = address, What = What,
-                            RemoveCells = RemoveCells, Other = Other
+                            RemoveCells = RemoveCells, Expect = Expect, Other = Other
                         }.Normalize(sheet));
                     else if (series is not null)
                     {
                         var index = (row - rangeStart.Row) * (rangeEnd.Column - rangeStart.Column + 1) + column - rangeStart.Column;
-                        broadcast.Add(new SetValueOp(sheet, address, "number", series.At(index), Operation: "fill"));
+                        broadcast.Add(new SetValueOp(sheet, address, "number", series.At(index), Operation: "fill",
+                            Expect: NormalizeExpect(sheet, address)));
                     }
                     else
                         broadcast.Add(new SetValueRequest
@@ -191,7 +192,7 @@ public sealed class SetValueRequest
                             Op = "set_value", Sheet = sheet, Target = address,
                             Value = Value, Values = Values, Series = Series, AsText = AsText, RichPolicy = RichPolicy,
                             Formula = Formula, FormulaKind = FormulaKind, Reference = Reference, Cache = Cache,
-                            What = What, RemoveCells = RemoveCells, Other = Other
+                            What = What, RemoveCells = RemoveCells, Expect = Expect, Other = Other
                         }.Normalize(sheet) with { Operation = Op });
                 }
             return broadcast.ToArray();
@@ -224,7 +225,7 @@ public sealed class SetValueRequest
                 {
                     Op = "set_value", Sheet = name,
                     Target = new CellAddress(first.Row + row, first.Column + column).ToString(),
-                    Value = rows[row][column]
+                    Value = rows[row][column], Expect = Expect
                 }.Normalize(name) with { Operation = "set_values" });
         return operations.ToArray();
     }
