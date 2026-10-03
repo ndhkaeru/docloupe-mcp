@@ -17,7 +17,11 @@ public sealed class WorkbookReaderTests
         {
             using (var archive = new ZipArchive(File.Create(path), ZipArchiveMode.Create))
             {
-                Write(archive, "[Content_Types].xml", "<ns0:Types xmlns:ns0='http://schemas.openxmlformats.org/package/2006/content-types'/>");
+                Write(archive, "[Content_Types].xml", "<ns0:Types xmlns:ns0='http://schemas.openxmlformats.org/package/2006/content-types'>" +
+                    "<ns0:Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>" +
+                    "<ns0:Default Extension='xml' ContentType='application/xml'/>" +
+                    "<ns0:Override PartName='/xl/workbook.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'/>" +
+                    "</ns0:Types>");
                 Write(archive, "_rels/.rels", "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId0' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='xl/workbook.xml'/></Relationships>");
                 Write(archive, "xl/workbook.xml", "<x:workbook xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><x:sheets><x:sheet name='S' sheetId='1' r:id='rId1'/></x:sheets></x:workbook>");
                 Write(archive, "xl/_rels/workbook.xml.rels", "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Target='worksheets/sheet1.xml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet'/></Relationships>");
@@ -367,6 +371,96 @@ public sealed class WorkbookReaderTests
         finally { File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData("missing-rels-type", "MISSING_CONTENT_TYPE")]
+    [InlineData("missing-media-type", "MISSING_CONTENT_TYPE")]
+    [InlineData("wrong-main-type", "WORKBOOK_CONTENT_TYPE_MISMATCH")]
+    [InlineData("wrong-rels-type", "RELATIONSHIP_CONTENT_TYPE_MISMATCH")]
+    [InlineData("duplicate-default", "DUPLICATE_CONTENT_TYPE")]
+    [InlineData("duplicate-override", "DUPLICATE_CONTENT_TYPE")]
+    [InlineData("wrong-root", "INVALID_CONTENT_TYPES_ROOT")]
+    [InlineData("percent-override", null)]
+    [InlineData("typed-media", null)]
+    public void ChecksEffectiveContentTypes(string variant, string? expectedCode)
+    {
+        var path = CreateWorkbook("");
+        try
+        {
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+            {
+                var entry = archive.GetEntry("[Content_Types].xml")!;
+                string manifest;
+                using (var reader = new StreamReader(entry.Open())) manifest = reader.ReadToEnd();
+                const string mediaType = "<Override PartName='/xl/media/icon.png' ContentType='image/png'/>";
+                const string mainType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
+                const string defaultRels = "<Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>";
+                manifest = variant switch
+                {
+                    "missing-rels-type" => manifest.Replace(defaultRels, "", StringComparison.Ordinal),
+                    "wrong-main-type" => manifest.Replace(mainType, "application/xml", StringComparison.Ordinal),
+                    "wrong-rels-type" => manifest.Replace("application/vnd.openxmlformats-package.relationships+xml",
+                        "application/xml", StringComparison.Ordinal),
+                    "duplicate-default" => manifest.Replace("</Types>", defaultRels + "</Types>", StringComparison.Ordinal),
+                    "duplicate-override" => manifest.Replace("</Types>",
+                        $"<Override PartName='/XL/WORKBOOK.XML' ContentType='{mainType}'/></Types>", StringComparison.Ordinal),
+                    "wrong-root" => manifest.Replace("xmlns='http://schemas.openxmlformats.org/package/2006/content-types'",
+                        "xmlns='urn:invalid'", StringComparison.Ordinal),
+                    "percent-override" => manifest.Replace("PartName='/xl/workbook.xml'",
+                        "PartName='/xl/work%62ook.xml'", StringComparison.Ordinal),
+                    "typed-media" => manifest.Replace("</Types>", mediaType + "</Types>", StringComparison.Ordinal),
+                    _ => manifest
+                };
+                if (variant is "missing-media-type" or "typed-media")
+                    Write(archive, "xl/media/icon.png", "image bytes");
+                entry.Delete();
+                Write(archive, "[Content_Types].xml", manifest);
+            }
+            var result = WorkbookReader.VerifyPartial(path);
+            if (expectedCode is null)
+                Assert.Equal("unverified", result.Status);
+            else
+            {
+                Assert.Equal("failed", result.Status);
+                Assert.Contains(result.PackageIssues, issue => issue.Code == expectedCode);
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(".xlsm", "application/vnd.ms-excel.sheet.macroEnabled.main+xml")]
+    [InlineData(".xltx", "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml")]
+    [InlineData(".xltm", "application/vnd.ms-excel.template.macroEnabled.main+xml")]
+    public void MatchesWorkbookContentTypeToFileExtension(string extension, string contentType)
+    {
+        var original = CreateWorkbook("");
+        var typed = Path.ChangeExtension(original, extension);
+        try
+        {
+            File.Move(original, typed);
+            using (var archive = ZipFile.Open(typed, ZipArchiveMode.Update))
+            {
+                var entry = archive.GetEntry("[Content_Types].xml")!;
+                string manifest;
+                using (var reader = new StreamReader(entry.Open())) manifest = reader.ReadToEnd();
+                manifest = manifest.Replace("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+                    contentType, StringComparison.Ordinal);
+                entry.Delete();
+                Write(archive, "[Content_Types].xml", manifest);
+            }
+            Assert.Equal("unverified", WorkbookReader.VerifyPartial(typed).Status);
+            File.Copy(typed, original);
+            var mismatched = WorkbookReader.VerifyPartial(original);
+            Assert.Equal("failed", mismatched.Status);
+            Assert.Contains(mismatched.PackageIssues, issue => issue.Code == "WORKBOOK_CONTENT_TYPE_MISMATCH");
+        }
+        finally
+        {
+            if (File.Exists(original)) File.Delete(original);
+            if (File.Exists(typed)) File.Delete(typed);
+        }
+    }
+
     private static string CreateWorkbook(string sheetDataContent, string workbookPart = "xl/workbook.xml",
         string? workbookTarget = null, string sheetTarget = "worksheets/sheet1.xml",
         string sheetPart = "xl/worksheets/sheet1.xml", bool includeRoot = true,
@@ -376,7 +470,11 @@ public sealed class WorkbookReaderTests
     {
         var path = Path.Combine(AppContext.BaseDirectory, $"read-probe-{Guid.NewGuid():N}.xlsx");
         using var archive = new ZipArchive(File.Create(path), ZipArchiveMode.Create);
-        Write(archive, "[Content_Types].xml", "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'/>");
+        Write(archive, "[Content_Types].xml", "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>" +
+            "<Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>" +
+            "<Default Extension='xml' ContentType='application/xml'/>" +
+            $"<Override PartName='/{workbookPart}' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'/>" +
+            "</Types>");
         if (includeRoot)
             Write(archive, "_rels/.rels", $"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId0' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/{rootRelationshipType}' Target='{workbookTarget ?? workbookPart}'/></Relationships>");
         var secondSheet = secondSheetContent is null ? "" : "<x:sheet name='Second' sheetId='2' r:id='rId3'/>";

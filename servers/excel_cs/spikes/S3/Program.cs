@@ -42,6 +42,24 @@ try
         invalidZipResult.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("package_issues")[0]
             .GetProperty("Code").GetString() != "INVALID_PACKAGE")
         throw new InvalidOperationException("Invalid ZIP was not reported as a package error: " + invalidZipResult.StructuredContent?.GetRawText());
+    var wrongType = Path.Combine(directory, "wrong-type.xlsx");
+    File.Copy(source, wrongType);
+    using (var archive = ZipFile.Open(wrongType, ZipArchiveMode.Update))
+    {
+        var entry = archive.GetEntry("[Content_Types].xml")!;
+        string contentTypes;
+        using (var reader = new StreamReader(entry.Open())) contentTypes = reader.ReadToEnd();
+        entry.Delete();
+        using var writer = new StreamWriter(archive.CreateEntry("[Content_Types].xml").Open());
+        writer.Write(contentTypes.Replace("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+            "application/xml", StringComparison.Ordinal));
+    }
+    var wrongTypeResult = await client.CallToolAsync("excel_verify", new Dictionary<string, object?> { ["after_path"] = wrongType });
+    if (wrongTypeResult.IsError != true || wrongTypeResult.StructuredContent is null ||
+        wrongTypeResult.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PACKAGE_INVALID" ||
+        !wrongTypeResult.StructuredContent.Value.GetProperty("error").GetProperty("details").GetProperty("package_issues")
+            .EnumerateArray().Any(issue => issue.GetProperty("Code").GetString() == "WORKBOOK_CONTENT_TYPE_MISMATCH"))
+        throw new InvalidOperationException("Wrong workbook content type was accepted: " + wrongTypeResult.StructuredContent?.GetRawText());
     var peek = await client.CallToolAsync("excel_peek", new Dictionary<string, object?>
     {
         ["path"] = source, ["detail"] = "preview", ["sheet"] = "Sheet1", ["max_rows"] = 3, ["max_cols"] = 4

@@ -63,11 +63,12 @@ public static class WorkbookReader
                 packageIssues.Add(new MarkupIssue("MISSING_PART", required));
         }
 
+        string? workbookPart = null;
         if (FindEntry(archive, "_rels/.rels") is not null)
         {
             try
             {
-                var workbookPart = LocateWorkbookPart(archive);
+                workbookPart = LocateWorkbookPart(archive);
                 var workbookEntry = FindEntry(archive, workbookPart);
                 var relationshipsEntry = FindEntry(archive, RelationshipPart(workbookPart));
                 if (workbookEntry is null)
@@ -107,19 +108,7 @@ public static class WorkbookReader
         }
 
         if (FindEntry(archive, "[Content_Types].xml") is { } types)
-        {
-            try
-            {
-                using var reader = CreateReader(types);
-                reader.MoveToContent();
-                if (reader.LocalName != "Types" || reader.NamespaceURI != ContentTypeNamespace)
-                    packageIssues.Add(new MarkupIssue("INVALID_CONTENT_TYPES_ROOT", types.FullName));
-            }
-            catch (XmlException exception)
-            {
-                packageIssues.Add(new MarkupIssue("INVALID_CONTENT_TYPES_XML", exception.Message));
-            }
-        }
+            VerifyContentTypes(archive, types, workbookPart, Path.GetExtension(path), packageIssues);
 
         var relationshipIds = VerifyRelationships(archive, packageIssues);
         VerifyXmlRelationshipIds(archive, relationshipIds, packageIssues);
@@ -134,6 +123,98 @@ public static class WorkbookReader
 
         var status = packageIssues.Count + markupIssues.Count > 0 ? "failed" : "unverified";
         return new VerificationSummary(status, packageIssues, markupIssues, ["G1_REMAINING", "G2", "G4", "G5", "G6", "G7"]);
+    }
+
+    private static void VerifyContentTypes(ZipArchive archive, ZipArchiveEntry manifest, string? workbookPart,
+        string fileExtension, List<MarkupIssue> issues)
+    {
+        var defaults = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var reader = CreateReader(manifest);
+            reader.MoveToContent();
+            if (reader.LocalName != "Types" || reader.NamespaceURI != ContentTypeNamespace)
+            {
+                issues.Add(new MarkupIssue("INVALID_CONTENT_TYPES_ROOT", manifest.FullName));
+                return;
+            }
+            while (reader.Read())
+            {
+                if (reader.NodeType != XmlNodeType.Element || reader.Depth != 1) continue;
+                if (reader.NamespaceURI != ContentTypeNamespace)
+                {
+                    issues.Add(new MarkupIssue("INVALID_CONTENT_TYPE", reader.Name));
+                    continue;
+                }
+                var contentType = reader.GetAttribute("ContentType");
+                if (string.IsNullOrWhiteSpace(contentType))
+                {
+                    issues.Add(new MarkupIssue("INVALID_CONTENT_TYPE", reader.Name));
+                    continue;
+                }
+                if (reader.LocalName == "Default")
+                {
+                    var extension = reader.GetAttribute("Extension");
+                    if (string.IsNullOrWhiteSpace(extension) || extension.Contains('.'))
+                        issues.Add(new MarkupIssue("INVALID_CONTENT_TYPE", "Default Extension"));
+                    else if (!defaults.TryAdd(extension, contentType))
+                        issues.Add(new MarkupIssue("DUPLICATE_CONTENT_TYPE", $"Default: {extension}"));
+                }
+                else if (reader.LocalName == "Override")
+                {
+                    var name = reader.GetAttribute("PartName");
+                    if (name is null || !name.StartsWith('/') || name.Length == 1)
+                    {
+                        issues.Add(new MarkupIssue("INVALID_CONTENT_TYPE", "Override PartName"));
+                        continue;
+                    }
+                    try
+                    {
+                        var part = ResolvePartPath("", name);
+                        if (!overrides.TryAdd(part, contentType))
+                            issues.Add(new MarkupIssue("DUPLICATE_CONTENT_TYPE", $"Override: {part}"));
+                    }
+                    catch (InvalidDataException exception)
+                    {
+                        issues.Add(new MarkupIssue("INVALID_CONTENT_TYPE", exception.Message));
+                    }
+                }
+                else issues.Add(new MarkupIssue("INVALID_CONTENT_TYPE", reader.Name));
+            }
+        }
+        catch (XmlException exception)
+        {
+            issues.Add(new MarkupIssue("INVALID_CONTENT_TYPES_XML", exception.Message));
+            return;
+        }
+
+        string? EffectiveType(string part)
+        {
+            if (overrides.TryGetValue(part, out var type)) return type;
+            var extension = Path.GetExtension(part).TrimStart('.');
+            return defaults.GetValueOrDefault(extension);
+        }
+        foreach (var entry in archive.Entries.Where(part => part.FullName != manifest.FullName && !part.FullName.EndsWith('/')))
+        {
+            var contentType = EffectiveType(entry.FullName);
+            if (contentType is null)
+                issues.Add(new MarkupIssue("MISSING_CONTENT_TYPE", entry.FullName));
+            else if (entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)
+                && contentType != "application/vnd.openxmlformats-package.relationships+xml")
+                issues.Add(new MarkupIssue("RELATIONSHIP_CONTENT_TYPE_MISMATCH", entry.FullName));
+        }
+        if (workbookPart is null || FindEntry(archive, workbookPart) is null) return;
+        var expected = fileExtension.ToLowerInvariant() switch
+        {
+            ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+            ".xlsm" => "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+            ".xltx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+            ".xltm" => "application/vnd.ms-excel.template.macroEnabled.main+xml",
+            _ => null
+        };
+        if (expected is not null && EffectiveType(workbookPart) != expected)
+            issues.Add(new MarkupIssue("WORKBOOK_CONTENT_TYPE_MISMATCH", workbookPart));
     }
 
     private static Dictionary<string, HashSet<string>> VerifyRelationships(ZipArchive archive, List<MarkupIssue> issues)
