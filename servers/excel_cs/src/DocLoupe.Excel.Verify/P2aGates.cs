@@ -143,6 +143,18 @@ public static partial class P2aGates
 
     public static IReadOnlyList<GateIssue> CheckTouchedCells(string source, string written, IEnumerable<CellExpectation> expected)
     {
+        static bool GeneratedNamespace(XmlAttribute attribute, XmlElement cell, XmlElement? originalScope)
+        {
+            if (attribute.NamespaceURI != "http://www.w3.org/2000/xmlns/" || originalScope is null)
+                return false;
+            var prefix = attribute.Name == "xmlns" ? "" : attribute.LocalName;
+            if (originalScope.GetNamespaceOfPrefix(prefix) != attribute.Value) return false;
+            return cell.GetElementsByTagName("*").OfType<XmlElement>().Prepend(cell).Any(element =>
+                element.Prefix == prefix && element.NamespaceURI == attribute.Value ||
+                prefix.Length > 0 && element.Attributes.OfType<XmlAttribute>().Any(item =>
+                    item.Prefix == prefix && item.NamespaceURI == attribute.Value));
+        }
+
         var issues = new List<GateIssue>();
         using var oldZip = ZipFile.OpenRead(source);
         using var newZip = ZipFile.OpenRead(written);
@@ -180,8 +192,15 @@ public static partial class P2aGates
                         cache.Length != 1 || cache[0].InnerText != expectedCache.Value)
                         issues.Add(new("G5", "FORMULA_CACHE_MISMATCH", $"{group.Key}!{cell.Address}"));
                 }
+                if (after.ChildNodes.OfType<XmlElement>().Any(child =>
+                    child.NamespaceURI != Main || child.LocalName is not ("f" or "v" or "is")))
+                    issues.Add(new("G5", "CELL_UNMODELED_CHILD", $"{group.Key}!{cell.Address}"));
                 if (before is null)
                 {
+                    if (after.Attributes.OfType<XmlAttribute>().Any(attribute =>
+                        (attribute.NamespaceURI.Length != 0 || attribute.LocalName is not ("r" or "t")) &&
+                        !GeneratedNamespace(attribute, after, after.ParentNode as XmlElement)))
+                        issues.Add(new("G5", "CELL_ATTRIBUTE_CHANGED", $"{group.Key}!{cell.Address}"));
                     if (cell.AllowMissing) issues.Add(new("G5", "UNEXPECTED_CELL_CREATED", $"{group.Key}!{cell.Address}"));
                     else if (cell.KeepCache) issues.Add(new("G5", "FORMULA_CACHE_SOURCE_MISSING", $"{group.Key}!{cell.Address}"));
                     continue;
@@ -194,15 +213,17 @@ public static partial class P2aGates
                     if (before.GetAttribute("t") != after.GetAttribute("t") || !Cache(before).SequenceEqual(Cache(after)))
                         issues.Add(new("G5", "FORMULA_CACHE_CHANGED", $"{group.Key}!{cell.Address}"));
                 }
-                static string[] UnchangedAttributes(XmlElement element) => element.Attributes.OfType<XmlAttribute>()
-                    .Where(attribute => attribute.NamespaceURI != "http://www.w3.org/2000/xmlns/"
-                        && (attribute.NamespaceURI != "" || attribute.LocalName != "t"))
-                    .Select(attribute => attribute.NamespaceURI + ":" + attribute.LocalName + "=" + attribute.Value)
-                    .OrderBy(attribute => attribute, StringComparer.Ordinal).ToArray();
-                if (!UnchangedAttributes(before).SequenceEqual(UnchangedAttributes(after)))
+                static string[] UnchangedAttributes(XmlElement element, XmlElement? source) =>
+                    element.Attributes.OfType<XmlAttribute>()
+                        .Where(attribute => (attribute.NamespaceURI != "" || attribute.LocalName != "t") &&
+                            (source is null || source.HasAttribute(attribute.Name) ||
+                                !GeneratedNamespace(attribute, element, source)))
+                        .Select(attribute => attribute.NamespaceURI + ":" + attribute.LocalName + "=" + attribute.Value)
+                        .OrderBy(attribute => attribute, StringComparer.Ordinal).ToArray();
+                if (!UnchangedAttributes(before, null).SequenceEqual(UnchangedAttributes(after, before)))
                     issues.Add(new("G5", "CELL_ATTRIBUTE_CHANGED", $"{group.Key}!{cell.Address}"));
-                if (before.ChildNodes.OfType<XmlElement>().Concat(after.ChildNodes.OfType<XmlElement>())
-                    .Any(child => child.NamespaceURI != Main || child.LocalName is not ("f" or "v" or "is")))
+                if (before.ChildNodes.OfType<XmlElement>().Any(child =>
+                    child.NamespaceURI != Main || child.LocalName is not ("f" or "v" or "is")))
                     issues.Add(new("G5", "CELL_UNMODELED_CHILD", $"{group.Key}!{cell.Address}"));
             }
         }

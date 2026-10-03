@@ -77,6 +77,43 @@ public sealed class CorruptionGateTests
     }
 
     [Fact]
+    public void G5RejectsUnrequestedLocalNamespaceOnEditedCell()
+    {
+        using var fixture = new Fixture();
+        var broken = fixture.Corrupt("xl/worksheets/sheet1.xml", xml => xml.Replace(
+            "<c r=\"B1\" t=\"n\">", "<c r=\"B1\" t=\"n\" xmlns:foreign=\"urn:test\">", StringComparison.Ordinal));
+        Assert.Empty(P2aGates.CheckIntent(broken, [new CellExpectation("Sheet1", "B1", "number", "42")]));
+        Assert.Contains(P2aGates.CheckTouchedCells(fixture.Source, broken,
+            [new CellExpectation("Sheet1", "B1", "number", "42")]),
+            issue => issue.Gate == "G5" && issue.Code == "CELL_ATTRIBUTE_CHANGED");
+    }
+
+    [Theory]
+    [InlineData("style")]
+    [InlineData("child")]
+    [InlineData("namespace")]
+    public void G5RejectsUnmodeledContentInNewCell(string corruption)
+    {
+        using var fixture = new Fixture();
+        var edited = Path.Combine(fixture.Directory, "edited.xlsx");
+        using (var store = new PackageStore(fixture.Source))
+        {
+            SetValueEngine.Apply(store, [new SetValueOp("Sheet1", "B2", "number", "100")]);
+            store.Save(edited);
+        }
+        var broken = fixture.Corrupt("xl/worksheets/sheet1.xml", xml => corruption switch
+        {
+            "style" => xml.Replace("<c r=\"B2\"", "<c r=\"B2\" s=\"5\"", StringComparison.Ordinal),
+            "namespace" => xml.Replace("<c r=\"B2\"", "<c r=\"B2\" xmlns:foreign=\"urn:test\"", StringComparison.Ordinal),
+            _ => Regex.Replace(xml, "(<c r=\"B2\"[^>]*>)", "$1<foreign xmlns=\"urn:test\"/>")
+        }, edited);
+        Assert.Empty(P2aGates.CheckIntent(broken, [new CellExpectation("Sheet1", "B2", "number", "100")]));
+        Assert.Contains(P2aGates.CheckTouchedCells(fixture.Source, broken,
+            [new CellExpectation("Sheet1", "B2", "number", "100")]),
+            issue => issue.Gate == "G5" && issue.Code is "CELL_ATTRIBUTE_CHANGED" or "CELL_UNMODELED_CHILD");
+    }
+
+    [Fact]
     public void G5RejectsUndeclaredBytesOutsideDeclaredEdit()
     {
         using var fixture = new Fixture();

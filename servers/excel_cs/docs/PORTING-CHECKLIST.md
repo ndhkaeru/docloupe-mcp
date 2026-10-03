@@ -29,6 +29,7 @@
 - [x] 2026-10-03: G5 độc lập so ngữ nghĩa các part liên quan và chặn khai báo span trùm cell không có trong intent; test đối kháng B1/C1 cùng test metadata âm. Mã lỗi MCP có code riêng cho revision/merge/formula text, test local-corpus thiếu biến hiện `Skipped` thay vì `Passed`; XML UTF-8 thiếu encoding và vị trí chèn calcPr đã được sửa.
 - [x] 2026-10-03: ma trận `set_value` local hiển thị riêng 8 fixture và kiểm G1/G2/G3/G4/G5 theo từng file. Windows và Docker Linux đạt **580/580** test sau khi chặn span giả bao metadata, thay đổi lexical trong start tag và whitespace ngoài intent; schema-order và MCP stdio smoke qua cả hai OS. Không khẳng định macOS hoặc CI từ xa đã chạy.
 - [x] 2026-10-03: G5 kiểm độc lập cho phép xóa đúng thẻ calcChain relationship/override rỗng kể cả khi dùng cặp thẻ đóng tường minh, không mở rộng sang nội dung khác. Test đỏ trước khi sửa; sau sửa **581/581** trên Windows và Docker Linux với corpus local. Chưa chạy macOS hoặc CI từ xa.
+- [x] 2026-10-03: G5 chặn thuộc tính/style, phần tử lạ và namespace cục bộ không được yêu cầu trong ô vừa tạo; vẫn chấp nhận khai báo namespace thực sự cần cho serializer trên ô mới/cũ. Ca style/child được xác nhận đỏ trước khi sửa. **585/585** test trên Windows và Docker Linux với corpus local; chưa chạy macOS/CI từ xa.
 
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 
