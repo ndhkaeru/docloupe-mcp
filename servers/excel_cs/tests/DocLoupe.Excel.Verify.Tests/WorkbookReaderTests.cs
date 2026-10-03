@@ -480,6 +480,8 @@ public sealed class WorkbookReaderTests
             {
                 Assert.Equal("failed", result.Status);
                 Assert.Contains(result.PackageIssues, issue => issue.Code == expectedCode);
+                var failure = Assert.Throws<InvalidDataException>(() => WorkbookReader.Peek(path));
+                Assert.Contains(expectedCode, failure.Message);
             }
         }
         finally { File.Delete(path); }
@@ -496,6 +498,8 @@ public sealed class WorkbookReaderTests
             var result = WorkbookReader.VerifyPartial(path);
             Assert.Equal("failed", result.Status);
             Assert.Contains(result.PackageIssues, issue => issue.Code == "LIMIT_PART_COUNT");
+            var failure = Assert.Throws<InvalidDataException>(() => WorkbookReader.Peek(path));
+            Assert.Contains("LIMIT_PART_COUNT", failure.Message);
         }
         finally { File.Delete(path); }
     }

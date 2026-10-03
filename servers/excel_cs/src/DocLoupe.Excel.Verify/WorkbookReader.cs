@@ -26,6 +26,10 @@ public static class WorkbookReader
         if (maxRows is < 1 or > 1048576) throw new ArgumentOutOfRangeException(nameof(maxRows));
         if (maxColumns is < 1 or > 16384) throw new ArgumentOutOfRangeException(nameof(maxColumns));
         using var archive = ZipFile.OpenRead(path);
+        var limitIssues = new List<MarkupIssue>();
+        if (!CheckZipLimits(archive, limitIssues))
+            throw new InvalidDataException("ZIP preflight failed: " + string.Join(", ",
+                limitIssues.Select(issue => issue.Code + ": " + issue.Detail)));
         if (archive.Entries.GroupBy(entry => entry.FullName, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
             throw new InvalidDataException("Duplicate OPC part");
         var workbookPart = LocateWorkbookPart(archive);
