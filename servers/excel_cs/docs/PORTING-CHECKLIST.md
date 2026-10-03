@@ -36,6 +36,8 @@
 - [x] 2026-10-03: G5 kiểm cả nút không mô hình hóa trong `<si>` vừa thêm (comment và processing instruction) thay vì chỉ xét phần tử `<t>`; ca giả mạo span/giá trị hợp lệ đã đỏ trước khi sửa. **594/594** test và schema-order đạt trên Windows và Docker Linux với corpus local; chưa chạy CI remote/macOS.
 - [x] 2026-10-03: G5 không còn loại nhầm comment/CDATA chỉ chứa whitespace khỏi phép so ngữ nghĩa metadata: chỉ chuẩn hóa text/whitespace thuần. Hồi quy chèn nút ngoài `<si>` mới với span được khai báo đã đỏ trước khi sửa; **596/596** test và schema-order đạt trên Windows và Docker Linux với corpus local; chưa chạy CI remote/macOS.
 
+- [x] 2026-10-03: [FixtureMatrix](../tools/FixtureMatrix/README.md) xuất JSON từng fixture/từng gate G1–G5; CI cấu hình artifact cho sáu fixture tổng hợp. Windows và Docker Linux: 6/6 synthetic pass; cùng corpus local: 13/14 pass, 01 có G2 gap, 0 failed. Không coi G2 gap là pass, G6/G7/Excel oracle không nằm trong báo cáo, CI remote chưa chạy.
+
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 
 - [x] `excel_status` (revision, dirty, thay đổi source, busy, ledger 20 mục) và `excel_undo` bằng phát lại những revision cell-content còn giữ; copy-save **không** đánh dấu phiên là đã lưu, `save_as`/`overwrite` cập nhật `saved_revision` nhưng vẫn cho undo xuống dưới nó bằng baseline riêng.
@@ -85,7 +87,7 @@
 - [x] 2026-10-03: tạo mới/copy template cho `.xlsx`/`.xlsm`/`.xltx`/`.xltm` với content type workbook tương ứng, không sinh VBA mặc định, từ chối đổi định dạng khi copy; test kiểm save lần đầu trên từng loại. **543/543** test Windows (gồm corpus local) và Docker Linux (không có corpus local), schema-order và MCP stdio smoke qua hai OS.
 - [ ] Chạy CI trên **cả bốn runner** cho commit mới (workflow đã cấu hình, nhưng các commit local này chưa push); macOS local được hoãn theo yêu cầu, không đánh dấu đã kiểm chứng.
 - [ ] S3: đo **model thực nhận** `structuredContent` hay `TextContent` trên từng client đích; smoke SDK chỉ chứng minh giao thức tới client, không chứng minh forwarding vào model.
-- [ ] Ma trận `set_value` với corpus cục bộ `D:\data-test\excel-preservation-fixtures\sources` và bộ tổng hợp: **8/8 test `LocalFixtureTests` qua trên Windows** (gồm 8 nguồn, set/clear/error/fill, chữ ký và reader `used_range`); vẫn thiếu báo cáo pass/fail theo từng fixture/gate trước khi đóng tiêu chí release. Ghi rõ 01 lỗi schema baseline, 02/05 Excel từ chối ngay file gốc ([S2b](../spikes/S2b/REPORT.md)).
+- [ ] Ma trận `set_value` với corpus cục bộ `D:\data-test\excel-preservation-fixtures\sources` và bộ tổng hợp: [công cụ JSON](../tools/FixtureMatrix/README.md) báo riêng G1–G5 cho từng fixture; **13/14 pass, 01 có G2 gap** do schema baseline. Tám fixture local đều chạy (kể cả source 05 có chữ ký, bị G6 chặn khi save); 02/05 Excel từ chối ngay file gốc ([S2b](../spikes/S2b/REPORT.md)). Chưa chạy CI remote/có oracle Excel cho report này; không coi gap là pass hoặc đóng tiêu chí release.
 - [ ] Thử release trên Windows/Linux và sau đó macOS/clean-machine trước khi tuyên bố khả năng thay Python trên mọi OS.
 
 Chạy lại từ root repo (test local fixture là tuỳ chọn, không được thêm các file này vào commit):
