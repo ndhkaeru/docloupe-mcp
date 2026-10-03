@@ -500,6 +500,37 @@ public sealed class WorkbookReaderTests
         finally { File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData("<x:row r='1'><x:c r='A2'/></x:row>", "CELL_ROW_MISMATCH")]
+    [InlineData("<x:row r='1'/><x:row r='1'/>", "DUPLICATE_ROW")]
+    [InlineData("<x:row r='1'><x:c r='A1'/><x:c r='A1'/></x:row>", "DUPLICATE_CELL_REFERENCE")]
+    [InlineData("<x:row r='1048577'><x:c r='A1'/></x:row>", "INVALID_ROW_REFERENCE")]
+    [InlineData("<x:row r='1'><x:c r='XFE1'/></x:row>", "INVALID_CELL_REFERENCE")]
+    public void RejectsWorksheetCoordinateCorruption(string content, string code)
+    {
+        var path = CreateWorkbook("<x:row r='1'><x:c r='A1'/></x:row>", secondSheetContent: content);
+        try
+        {
+            var report = WorkbookReader.VerifyPartial(path);
+            Assert.Equal("failed", report.Status);
+            Assert.Contains(report.PackageIssues, issue => issue.Code == code && issue.Detail.Contains("sheet2.xml"));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void MissingOptionalCellAndRowReferencesAreNotReportedAsInvalid()
+    {
+        var path = CreateWorkbook("<x:row><x:c/></x:row>");
+        try
+        {
+            var report = WorkbookReader.VerifyPartial(path);
+            Assert.Equal("unverified", report.Status);
+            Assert.Empty(report.PackageIssues);
+        }
+        finally { File.Delete(path); }
+    }
+
     private static string CreateWorkbook(string sheetDataContent, string workbookPart = "xl/workbook.xml",
         string? workbookTarget = null, string sheetTarget = "worksheets/sheet1.xml",
         string sheetPart = "xl/worksheets/sheet1.xml", bool includeRoot = true,

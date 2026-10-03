@@ -86,8 +86,16 @@ public static class WorkbookReader
                         var sheets = ReadSheets(archive, workbookPart, relationships);
                         foreach (var sheet in sheets)
                         {
-                            if (FindEntry(archive, sheet.Part) is null)
+                            if (FindEntry(archive, sheet.Part) is not { } sheetEntry)
+                            {
                                 packageIssues.Add(new MarkupIssue("MISSING_PART", sheet.Part));
+                                continue;
+                            }
+                            try { VerifyWorksheetCoordinates(sheetEntry, packageIssues); }
+                            catch (XmlException exception)
+                            {
+                                packageIssues.Add(new MarkupIssue("INVALID_WORKSHEET_XML", $"{sheet.Part}: {exception.Message}"));
+                            }
                         }
                     }
                     catch (XmlException exception)
@@ -170,6 +178,65 @@ public static class WorkbookReader
             return value;
         issues.Add(new MarkupIssue("INVALID_LIMIT_CONFIGURATION", name));
         return null;
+    }
+
+    private static void VerifyWorksheetCoordinates(ZipArchiveEntry part, List<MarkupIssue> issues)
+    {
+        using var reader = CreateReader(part);
+        reader.MoveToContent();
+        if (reader.LocalName != "worksheet" || reader.NamespaceURI != SpreadsheetNamespace)
+        {
+            issues.Add(new MarkupIssue("INVALID_WORKSHEET_ROOT", part.FullName));
+            return;
+        }
+        var rows = new HashSet<int>();
+        var cells = new HashSet<string>(StringComparer.Ordinal);
+        var sheetDataDepth = -1;
+        var rowDepth = -1;
+        int? currentRow = null;
+        while (reader.Read())
+        {
+            if (reader.NodeType == XmlNodeType.EndElement)
+            {
+                if (reader.Depth == rowDepth) { rowDepth = -1; currentRow = null; }
+                if (reader.Depth == sheetDataDepth) sheetDataDepth = -1;
+                continue;
+            }
+            if (reader.NodeType != XmlNodeType.Element || reader.NamespaceURI != SpreadsheetNamespace) continue;
+            if (reader.LocalName == "sheetData" && reader.Depth == 1)
+            {
+                sheetDataDepth = reader.IsEmptyElement ? -1 : reader.Depth;
+                continue;
+            }
+            if (reader.LocalName == "row" && sheetDataDepth >= 0 && reader.Depth == sheetDataDepth + 1)
+            {
+                rowDepth = reader.IsEmptyElement ? -1 : reader.Depth;
+                currentRow = null;
+                if (reader.GetAttribute("r") is { } rowReference)
+                {
+                    if (!int.TryParse(rowReference, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedRow)
+                        || parsedRow is < 1 or > 1048576)
+                        issues.Add(new MarkupIssue("INVALID_ROW_REFERENCE", $"{part.FullName}: {rowReference}"));
+                    else if (!rows.Add(parsedRow))
+                        issues.Add(new MarkupIssue("DUPLICATE_ROW", $"{part.FullName}: {rowReference}"));
+                    else currentRow = parsedRow;
+                }
+                continue;
+            }
+            if (reader.LocalName != "c" || rowDepth < 0 || reader.Depth != rowDepth + 1
+                || reader.GetAttribute("r") is not { } address) continue;
+            CellAddress coordinate;
+            try { coordinate = CellAddress.Parse(address); }
+            catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentException)
+            {
+                issues.Add(new MarkupIssue("INVALID_CELL_REFERENCE", $"{part.FullName}: {address}"));
+                continue;
+            }
+            if (currentRow is { } row && coordinate.Row != row)
+                issues.Add(new MarkupIssue("CELL_ROW_MISMATCH", $"{part.FullName}: {address} in row {row}"));
+            if (!cells.Add(coordinate.ToString()))
+                issues.Add(new MarkupIssue("DUPLICATE_CELL_REFERENCE", $"{part.FullName}: {address}"));
+        }
     }
 
     private static void VerifyContentTypes(ZipArchive archive, ZipArchiveEntry manifest, string? workbookPart,

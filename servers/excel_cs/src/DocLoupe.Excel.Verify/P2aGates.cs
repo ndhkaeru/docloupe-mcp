@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO.Compression;
 using System.Text.Json.Serialization;
 using System.Xml;
@@ -230,9 +231,17 @@ public static class P2aGates
                 var type = item.GetAttribute("t");
                 var scalar = item.GetElementsByTagName("v", Main).OfType<XmlElement>().FirstOrDefault()?.InnerText;
                 var formula = item.GetElementsByTagName("f", Main).OfType<XmlElement>().FirstOrDefault()?.InnerText;
+                int? sharedIndex = null;
+                if (type == "s")
+                {
+                    if (!int.TryParse(scalar, NumberStyles.None, CultureInfo.InvariantCulture, out var index)
+                        || index < 0 || index >= shared.Length)
+                        throw new InvalidDataException($"Invalid shared string index at {sheetName}!{item.GetAttribute("r")}: {scalar}");
+                    sharedIndex = index;
+                }
                 var value = type switch
                 {
-                    "s" when int.TryParse(scalar, out var index) && index >= 0 && index < shared.Length => shared[index],
+                    "s" => shared[sharedIndex!.Value],
                     "inlineStr" => item.ChildNodes.OfType<XmlElement>().FirstOrDefault(child => child.LocalName == "is" && child.NamespaceURI == Main) is { } inline ? TextValue(inline) : null,
                     "b" => scalar == "1" ? "true" : "false",
                     "e" => scalar,
@@ -243,8 +252,7 @@ public static class P2aGates
                     "s" => "text", "inlineStr" => "inline", "b" => "boolean", "e" => "error",
                     _ when value is null => "blank", _ => "number"
                 }, value, formula, formula is null ? null : type, formula is null ? null : scalar,
-                    item.OuterXml, type == "s" && int.TryParse(scalar, out var sharedIndex) &&
-                    sharedIndex >= 0 && sharedIndex < sharedItems.Length ? sharedItems[sharedIndex].OuterXml : null);
+                    item.OuterXml, sharedIndex is { } indexValue ? sharedItems[indexValue].OuterXml : null);
             }).ToArray();
     }
 

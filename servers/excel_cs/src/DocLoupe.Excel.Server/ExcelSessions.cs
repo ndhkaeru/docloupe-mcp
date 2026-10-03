@@ -95,7 +95,7 @@ public sealed class ExcelSessions : IDisposable
         if (summary.Status == "failed") return new ReadOnlyVerification(full, summary, null);
         var schema = DetachedValidator.CheckPackage(full);
         IReadOnlyList<GateIssue>? assertionIssues = assertions is { Count: > 0 } && schema.Issues.Count == 0
-            ? G7Assertions.Check(full, assertions) : null;
+            ? CheckReadOnlyAssertions(full, assertions) : null;
         var status = schema.Issues.Count + (assertionIssues?.Count ?? 0) > 0 ? "failed" : summary.Status;
         return new ReadOnlyVerification(full, summary with { Status = status }, schema, assertionIssues);
     }
@@ -112,9 +112,19 @@ public sealed class ExcelSessions : IDisposable
         var comparison = PackageComparator.Compare(before.Path, after.Path, maxDifferences);
         var schemaDelta = DetachedValidator.ComparePackages(before.Path, after.Path);
         IReadOnlyList<GateIssue>? assertionIssues = assertions is { Count: > 0 }
-            ? G7Assertions.Check(after.Path, assertions, before.Path) : null;
+            ? CheckReadOnlyAssertions(after.Path, assertions, before.Path) : null;
         return new ReadOnlyComparison(before, after, comparison, schemaDelta, assertionIssues,
             comparison.HasDifferences || schemaDelta.Issues.Count + (assertionIssues?.Count ?? 0) > 0 ? "failed" : "unverified");
+    }
+
+    private static IReadOnlyList<GateIssue> CheckReadOnlyAssertions(string path,
+        IReadOnlyList<ValueAssertion> assertions, string? source = null)
+    {
+        try { return G7Assertions.Check(path, assertions, source); }
+        catch (InvalidDataException exception)
+        {
+            return [new GateIssue("G7", "ASSERT_READ_ERROR", exception.Message)];
+        }
     }
 
     public object Status(string? id = null)

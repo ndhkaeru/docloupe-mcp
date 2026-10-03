@@ -92,6 +92,40 @@ public sealed class ReaderFixtureTests
         }
     }
 
+    [Theory]
+    [InlineData("999")]
+    [InlineData("-1")]
+    [InlineData("not-an-index")]
+    [InlineData(" 0")]
+    [InlineData("")]
+    public void IndependentReadbackRejectsInvalidSharedStringIndices(string index)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-sst-index-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var path = Path.Combine(directory, "default.xlsx");
+            ReplacePart(path, "xl/worksheets/sheet1.xml", "<v>0</v>", "<v>" + index + "</v>");
+            Assert.Throws<InvalidDataException>(() => P2aGates.ReadCells(path, "Sheet1", ["A1"]));
+            var assertion = new ValueAssertion("Sheet1", "A1", true, "text", index, null);
+            Assert.Throws<InvalidDataException>(() => G7Assertions.Check(path, [assertion]));
+            using var sessions = new ExcelSessions();
+            var verified = sessions.Verify(path, [assertion]);
+            Assert.Equal("failed", verified.Summary.Status);
+            Assert.Contains(verified.AssertionIssues!, issue => issue.Code == "ASSERT_READ_ERROR");
+            var compared = sessions.Verify(path, path, assertions: [assertion]);
+            Assert.Equal("failed", compared.Status);
+            Assert.Contains(compared.AssertionIssues!, issue => issue.Code == "ASSERT_READ_ERROR");
+            var session = JsonSerializer.SerializeToElement(sessions.Open(path)).GetProperty("session").GetString()!;
+            Assert.Throws<InvalidDataException>(() => sessions.Read(session, "Sheet1", ["A1"]));
+            sessions.Close(session, false);
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
     [Fact]
     public void SessionlessVerifyReportsUnsupportedRootsAsGaps()
     {
