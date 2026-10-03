@@ -48,6 +48,38 @@ public sealed class CorruptionGateTests
     }
 
     [Fact]
+    public void G2ReportsChangesBelowBaselineErrorWithCollidingLocalNames()
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var source = fixture.Corrupt(part, xml =>
+            Regex.Replace(xml.Replace("<sheetData>",
+                "<sheetData><other:row xmlns:other=\"urn:other\"/>", StringComparison.Ordinal),
+                "(<c r=\"B1\" t=\"n\">\\s*<v>42</v>)", "$1<f>3</f>"));
+        var written = fixture.Corrupt(part, xml => xml.Replace("<v>42</v><f>3</f>",
+            "<v>9</v><f>3</f>", StringComparison.Ordinal), source);
+        Assert.Contains(DetachedValidator.CheckPackage(source).Issues,
+            issue => issue.Part == part && issue.Detail.Contains("/x:c[2]", StringComparison.Ordinal));
+        var result = DetachedValidator.Check(source, written, [part]);
+        Assert.Empty(result.Issues);
+        Assert.Contains(result.Gaps, issue => issue.Code == "G2_MASKED_BY_BASELINE_ERROR");
+    }
+
+    [Fact]
+    public void G2DoesNotMaskUnrelatedCellWhenBaselineErrorIsLocal()
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var source = fixture.Corrupt(part, xml =>
+            Regex.Replace(xml, "(<c r=\"B1\" t=\"n\">\\s*<v>42</v>)", "$1<f>3</f>"));
+        var written = fixture.Corrupt(part, xml => xml.Replace("<f>1+1</f>",
+            "<f>1+2</f>", StringComparison.Ordinal), source);
+        var result = DetachedValidator.Check(source, written, [part]);
+        Assert.Empty(result.Issues);
+        Assert.Empty(result.Gaps);
+    }
+
+    [Fact]
     public void G3RejectsUndeclaredMcPrefix()
     {
         using var fixture = new Fixture();

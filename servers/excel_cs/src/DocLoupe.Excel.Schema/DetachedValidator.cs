@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO.Compression;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -71,7 +72,8 @@ public static class DetachedValidator
             if (newEntry is null) continue;
             try
             {
-                var baseline = oldEntry is null ? [] : validator.Validate(Detach(oldEntry)).Select(Key).ToArray();
+                var baselineErrors = oldEntry is null ? [] : validator.Validate(Detach(oldEntry)).ToArray();
+                var baseline = baselineErrors.Select(Key).ToArray();
                 var result = validator.Validate(Detach(newEntry)).Select(Key).ToArray();
                 var remaining = baseline.GroupBy(key => key).ToDictionary(group => group.Key, group => group.Count());
                 foreach (var error in result)
@@ -79,16 +81,18 @@ public static class DetachedValidator
                     if (remaining.TryGetValue(error, out var count) && count > 0) remaining[error] = count - 1;
                     else issues.Add(new SchemaIssue(part, "NEW_SCHEMA_ERROR", error));
                 }
-                if (oldEntry is not null)
+                if (oldEntry is not null && baselineErrors.Length > 0)
                 {
-                    var originalParents = ChildLists(oldEntry);
-                    var writtenParents = ChildLists(newEntry);
-                    foreach (var baselineError in baseline)
+                    var originalDocument = LoadDocument(oldEntry);
+                    var writtenDocument = LoadDocument(newEntry);
+                    var changed = !ReadPart(oldEntry).AsSpan().SequenceEqual(ReadPart(newEntry));
+                    foreach (var baselineError in baselineErrors)
                     {
-                        var location = Regex.Replace(baselineError.Split('|')[0],
-                            @"(?<=/)[A-Za-z_][\w.-]*:(?=[^/\[]+\[\d+\])", "");
-                        if (originalParents.TryGetValue(location, out var oldChildren)
-                            && (!writtenParents.TryGetValue(location, out var newChildren) || !oldChildren.SequenceEqual(newChildren)))
+                        var location = baselineError.Path?.XPath ?? "";
+                        var originalParent = Locate(originalDocument, location);
+                        var writtenParent = Locate(writtenDocument, location);
+                        if (originalParent is null || writtenParent is null
+                            ? changed : originalParent.OuterXml != writtenParent.OuterXml)
                             gaps.Add(new SchemaIssue(part, "G2_MASKED_BY_BASELINE_ERROR", location));
                     }
                 }
@@ -147,28 +151,49 @@ public static class DetachedValidator
 
     private static string Key(ValidationErrorInfo error) => $"{error.Path?.XPath}|{error.Id}|{error.Description}";
 
-    private static Dictionary<string, string[]> ChildLists(ZipArchiveEntry part)
+    private static XmlElement? Locate(XmlDocument document, string path)
+    {
+        if (path.Length == 0 || path[0] != '/') return null;
+        XmlElement? current = null;
+        foreach (var segment in path.Split('/').Skip(1))
+        {
+            var match = Regex.Match(segment,
+                @"^(?:(?<prefix>[A-Za-z_][\w.-]*):)?(?<name>[A-Za-z_][\w.-]*)\[(?<index>[1-9][0-9]*)\]$");
+            if (!match.Success || !int.TryParse(match.Groups["index"].Value,
+                    NumberStyles.None, CultureInfo.InvariantCulture, out var index)) return null;
+            var prefix = match.Groups["prefix"].Value;
+            var namespaceUri = prefix == "x"
+                ? "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                : prefix.Length == 0
+                    ? current?.GetNamespaceOfPrefix("") ?? document.DocumentElement?.NamespaceURI
+                    : current?.GetNamespaceOfPrefix(prefix) ?? document.DocumentElement?.GetNamespaceOfPrefix(prefix);
+            if (namespaceUri is null || prefix.Length > 0 && namespaceUri.Length == 0) return null;
+            var children = current is null
+                ? document.ChildNodes.OfType<XmlElement>()
+                : current.ChildNodes.OfType<XmlElement>();
+            current = children.Where(child => child.LocalName == match.Groups["name"].Value &&
+                child.NamespaceURI == namespaceUri).Skip(index - 1).FirstOrDefault();
+            if (current is null) return null;
+        }
+        return current;
+    }
+
+    private static XmlDocument LoadDocument(ZipArchiveEntry part)
     {
         var document = new XmlDocument { PreserveWhitespace = true, XmlResolver = null };
-        using (var stream = part.Open())
-        using (var reader = XmlReader.Create(stream, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null }))
-            document.Load(reader);
-        var lists = new Dictionary<string, string[]>(StringComparer.Ordinal);
-        void Walk(XmlElement element, string path)
-        {
-            var children = element.ChildNodes.OfType<XmlElement>().ToArray();
-            lists[path] = children.Select(child => child.NamespaceURI + ":" + child.LocalName).ToArray();
-            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
-            foreach (var child in children)
-            {
-                var name = child.LocalName;
-                counts[name] = counts.GetValueOrDefault(name) + 1;
-                Walk(child, path + "/" + name + "[" + counts[name] + "]");
-            }
-        }
-        var root = document.DocumentElement ?? throw new InvalidDataException("Missing XML root");
-        Walk(root, "/" + root.LocalName + "[1]");
-        return lists;
+        using var stream = part.Open();
+        using var reader = XmlReader.Create(stream,
+            new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null });
+        document.Load(reader);
+        return document;
+    }
+
+    private static byte[] ReadPart(ZipArchiveEntry part)
+    {
+        using var input = part.Open();
+        using var output = new MemoryStream();
+        input.CopyTo(output);
+        return output.ToArray();
     }
 
     private static OpenXmlElement Detach(ZipArchiveEntry part)

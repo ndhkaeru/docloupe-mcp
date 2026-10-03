@@ -44,7 +44,7 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
 - **Masking rule.** The validator reports only the first content-model error per parent element, so a baseline error hides any new error under the same parent. In the P2a SDK-role spike, fixture 01's baseline error on `<worksheet>` hid a new misplaced child of `<worksheet>`, while new errors under `<sheetData>` and inside a cell were still reported. Therefore:
   - an edit that changes the child list of an element E (inserting, removing or reordering children of E) is covered by G2 only if E has **no** baseline content-model error in O;
   - otherwise the edit is a required `unverified` gap (`reason: "g2_masked_by_baseline_error"`) and is not reported as covered.
-  - For `set_value`, E is the edited `<c>`, or the `<row>` that receives a new cell.
+  - For `set_value`, E is the edited `<c>`, or the `<row>` that receives a new cell. The current detached adapter conservatively compares E's entire XML subtree, including descendant values and attributes: if a baseline error at E could mask a change beneath it, it reports a required gap. Paths are resolved with namespace-aware sibling indices; if a baseline path cannot be resolved and the part changed, it also reports a gap rather than claiming coverage.
 - **Not covered by G2:** relationship references (`r:id` and similar) are not checked by detached validation and belong to G1 (§3.1). G2 is also the safety net for element order in hand-written System.Xml edits, but the engine must insert children in schema order to begin with.
 - *Legacy:* no schema validation.
 
