@@ -15,9 +15,18 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
     McpServerTool.Create((string path) => Handle(() => sessions.Open(path)), new McpServerToolCreateOptions { Name = "excel_open" }),
-    McpServerTool.Create((string template_path, string target_path) =>
-        Handle(() => sessions.CreateFromTemplate(template_path, target_path)),
-        new McpServerToolCreateOptions { Name = "excel_create" }),
+    McpServerTool.Create((string target_path, string? template_path = null, string[]? sheets = null,
+        string? active_sheet = null, string format = "xlsx") => Handle(() =>
+        {
+            if (format != "xlsx") throw new NotSupportedException("Creation currently supports xlsx only");
+            if (template_path is not null)
+            {
+                if (sheets is not null || active_sheet is not null)
+                    throw new NotSupportedException("Template creation does not support sheet changes");
+                return sessions.CreateFromTemplate(template_path, target_path);
+            }
+            return sessions.CreateNew(target_path, sheets, active_sheet);
+        }), new McpServerToolCreateOptions { Name = "excel_create" }),
     McpServerTool.Create((string path, string detail = "summary", string? sheet = null, int max_rows = 20, int max_cols = 10) =>
         Handle(() => sessions.Peek(path, detail, sheet, max_rows, max_cols)), new McpServerToolCreateOptions { Name = "excel_peek" }),
     McpServerTool.Create((string after_path, string? before_path = null, int max_differences = 200, SaveAssertionRequest[]? @assert = null) =>

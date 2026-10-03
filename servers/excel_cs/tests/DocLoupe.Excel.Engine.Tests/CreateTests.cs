@@ -44,6 +44,62 @@ public sealed class CreateTests
     }
 
     [Fact]
+    public void NewWorkbookCreatesIndependentSheetsAndPassesTheFirstSave()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-create-new-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var created = Path.Combine(directory, "fresh.xlsx");
+            using var sessions = new ExcelSessions();
+            var response = JsonSerializer.SerializeToElement(sessions.CreateNew(created,
+                ["Sheet1", "Dữ liệu"], "Dữ liệu"));
+            var id = response.GetProperty("session").GetString()!;
+            Assert.Equal(["Sheet1", "Dữ liệu"], response.GetProperty("sheets").EnumerateArray()
+                .Select(item => item.GetString()!).ToArray());
+            Assert.Empty(JsonSerializer.SerializeToElement(sessions.Read(id, "Dữ liệu", []))
+                .GetProperty("cells").EnumerateArray());
+            Assert.False(JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("dirty").GetBoolean());
+            sessions.Apply(id, 0, [new SetValueOp("Sheet1", "B2", "number", "3"),
+                new SetValueOp("Dữ liệu", "A1", "text", "mới")]);
+            var output = Path.Combine(directory, "saved.xlsx");
+            var report = JsonSerializer.SerializeToElement(sessions.Save(id, output));
+            Assert.Equal("verified", report.GetProperty("status").GetString());
+            Assert.Equal("3", Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["B2"])).Value);
+            Assert.Equal("mới", Assert.Single(P2aGates.ReadCells(output, "Dữ liệu", ["A1"])).Value);
+            Assert.Empty(P2aGates.ReadCells(created, "Dữ liệu", ["A1"]));
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void NewWorkbookRejectsInvalidSheetNamesAndExistingOutput()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-create-new-errors-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var output = Path.Combine(directory, "fresh.xlsx");
+            using var sessions = new ExcelSessions();
+            Assert.ThrowsAny<Exception>(() => sessions.CreateNew(output, []));
+            Assert.ThrowsAny<Exception>(() => sessions.CreateNew(output, ["ABC", "abc"]));
+            Assert.ThrowsAny<Exception>(() => sessions.CreateNew(output, ["Invalid/Name"]));
+            Assert.ThrowsAny<Exception>(() => sessions.CreateNew(output, ["Sheet1"], "Missing"));
+            Assert.ThrowsAny<Exception>(() => sessions.CreateNew(output, ["Bad\0Name"]));
+            Assert.False(File.Exists(output));
+            Assert.Empty(Directory.GetFiles(directory, "*.staging"));
+            var created = JsonSerializer.SerializeToElement(sessions.CreateNew(output));
+            Assert.True(File.Exists(output));
+            Assert.Throws<IOException>(() => sessions.CreateNew(output));
+            Assert.False(JsonSerializer.SerializeToElement(sessions.Status(created.GetProperty("session").GetString()!))
+                .GetProperty("source_changed_on_disk").GetBoolean());
+            sessions.Close(created.GetProperty("session").GetString()!, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void InvalidOrOccupiedTemplateCreationNeverWritesTheDestination()
     {
         var directory = Path.Combine(Path.GetTempPath(), "docloupe-create-errors-" + Guid.NewGuid().ToString("N"));

@@ -119,9 +119,9 @@ input  { format?: "xlsx"|"xlsm"|"xltx"|"xltm" = "xlsx", target_path?: string,
 output data { same shape as excel_open, plus new: true, default_path: string }
 ```
 
-A new workbook has no O, so G5 (preservation) does not apply on its first save. G1–G4 and G7 still run.
+A new workbook has no user-supplied O before creation. The current slice publishes the base workbook first and uses it as O for subsequent edits; G1–G7, including G5, run on the first edited save.
 
-**Current P2b create slice:** only `template_path` plus a distinct, nonexistent `target_path`, both `.xlsx`, are supported. The entire template is copied byte-for-byte to a staging file, verified against the source fingerprint and opened as a new clean session after atomic publication. Later edits use that copy as O, so the normal save gates still apply. Creating a workbook without a template, choosing sheet names/active sheet, macros or document properties, and an implicit target path remain unsupported; this is not yet the complete creation contract.
+**Current P2b create slice:** a distinct, nonexistent `target_path` with `.xlsx` extension is required. Without a template, it creates a minimal workbook with `sheets` (default `["Sheet1"]`) and optional `active_sheet`, checks OPC relationships and detached schema validation, then publishes atomically as a clean session. With `template_path`, both files must be `.xlsx`; it copies the template byte-for-byte via staging, verifies the source fingerprint, and opens the copy as a clean session without sheet changes. Macros, other formats, document properties and an implicit target path remain unsupported; this is not yet the complete creation contract.
 
 ### 2.3 `excel_status`
 

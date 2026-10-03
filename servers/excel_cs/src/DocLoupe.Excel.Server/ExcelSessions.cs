@@ -63,14 +63,44 @@ public sealed class ExcelSessions : IDisposable
                 throw new InvalidOperationException("SOURCE_CHANGED_ON_DISK");
             string[] sheets;
             using (var copied = new PackageStore(staging)) sheets = copied.SheetNames().ToArray();
-            File.Move(staging, destination);
-            string id;
-            do { id = "xs_" + Guid.NewGuid().ToString("N")[..16]; }
-            while (!_sessions.TryAdd(id, new Session(id, destination, fingerprint)));
-            return new { session = id, revision = 0, path = destination, sheets, @new = true,
-                default_path = destination };
+            return PublishCreated(staging, destination, sheets, fingerprint);
         }
         finally { if (File.Exists(staging)) File.Delete(staging); }
+    }
+
+    public object CreateNew(string targetPath, string[]? sheets = null, string? activeSheet = null)
+    {
+        var destination = Path.GetFullPath(targetPath);
+        if (!Path.GetExtension(destination).Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
+            throw new NotSupportedException("New workbook creation currently supports .xlsx only");
+        if (!Directory.Exists(Path.GetDirectoryName(destination)))
+            throw new DirectoryNotFoundException(Path.GetDirectoryName(destination));
+        if (File.Exists(destination)) throw new IOException("Destination already exists");
+        var staging = Path.Combine(Path.GetDirectoryName(destination)!, "." + Path.GetFileName(destination) +
+            "." + Guid.NewGuid().ToString("N") + ".staging");
+        try
+        {
+            var createdSheets = NewWorkbook.Write(staging, sheets, activeSheet);
+            using (var package = new PackageStore(staging))
+                if (!package.SheetNames().SequenceEqual(createdSheets))
+                    throw new InvalidDataException("Created worksheets disagree with package relationships");
+            var issues = P2aGates.CheckPackage(staging, [], ".xlsx");
+            var schema = DetachedValidator.CheckPackage(staging);
+            if (issues.Count > 0 || schema.Issues.Count > 0 || schema.Gaps.Count > 0)
+                throw new InvalidDataException("Created workbook failed OPC or schema validation");
+            return PublishCreated(staging, destination, createdSheets, Fingerprint(staging));
+        }
+        finally { if (File.Exists(staging)) File.Delete(staging); }
+    }
+
+    private object PublishCreated(string staging, string destination, string[] sheets, string fingerprint)
+    {
+        File.Move(staging, destination);
+        string id;
+        do { id = "xs_" + Guid.NewGuid().ToString("N")[..16]; }
+        while (!_sessions.TryAdd(id, new Session(id, destination, fingerprint)));
+        return new { session = id, revision = 0, path = destination, sheets, @new = true,
+            default_path = destination };
     }
 
     public object Peek(string path, string detail = "summary", string? sheet = null, int maxRows = 20, int maxCols = 10)
