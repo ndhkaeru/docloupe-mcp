@@ -598,6 +598,27 @@ public sealed class WorkbookReaderTests
     }
 
     [Fact]
+    public void IndependentCellReadbackAndAssertionsFindCellsWithoutReferences()
+    {
+        var sharedStrings = "<x:sst xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>" +
+            "<x:si><x:t>good</x:t></x:si></x:sst>";
+        var path = CreateWorkbook("<x:row><x:c><x:v>10</x:v></x:c>" +
+            "<x:c r='C1'><x:v>30</x:v></x:c><x:c t='s'><x:v>0</x:v></x:c></x:row>" +
+            "<x:row><x:c><x:v>20</x:v></x:c></x:row>", sharedStringsXml: sharedStrings);
+        try
+        {
+            var cells = P2aGates.ReadCells(path, "S", ["A1", "C1", "D1", "A2"]);
+            Assert.Equal(new[] { "A1", "C1", "D1", "A2" }, cells.Select(cell => cell.Address));
+            Assert.Equal(new[] { "10", "30", "good", "20" }, cells.Select(cell => cell.Value));
+            Assert.Empty(G7Assertions.Check(path, [new ValueAssertion("S", "D1", true, "text", "good", null),
+                new ValueAssertion("S", "A2", true, "number", "20", null)]));
+            Assert.Contains(G7Assertions.Check(path, [new ValueAssertion("S", "A2", true, "number", "21", null)]),
+                issue => issue.Code == "ASSERT_VALUE_MISMATCH");
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void PeekInfersOptionalRowAndCellReferencesWithoutChangingExplicitAddresses()
     {
         var path = CreateWorkbook("<x:row r='2'><x:c><x:v>2</x:v></x:c>" +

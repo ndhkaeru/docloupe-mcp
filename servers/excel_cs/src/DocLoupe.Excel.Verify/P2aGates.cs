@@ -2,6 +2,7 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Text.Json.Serialization;
 using System.Xml;
+using DocLoupe.Excel.Model;
 
 namespace DocLoupe.Excel.Verify;
 
@@ -225,9 +226,58 @@ public static class P2aGates
             .GetElementsByTagName("si", Main).OfType<XmlElement>().ToArray();
         var shared = sharedItems.Select(TextValue).ToArray();
         var requested = addresses.ToHashSet(StringComparer.Ordinal);
-        return document.GetElementsByTagName("c", Main).OfType<XmlElement>()
-            .Where(item => requested.Contains(item.GetAttribute("r"))).Select(item =>
+        var located = new List<(XmlElement Cell, string Address)>();
+        var lastRow = 0;
+        var sheetData = document.DocumentElement?.ChildNodes.OfType<XmlElement>()
+            .SingleOrDefault(child => child.LocalName == "sheetData" && child.NamespaceURI == Main);
+        var rows = sheetData?.ChildNodes.OfType<XmlElement>()
+            .Where(child => child.LocalName == "row" && child.NamespaceURI == Main) ?? [];
+        foreach (var row in rows)
+        {
+            var rowReference = row.GetAttribute("r");
+            int rowNumber;
+            if (row.HasAttribute("r"))
             {
+                if (!int.TryParse(rowReference, NumberStyles.None, CultureInfo.InvariantCulture, out rowNumber)
+                    || rowNumber is < 1 or > 1048576)
+                    throw new InvalidDataException($"Invalid row reference: {rowReference}");
+            }
+            else
+            {
+                if (lastRow >= 1048576) throw new InvalidDataException("Inferred row exceeds worksheet limit");
+                rowNumber = lastRow + 1;
+            }
+            lastRow = rowNumber;
+            var lastColumn = 0;
+            foreach (var item in row.ChildNodes.OfType<XmlElement>()
+                .Where(child => child.LocalName == "c" && child.NamespaceURI == Main))
+            {
+                CellAddress coordinate;
+                if (item.HasAttribute("r"))
+                {
+                    var reference = item.GetAttribute("r");
+                    try { coordinate = CellAddress.Parse(reference); }
+                    catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentException)
+                    {
+                        throw new InvalidDataException($"Invalid cell reference: {reference}", exception);
+                    }
+                    if (coordinate.Row != rowNumber)
+                        throw new InvalidDataException($"Cell {reference} does not belong to row {rowNumber}");
+                }
+                else
+                {
+                    if (lastColumn >= 16384) throw new InvalidDataException("Inferred column exceeds worksheet limit");
+                    coordinate = new CellAddress(rowNumber, lastColumn + 1);
+                }
+                lastColumn = coordinate.Column;
+                var address = coordinate.ToString();
+                if (requested.Contains(address)) located.Add((item, address));
+            }
+        }
+        return located.Select(cell =>
+            {
+                var item = cell.Cell;
+                var address = cell.Address;
                 var type = item.GetAttribute("t");
                 var scalar = item.GetElementsByTagName("v", Main).OfType<XmlElement>().FirstOrDefault()?.InnerText;
                 var formula = item.GetElementsByTagName("f", Main).OfType<XmlElement>().FirstOrDefault()?.InnerText;
@@ -236,7 +286,7 @@ public static class P2aGates
                 {
                     if (!int.TryParse(scalar, NumberStyles.None, CultureInfo.InvariantCulture, out var index)
                         || index < 0 || index >= shared.Length)
-                        throw new InvalidDataException($"Invalid shared string index at {sheetName}!{item.GetAttribute("r")}: {scalar}");
+                        throw new InvalidDataException($"Invalid shared string index at {sheetName}!{address}: {scalar}");
                     sharedIndex = index;
                 }
                 var value = type switch
@@ -247,7 +297,7 @@ public static class P2aGates
                     "e" => scalar,
                     _ => scalar
                 };
-                return new CellRead(item.GetAttribute("r"), formula is not null ? "formula" : type switch
+                return new CellRead(address, formula is not null ? "formula" : type switch
                 {
                     "s" => "text", "inlineStr" => "inline", "b" => "boolean", "e" => "error",
                     _ when value is null => "blank", _ => "number"
