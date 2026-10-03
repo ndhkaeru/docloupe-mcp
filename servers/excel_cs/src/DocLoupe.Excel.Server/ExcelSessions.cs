@@ -196,13 +196,13 @@ public sealed class ExcelSessions : IDisposable
             {
                 var snapshot = session.Snapshot;
                 return new { session = session.Id, path = session.Path, revision = snapshot.Revision,
-                    dirty = snapshot.Revision != 0 };
+                    dirty = snapshot.Revision != snapshot.SavedRevision };
             }).OrderBy(session => session.session, StringComparer.Ordinal).ToArray(), server = ServerInfo };
 
         var selected = Get(id);
         var state = selected.Snapshot;
-        return new { path = selected.Path, revision = state.Revision, saved_revision = 0,
-            dirty = state.Revision != 0, read_only = false,
+        return new { path = selected.Path, revision = state.Revision, saved_revision = state.SavedRevision,
+            dirty = state.Revision != state.SavedRevision, read_only = false,
             source_changed_on_disk = selected.SourceChangedOnDisk(),
             busy = selected.Busy is { } active ? new { operation = active.Operation, since = active.Since } : null,
             ledger = state.Ledger.Select(entry => new { revision = entry.Revision, op_count = entry.OpCount,
@@ -237,7 +237,7 @@ public sealed class ExcelSessions : IDisposable
                         };
                     addresses = [selected.Name + "!" + selected.UsedRange];
                 }
-                finally { if (preview != session.Path) File.Delete(preview); }
+                finally { if (preview != session.BasePath) File.Delete(preview); }
             }
             if (view is not ("cells" or "values" or "markdown"))
                 throw new NotSupportedException("Only cells, values and markdown views are supported");
@@ -298,7 +298,7 @@ public sealed class ExcelSessions : IDisposable
                 }
                 return new { session = id, revision = session.Revision, sheet = selectedSheet, view = "cells", cells };
             }
-            finally { if (source != session.Path) File.Delete(source); }
+            finally { if (source != session.BasePath) File.Delete(source); }
         }
     }
 
@@ -371,7 +371,7 @@ public sealed class ExcelSessions : IDisposable
                 return new { session = id, revision = session.Revision, partial = true,
                     total_scanned = scanned, matches, truncated };
             }
-            finally { if (source != session.Path) File.Delete(source); }
+            finally { if (source != session.BasePath) File.Delete(source); }
         }
     }
 
@@ -494,9 +494,9 @@ public sealed class ExcelSessions : IDisposable
                             operation.Sheet + "!" + operation.Address, expected, actual);
                     }
                 }
-                finally { if (basePath != session.Path) File.Delete(basePath); }
+                finally { if (basePath != session.BasePath) File.Delete(basePath); }
             }
-            using var candidate = new PackageStore(session.Path);
+            using var candidate = new PackageStore(session.BasePath);
             var next = Coalesce(session.Operations.Concat(operations));
             var result = SetValueEngine.Apply(candidate, next);
             if (dryRun)
@@ -528,7 +528,7 @@ public sealed class ExcelSessions : IDisposable
             var keptOperations = session.RevisionLengths.Take(toRevision).Sum();
             if (keptOperations > 0)
             {
-                using var candidate = new PackageStore(session.Path);
+                using var candidate = new PackageStore(session.BasePath);
                 SetValueEngine.Apply(candidate, Coalesce(session.Operations.Take(keptOperations)));
             }
             session.Operations.RemoveRange(keptOperations, session.Operations.Count - keptOperations);
@@ -540,55 +540,81 @@ public sealed class ExcelSessions : IDisposable
         }
     }
 
-    public object Save(string id, string outputPath, IReadOnlyList<ValueAssertion>? assertions = null)
+    public object Save(string id, string? outputPath, IReadOnlyList<ValueAssertion>? assertions = null, string mode = "copy")
     {
+        if (mode is not ("copy" or "save_as" or "overwrite")) throw new NotSupportedException("Unsupported save mode");
         var session = Get(id);
         lock (session.Sync)
         {
-            if (session.Revision == 0) throw new InvalidOperationException("No pending edits");
+            if (session.Revision == 0 && session.SavedRevision == 0)
+                throw new InvalidOperationException("No pending edits");
             session.CheckSource();
-            var destination = Path.GetFullPath(outputPath);
-            if (destination == session.Path) throw new NotSupportedException("P2a requires a distinct output path; overwrite is not yet supported");
+            var destination = mode == "overwrite" && outputPath is null ? session.Path :
+                Path.GetFullPath(outputPath ?? throw new ArgumentException("Save path is required"));
+            var samePath = string.Equals(destination, session.Path,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+            if (mode == "overwrite" ? !samePath : samePath)
+                throw new ArgumentException("Save mode and destination path disagree");
             if (!Path.GetExtension(destination).Equals(Path.GetExtension(session.Path), StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Output format must match source format");
             if (!Directory.Exists(Path.GetDirectoryName(destination))) throw new DirectoryNotFoundException(Path.GetDirectoryName(destination));
-            if (File.Exists(destination)) throw new IOException("Destination already exists");
+            if (mode != "overwrite" && File.Exists(destination)) throw new IOException("Destination already exists");
             var staging = Path.Combine(Path.GetDirectoryName(destination)!, "." + Path.GetFileName(destination) + "." + Guid.NewGuid().ToString("N") + ".staging");
+            var backup = mode == "overwrite" ? Path.Combine(Path.GetDirectoryName(destination)!,
+                "." + Path.GetFileName(destination) + "." + Guid.NewGuid().ToString("N") + ".bak") : null;
             session.SetBusy("save");
             try
             {
-                using var store = new PackageStore(session.Path);
-                if (AdvancedPartGate.CheckSignedSource(session.Path) is { Count: > 0 } signed)
+                using var store = new PackageStore(session.BasePath);
+                if (AdvancedPartGate.CheckSignedSource(session.BasePath) is { Count: > 0 } signed)
                     throw new SaveBlockedException(signed);
-                var result = SetValueEngine.Apply(store, Coalesce(session.Operations));
+                var result = session.Operations.Count == 0 ? new ApplyResult([], [], []) :
+                    SetValueEngine.Apply(store, Coalesce(session.Operations));
                 store.Save(staging);
                 var reports = new List<GateIssue>();
-                reports.AddRange(P2aGates.CheckPackage(staging, result.ChangedParts, Path.GetExtension(session.Path)));
-                var schema = DetachedValidator.Check(session.Path, staging, result.ChangedParts);
+                reports.AddRange(P2aGates.CheckPackage(staging, result.ChangedParts, Path.GetExtension(session.BasePath)));
+                var schema = DetachedValidator.Check(session.BasePath, staging, result.ChangedParts);
                 reports.AddRange(schema.Issues.Select(issue => new GateIssue("G2", issue.Code, issue.Detail)));
-                reports.AddRange(P2aMarkupGate.Check(session.Path, staging, result.ChangedParts));
+                reports.AddRange(P2aMarkupGate.Check(session.BasePath, staging, result.ChangedParts));
                 reports.AddRange(P2aGates.CheckIntent(staging, result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
                     item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null))));
-                var addedOrRemoved = result.ChangedParts.Where(part => !store.Contains(part) || !PartExists(session.Path, part));
-                reports.AddRange(P2aGates.CheckPreservation(session.Path, staging,
+                var addedOrRemoved = result.ChangedParts.Where(part => !store.Contains(part) || !PartExists(session.BasePath, part));
+                reports.AddRange(P2aGates.CheckPreservation(session.BasePath, staging,
                     result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)), addedOrRemoved));
-                reports.AddRange(P2aGates.CheckTouchedCells(session.Path, staging,
+                reports.AddRange(P2aGates.CheckTouchedCells(session.BasePath, staging,
                     result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
                     item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null))));
-                reports.AddRange(AdvancedPartGate.Check(session.Path, staging,
+                reports.AddRange(AdvancedPartGate.Check(session.BasePath, staging,
                     result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
                     item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null))));
-                if (reports.Count == 0) reports.AddRange(G7Assertions.Check(staging, assertions ?? [], session.Path));
+                if (reports.Count == 0) reports.AddRange(G7Assertions.Check(staging, assertions ?? [], session.BasePath));
                 if (reports.Count > 0) throw new SaveBlockedException(reports);
                 if (schema.Gaps.Count > 0) throw new SaveBlockedException(schema.Gaps.Select(issue => new GateIssue("G2", issue.Code, issue.Detail)).ToArray());
                 var readback = result.Intent.GroupBy(item => item.Sheet).ToDictionary(group => group.Key,
                     group => P2aGates.ReadCells(staging, group.Key, group.Select(item => item.Address)));
-                var response = new { session = id, revision = session.Revision, path = destination, status = "verified",
+                session.CheckSource();
+                var writtenFingerprint = Fingerprint(staging);
+                var priorFingerprint = session.CurrentFingerprint;
+                string? baselineSnapshot = null;
+                try
+                {
+                    if (mode != "copy") baselineSnapshot = session.PrepareBaseline();
+                    session.CheckSource();
+                    if (mode == "overwrite") File.Replace(staging, destination, backup);
+                    else File.Move(staging, destination);
+                    if (mode != "copy")
+                    {
+                        session.CommitFollow(destination, writtenFingerprint, baselineSnapshot);
+                        baselineSnapshot = null;
+                    }
+                }
+                finally { Session.DiscardPreparedBaseline(baselineSnapshot); }
+                return new { session = id, revision = session.Revision, revision_saved = mode == "copy" ?
+                        session.SavedRevision : session.Revision, path = destination, status = "verified",
+                    backup = backup is null ? null : new { path = backup, sha256 = priorFingerprint },
                     gates = new[] { "G1", "G2", "G3", "G4", "G5", "G6", "G7" },
                     assertions = (assertions ?? []).Select((item, index) => new { index, status = "verified",
                         expected = item }).ToArray(), readback };
-                File.Move(staging, destination);
-                return response;
             }
             finally
             {
@@ -603,7 +629,8 @@ public sealed class ExcelSessions : IDisposable
         var session = Get(id);
         lock (session.Sync)
         {
-            if (session.Revision > 0 && !discardUnsaved) throw new InvalidOperationException("UNSAVED_CHANGES");
+            if (session.Revision != session.SavedRevision && !discardUnsaved) throw new InvalidOperationException("UNSAVED_CHANGES");
+            session.Cleanup();
             _sessions.TryRemove(id, out _);
             return new { closed = true, discarded_revisions = session.Revision };
         }
@@ -629,26 +656,31 @@ public sealed class ExcelSessions : IDisposable
 
     public void Dispose()
     {
+        foreach (var session in _sessions.Values) session.Cleanup();
         _sessions.Clear();
     }
 
     private sealed class Session(string id, string path, string fingerprint)
     {
         public string Id { get; } = id;
-        public string Path { get; } = path;
-        public string Fingerprint { get; } = fingerprint;
+        public string Path { get; private set; } = path;
+        public string BasePath { get; private set; } = path;
+        public string BaseFingerprint { get; } = fingerprint;
+        public string CurrentFingerprint { get; private set; } = fingerprint;
+        public int SavedRevision { get; private set; }
+        private string? _snapshotDirectory;
         public object Sync { get; } = new();
         public List<SetValueOp> Operations { get; } = [];
         public List<int> RevisionLengths { get; } = [];
         public List<LedgerEntry> Ledger { get; } = [];
         public int Revision { get; set; }
-        private SessionSnapshot _snapshot = new(0, []);
+        private SessionSnapshot _snapshot = new(0, 0, []);
         private BusyOperation? _busy;
         public SessionSnapshot Snapshot => Volatile.Read(ref _snapshot);
         public BusyOperation? Busy => Volatile.Read(ref _busy);
 
         public void Publish() => Volatile.Write(ref _snapshot,
-            new SessionSnapshot(Revision, Ledger.TakeLast(20).ToArray()));
+            new SessionSnapshot(Revision, SavedRevision, Ledger.TakeLast(20).ToArray()));
 
         public void SetBusy(string operation) => Volatile.Write(ref _busy,
             new BusyOperation(operation, DateTimeOffset.UtcNow.ToString("O")));
@@ -657,21 +689,67 @@ public sealed class ExcelSessions : IDisposable
 
         public bool SourceChangedOnDisk()
         {
-            try { return ExcelSessions.Fingerprint(Path) != Fingerprint; }
+            try { return ExcelSessions.Fingerprint(BasePath) != BaseFingerprint ||
+                BasePath != Path && ExcelSessions.Fingerprint(Path) != CurrentFingerprint; }
             catch (IOException) { return true; }
             catch (UnauthorizedAccessException) { return true; }
         }
 
         public void CheckSource()
         {
-            if (ExcelSessions.Fingerprint(Path) != Fingerprint)
-                throw new InvalidOperationException("SOURCE_CHANGED_ON_DISK");
+            if (SourceChangedOnDisk()) throw new InvalidOperationException("SOURCE_CHANGED_ON_DISK");
+        }
+
+        public string? PrepareBaseline()
+        {
+            if (BasePath != Path) return null;
+            var directory = Directory.CreateTempSubdirectory("docloupe-excel-session-").FullName;
+            var snapshot = System.IO.Path.Combine(directory, System.IO.Path.GetFileName(Path));
+            try
+            {
+                File.Copy(Path, snapshot);
+                if (ExcelSessions.Fingerprint(snapshot) != BaseFingerprint)
+                    throw new InvalidOperationException("SOURCE_CHANGED_ON_DISK");
+                return snapshot;
+            }
+            catch
+            {
+                Directory.Delete(directory, true);
+                throw;
+            }
+        }
+
+        public void CommitFollow(string destination, string fingerprint, string? baselineSnapshot)
+        {
+            if (baselineSnapshot is not null)
+            {
+                _snapshotDirectory = System.IO.Path.GetDirectoryName(baselineSnapshot);
+                BasePath = baselineSnapshot;
+            }
+            Path = destination;
+            CurrentFingerprint = fingerprint;
+            SavedRevision = Revision;
+            Publish();
+        }
+
+        public static void DiscardPreparedBaseline(string? snapshot)
+        {
+            if (snapshot is not null) Directory.Delete(System.IO.Path.GetDirectoryName(snapshot)!, true);
+        }
+
+        public void Cleanup()
+        {
+            if (_snapshotDirectory is { } directory)
+            {
+                Directory.Delete(directory, true);
+                _snapshotDirectory = null;
+            }
         }
 
         public string Preview()
         {
-            if (Revision == 0) return Path;
-            using var candidate = new PackageStore(Path);
+            if (Revision == 0) return BasePath;
+            using var candidate = new PackageStore(BasePath);
             SetValueEngine.Apply(candidate, Coalesce(Operations));
             var temporary = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "docloupe-p2a-" + Guid.NewGuid().ToString("N") + ".xlsx");
             candidate.Save(temporary);
@@ -684,7 +762,7 @@ public sealed record UndoResult(int Revision, IReadOnlyList<int> Discarded);
 
 public sealed record LedgerEntry(int Revision, int OpCount, string Summary);
 
-public sealed record SessionSnapshot(int Revision, IReadOnlyList<LedgerEntry> Ledger);
+public sealed record SessionSnapshot(int Revision, int SavedRevision, IReadOnlyList<LedgerEntry> Ledger);
 
 public sealed record BusyOperation(string Operation, string Since);
 
