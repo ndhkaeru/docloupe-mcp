@@ -482,25 +482,37 @@ public sealed class ExcelSessions : IDisposable
                 var basePath = session.Preview();
                 try
                 {
+                    var preconditions = operations.Where(operation => operation.Expect is not null).ToArray();
+                    var observed = new Dictionary<string, CellRead?>(StringComparer.Ordinal);
+                    var missingSheets = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var group in preconditions.GroupBy(operation => operation.Sheet, StringComparer.Ordinal))
+                    {
+                        try
+                        {
+                            var cells = P2aGates.ReadCells(basePath, group.Key,
+                                group.Select(operation => operation.Address).Distinct(StringComparer.Ordinal))
+                                .ToDictionary(cell => cell.Address, StringComparer.Ordinal);
+                            foreach (var operation in group)
+                                observed[operation.Sheet + "!" + operation.Address] = cells.GetValueOrDefault(operation.Address);
+                        }
+                        catch (InvalidOperationException) { missingSheets.Add(group.Key); }
+                    }
                     for (var index = 0; index < operations.Length; index++)
                     {
                         var operation = operations[index];
                         if (operation.Expect is not { } expected) continue;
-                        var assertionMatches = !expected.CheckValue && expected.Formula is null ||
-                            G7Assertions.Check(basePath, [new ValueAssertion(operation.Sheet, operation.Address,
-                                expected.CheckValue, expected.Kind, expected.Value, expected.Formula)]).Count == 0;
-                        if (assertionMatches && expected.Empty is null && expected.Text is null) continue;
-                        CellRead? actual;
-                        var sheetMissing = false;
-                        try { actual = P2aGates.ReadCells(basePath, operation.Sheet, [operation.Address]).SingleOrDefault(); }
-                        catch (InvalidOperationException) { actual = null; sheetMissing = true; }
+                        var target = operation.Sheet + "!" + operation.Address;
+                        observed.TryGetValue(target, out var actual);
+                        var assertionMatches = G7Assertions.Matches(actual, new ValueAssertion(
+                            operation.Sheet, operation.Address, expected.CheckValue,
+                            expected.Kind, expected.Value, expected.Formula));
                         var isEmpty = actual is null || actual.Kind == "blank" && actual.Formula is null;
-                        if (assertionMatches && !sheetMissing &&
+                        if (assertionMatches && !missingSheets.Contains(operation.Sheet) &&
                             (expected.Empty is null || expected.Empty == isEmpty) &&
                             (expected.Text is null || actual is { Kind: "text" or "inline" } &&
                                 string.Equals(actual.Value, expected.Text, StringComparison.Ordinal))) continue;
                         throw new PreconditionFailedException(operation.SourceIndex < 0 ? index : operation.SourceIndex,
-                            operation.Sheet + "!" + operation.Address, expected, actual);
+                            target, expected, actual);
                     }
                 }
                 finally { if (basePath != session.BasePath) File.Delete(basePath); }

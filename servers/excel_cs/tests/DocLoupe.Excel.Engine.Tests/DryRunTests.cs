@@ -209,6 +209,61 @@ public sealed class DryRunTests
     }
 
     [Fact]
+    public void ExpandedPreconditionsReportOriginalIndexWithoutApplyingEarlierOps()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-batch-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            var original = File.ReadAllBytes(source);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            var expanded = JsonSerializer.Deserialize<SetValueRequest>(
+                """{"op":"set_value","target":"Sheet1!A10:CV10","value":3,"expect":{"empty":true}}""")!
+                .NormalizeMany(null).Select(operation => operation with { SourceIndex = 0 }).ToArray();
+            Assert.Equal(100, expanded.Length);
+            var mismatched = Request(
+                """{"op":"set_value","target":"Sheet1!D3","value":"new","expect":{"text":"wrong"}}""") with { SourceIndex = 1 };
+            var exception = Assert.Throws<PreconditionFailedException>(() =>
+                sessions.Apply(id, 0, [.. expanded, mismatched]));
+            Assert.Equal(1, exception.Index);
+            Assert.Equal("Sheet1!D3", exception.Target);
+            Assert.Equal("old", exception.Actual?.Value);
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            Assert.Equal(original, File.ReadAllBytes(source));
+            sessions.Close(id, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void RepeatedTargetChecksEachPreconditionInRequestOrder()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-repeat-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            var original = File.ReadAllBytes(source);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            var operations = new[]
+            {
+                Request("""{"op":"set_value","target":"Sheet1!B1","value":43,"expect":{"value":42}}""") with { SourceIndex = 0 },
+                Request("""{"op":"set_value","target":"Sheet1!B1","value":44,"expect":{"value":1}}""") with { SourceIndex = 1 }
+            };
+            var failure = Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0, operations));
+            Assert.Equal(1, failure.Index);
+            Assert.Equal("42", failure.Actual?.Value);
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            Assert.Equal(original, File.ReadAllBytes(source));
+            sessions.Close(id, false);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void PreconditionRevisionAndWriterFailuresDoNotChangeSession()
     {
         var directory = Path.Combine(Path.GetTempPath(), "docloupe-dry-failure-" + Guid.NewGuid().ToString("N"));

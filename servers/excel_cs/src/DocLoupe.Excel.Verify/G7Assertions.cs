@@ -81,6 +81,12 @@ public static class G7Assertions
         return assertion.Kind == actual.Kind && assertion.Value == actual.Value;
     }
 
+    public static bool Matches(CellRead? actual, ValueAssertion assertion) =>
+        (assertion.Formula is null || actual?.Formula == assertion.Formula) &&
+        (!assertion.CheckValue || actual?.Kind != "formula" ||
+            actual.CacheType is "" or "n" or "b" or "e" or "str") &&
+        (!assertion.CheckValue || ValueMatches(actual, assertion));
+
     private static bool FormulaCacheMatches(CellRead actual, ValueAssertion assertion)
     {
         var raw = actual.CacheRawValue;
