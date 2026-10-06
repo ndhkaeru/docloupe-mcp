@@ -468,7 +468,7 @@ public sealed class ExcelSessions : IDisposable
     }
 
     public object Apply(string id, int baseRevision, SetValueOp[] operations, bool dryRun = false,
-        int maxDiffItems = 200)
+        int maxDiffItems = 200, string returnMode = "diff+readback")
     {
         var session = Get(id);
         lock (session.Sync)
@@ -476,6 +476,8 @@ public sealed class ExcelSessions : IDisposable
             session.CheckSource();
             if (operations.Length is < 1 or > 500) throw new ArgumentOutOfRangeException(nameof(operations));
             if (maxDiffItems is < 1 or > 500) throw new ArgumentOutOfRangeException(nameof(maxDiffItems));
+            if (returnMode is not ("diff" or "diff+readback"))
+                throw new NotSupportedException("Unsupported apply return mode");
             if (baseRevision != session.Revision) throw new InvalidOperationException("REVISION_CONFLICT");
             if (operations.Any(operation => operation.Expect is not null))
             {
@@ -539,16 +541,28 @@ public sealed class ExcelSessions : IDisposable
                 return result;
             }).ToArray();
             if (dryRun)
+            {
+                if (returnMode == "diff")
+                    return new { session = id, dry_run = true, revision = session.Revision,
+                        revision_before = baseRevision, revision_after = baseRevision,
+                        intent = result.Intent, changed_parts = result.ChangedParts, results,
+                        diff, diff_summary = diffSummary };
                 return new { session = id, dry_run = true, revision = session.Revision,
                     revision_before = baseRevision, revision_after = baseRevision,
                     intent = result.Intent, changed_parts = result.ChangedParts, readback, results,
                     diff, diff_summary = diffSummary };
+            }
             session.Operations.AddRange(operations);
             session.RevisionLengths.Add(operations.Length);
             session.Revision++;
             session.Ledger.Add(new LedgerEntry(session.Revision, operations.Length,
                 string.Join(", ", operations.Select(operation => $"{operation.Operation} {operation.Sheet}!{operation.Address}"))));
             session.Publish();
+            if (returnMode == "diff")
+                return new { session = id, dry_run = false, revision = session.Revision,
+                    revision_before = baseRevision, revision_after = session.Revision,
+                    intent = result.Intent, changed_parts = result.ChangedParts, results,
+                    diff, diff_summary = diffSummary };
             return new { session = id, dry_run = false, revision = session.Revision,
                 revision_before = baseRevision, revision_after = session.Revision,
                 intent = result.Intent, changed_parts = result.ChangedParts, readback, results,

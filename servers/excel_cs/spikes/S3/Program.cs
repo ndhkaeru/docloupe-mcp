@@ -235,6 +235,16 @@ try
         cappedPlan.StructuredContent?.GetProperty("data").GetProperty("diff_summary").GetProperty("truncated").GetBoolean() != true ||
         cappedPlan.StructuredContent?.GetProperty("data").GetProperty("diff_summary").GetProperty("partial").GetBoolean() != true)
         throw new InvalidOperationException("MCP capped diff failed: " + cappedPlan.StructuredContent?.GetRawText());
+    var compactPlan = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1", ["dry_run"] = true,
+        ["return"] = "diff",
+        ["ops"] = new[] { new { op = "set_value", target = "B1", value = 99 } }
+    });
+    if (compactPlan.IsError == true || compactPlan.StructuredContent?.GetProperty("data") is not { } compactData ||
+        compactData.TryGetProperty("readback", out _) || compactData.GetProperty("diff").GetArrayLength() == 0 ||
+        compactData.GetProperty("revision_after").GetInt32() != 0)
+        throw new InvalidOperationException("MCP diff-only response failed: " + compactPlan.StructuredContent?.GetRawText());
     var applied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",

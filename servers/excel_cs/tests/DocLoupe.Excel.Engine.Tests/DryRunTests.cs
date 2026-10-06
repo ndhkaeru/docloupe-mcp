@@ -238,6 +238,37 @@ public sealed class DryRunTests
     }
 
     [Fact]
+    public void ReturnDiffOmitsReadbackWithoutChangingPlanOrRevision()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-return-diff-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, "default.xlsx")))
+                .GetProperty("session").GetString()!;
+            var operations = new[] { Request("""{"op":"set_value","target":"Sheet1!B1","value":6}""") };
+            var full = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, operations, dryRun: true));
+            var compact = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, operations,
+                dryRun: true, returnMode: "diff"));
+            Assert.False(compact.TryGetProperty("readback", out _));
+            Assert.Equal(full.GetProperty("diff").GetRawText(), compact.GetProperty("diff").GetRawText());
+            Assert.Equal(full.GetProperty("diff_summary").GetRawText(), compact.GetProperty("diff_summary").GetRawText());
+            Assert.Equal(0, compact.GetProperty("revision_after").GetInt32());
+            Assert.Throws<NotSupportedException>(() => sessions.Apply(id, 0, operations,
+                returnMode: "full"));
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            var applied = JsonSerializer.SerializeToElement(sessions.Apply(id, 0, operations,
+                returnMode: "diff"));
+            Assert.False(applied.TryGetProperty("readback", out _));
+            Assert.Equal(compact.GetProperty("diff").GetRawText(), applied.GetProperty("diff").GetRawText());
+            Assert.Equal(1, applied.GetProperty("revision_after").GetInt32());
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void RepeatedTargetChecksEachPreconditionInRequestOrder()
     {
         var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-repeat-" + Guid.NewGuid().ToString("N"));
