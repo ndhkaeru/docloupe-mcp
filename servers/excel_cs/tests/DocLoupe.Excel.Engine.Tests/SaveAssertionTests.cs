@@ -10,6 +10,35 @@ namespace DocLoupe.Excel.Engine.Tests;
 
 public sealed class SaveAssertionTests
 {
+    [Fact]
+    public void PerCellPreconditionMatcherAgreesWithSaveGate()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-g7-consistency-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "default.xlsx");
+            var assertions = new[]
+            {
+                new ValueAssertion("Sheet1", "A1", true, "text", "hello", null),
+                new ValueAssertion("Sheet1", "B1", true, "number", "42.0", null),
+                new ValueAssertion("Sheet1", "B1", true, "number", "13", null),
+                new ValueAssertion("Sheet1", "C1", true, "number", "2", "1+1"),
+                new ValueAssertion("Sheet1", "C1", true, "number", "13", "9+9"),
+                new ValueAssertion("Sheet1", "D3", true, "text", "old", null),
+                new ValueAssertion("Sheet1", "E5", true, "blank", null, null),
+                new ValueAssertion("Sheet1", "E5", false, null, null, "9+9")
+            };
+            var cells = P2aGates.ReadCells(source, "Sheet1", assertions.Select(item => item.Address))
+                .ToDictionary(cell => cell.Address, StringComparer.Ordinal);
+            foreach (var assertion in assertions)
+                Assert.Equal(G7Assertions.Check(source, [assertion]).Count == 0,
+                    G7Assertions.Matches(cells.GetValueOrDefault(assertion.Address), assertion));
+            Assert.Equal(2, G7Assertions.Check(source, [assertions[4]]).Count);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     [Theory]
     [InlineData("default")]
     [InlineData("prefixed-x")]
@@ -125,8 +154,9 @@ public sealed class SaveAssertionTests
                 store.Set(part, Encoding.UTF8.GetBytes(document.OuterXml));
                 store.Save(output);
             }
-            Assert.Contains(G7Assertions.Check(output, [Assertion("Sheet1!C1", new { value = false }).Normalize()]),
-                issue => issue.Code == code);
+            var assertion = Assertion("Sheet1!C1", new { value = false }).Normalize();
+            Assert.Contains(G7Assertions.Check(output, [assertion]), issue => issue.Code == code);
+            Assert.False(G7Assertions.Matches(Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["C1"])), assertion));
         }
         finally { Directory.Delete(directory, true); }
     }

@@ -56,13 +56,7 @@ public static class G7Assertions
                     }
                     continue;
                 }
-                if (assertion.Formula is not null && actual?.Formula != assertion.Formula)
-                    issues.Add(new GateIssue("G7", "ASSERT_FORMULA_MISMATCH", target));
-                if (assertion.CheckValue && actual?.Kind == "formula" &&
-                    actual.CacheType is not ("" or "n" or "b" or "e" or "str"))
-                    issues.Add(new GateIssue("G7", "ASSERT_CACHE_UNSUPPORTED", target));
-                else if (assertion.CheckValue && !ValueMatches(actual, assertion))
-                    issues.Add(new GateIssue("G7", "ASSERT_VALUE_MISMATCH", target));
+                issues.AddRange(CheckValueAndFormula(actual, assertion, target));
             }
         }
         return issues;
@@ -82,10 +76,20 @@ public static class G7Assertions
     }
 
     public static bool Matches(CellRead? actual, ValueAssertion assertion) =>
-        (assertion.Formula is null || actual?.Formula == assertion.Formula) &&
-        (!assertion.CheckValue || actual?.Kind != "formula" ||
-            actual.CacheType is "" or "n" or "b" or "e" or "str") &&
-        (!assertion.CheckValue || ValueMatches(actual, assertion));
+        !assertion.Unchanged && !CheckValueAndFormula(actual, assertion,
+            assertion.Sheet + "!" + assertion.Address).Any();
+
+    private static IEnumerable<GateIssue> CheckValueAndFormula(CellRead? actual,
+        ValueAssertion assertion, string target)
+    {
+        if (assertion.Formula is not null && actual?.Formula != assertion.Formula)
+            yield return new GateIssue("G7", "ASSERT_FORMULA_MISMATCH", target);
+        if (!assertion.CheckValue) yield break;
+        if (actual?.Kind == "formula" && actual.CacheType is not ("" or "n" or "b" or "e" or "str"))
+            yield return new GateIssue("G7", "ASSERT_CACHE_UNSUPPORTED", target);
+        else if (!ValueMatches(actual, assertion))
+            yield return new GateIssue("G7", "ASSERT_VALUE_MISMATCH", target);
+    }
 
     private static bool FormulaCacheMatches(CellRead actual, ValueAssertion assertion)
     {
