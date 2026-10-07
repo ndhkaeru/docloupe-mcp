@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace DocLoupe.Excel.Verify;
 
-public sealed record ValueAssertion(string Sheet, string Address, bool CheckValue, string? Kind, string? Value, string? Formula, bool Unchanged = false);
+public sealed record ValueAssertion(string Sheet, string Address, bool CheckValue, string? Kind, string? Value, string? Formula, bool Unchanged = false, string? Rich = null);
 
 public static class G7Assertions
 {
@@ -57,6 +57,8 @@ public static class G7Assertions
                     continue;
                 }
                 issues.AddRange(CheckValueAndFormula(actual, assertion, target));
+                if (assertion.Rich is { } rich && !RichTextAssertions.Matches(actual, rich))
+                    issues.Add(new GateIssue("G7", "ASSERT_RICH_MISMATCH", target));
             }
         }
         return issues;
@@ -77,7 +79,8 @@ public static class G7Assertions
 
     public static bool Matches(CellRead? actual, ValueAssertion assertion) =>
         !assertion.Unchanged && !CheckValueAndFormula(actual, assertion,
-            assertion.Sheet + "!" + assertion.Address).Any();
+            assertion.Sheet + "!" + assertion.Address).Any() &&
+        (assertion.Rich is null || RichTextAssertions.Matches(actual, assertion.Rich));
 
     private static IEnumerable<GateIssue> CheckValueAndFormula(CellRead? actual,
         ValueAssertion assertion, string target)

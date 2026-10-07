@@ -261,6 +261,116 @@ public sealed class SaveAssertionTests
     }
 
     [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("new-shared-strings")]
+    public void G7RichAssertionsReadRunsAndBlockLostFormatting(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-g7-rich-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, variant + ".xlsx");
+            var richInput = Path.Combine(directory, "rich-input.xlsx");
+            using (var store = new PackageStore(source))
+            {
+                var part = variant == "new-shared-strings" ? store.SheetPart("Sheet1") : "xl/sharedStrings.xml";
+                var document = PackageStore.Parse(store.Read(part));
+                var container = variant == "new-shared-strings"
+                    ? Assert.Single(Assert.Single(document.GetElementsByTagName("c", PackageStore.Main)
+                        .OfType<System.Xml.XmlElement>(), cell => cell.GetAttribute("r") == "A1")
+                        .GetElementsByTagName("is", PackageStore.Main).OfType<System.Xml.XmlElement>())
+                    : Assert.Single(document.GetElementsByTagName("si", PackageStore.Main)
+                        .OfType<System.Xml.XmlElement>());
+                var originalText = Assert.Single(container.ChildNodes.OfType<System.Xml.XmlElement>(),
+                    node => node.LocalName == "t" && node.NamespaceURI == PackageStore.Main);
+                container.RemoveChild(originalText);
+                var plain = document.CreateElement(container.Prefix, "r", PackageStore.Main);
+                plain.AppendChild(originalText);
+                container.PrependChild(plain);
+                var styled = document.CreateElement(container.Prefix, "r", PackageStore.Main);
+                var properties = document.CreateElement(container.Prefix, "rPr", PackageStore.Main);
+                var bold = document.CreateElement(container.Prefix, "b", PackageStore.Main);
+                bold.SetAttribute("val", "1");
+                properties.AppendChild(bold);
+                var color = document.CreateElement(container.Prefix, "color", PackageStore.Main);
+                color.SetAttribute("rgb", "FFFF0000");
+                properties.AppendChild(color);
+                styled.AppendChild(properties);
+                var styledText = document.CreateElement(container.Prefix, "t", PackageStore.Main);
+                var space = document.CreateAttribute("xml", "space", "http://www.w3.org/XML/1998/namespace");
+                space.Value = "preserve";
+                styledText.Attributes.Append(space);
+                styledText.InnerText = " bold";
+                styled.AppendChild(styledText);
+                container.InsertAfter(styled, plain);
+                store.Set(part, Encoding.UTF8.GetBytes(document.OuterXml));
+                store.Save(richInput);
+            }
+            var correct = Assertion("Sheet1!A1", new { value = "hello bold",
+                rich = "<r>hello</r><r b color=\"FF0000\"> bold</r>" }).Normalize();
+            var wrong = Assertion("Sheet1!A1", new { value = "hello bold",
+                rich = "<r>hello</r><r b=\"0\" color=\"FF0000\"> bold</r>" }).Normalize();
+            Assert.Empty(G7Assertions.Check(richInput, [correct]));
+            Assert.Contains(G7Assertions.Check(richInput, [wrong]), issue => issue.Code == "ASSERT_RICH_MISMATCH");
+            var corrupted = Path.Combine(directory, "corrupted-rich.xlsx");
+            using (var store = new PackageStore(richInput))
+            {
+                var part = variant == "new-shared-strings" ? store.SheetPart("Sheet1") : "xl/sharedStrings.xml";
+                var xml = Encoding.UTF8.GetString(store.Read(part));
+                Assert.Contains("b val=\"1\"", xml);
+                store.Set(part, Encoding.UTF8.GetBytes(xml.Replace("b val=\"1\"", "b val=\"0\"", StringComparison.Ordinal)));
+                store.Save(corrupted);
+            }
+            Assert.Equal("hello bold", Assert.Single(P2aGates.ReadCells(corrupted, "Sheet1", ["A1"])).Value);
+            Assert.Contains(G7Assertions.Check(corrupted, [correct]), issue => issue.Code == "ASSERT_RICH_MISMATCH");
+            var unmodeled = Path.Combine(directory, "unmodeled-rich.xlsx");
+            using (var store = new PackageStore(richInput))
+            {
+                var part = variant == "new-shared-strings" ? store.SheetPart("Sheet1") : "xl/sharedStrings.xml";
+                var xml = Encoding.UTF8.GetString(store.Read(part));
+                store.Set(part, Encoding.UTF8.GetBytes(xml.Replace("b val=\"1\"",
+                    "b val=\"1\" hidden=\"1\"", StringComparison.Ordinal)));
+                store.Save(unmodeled);
+            }
+            Assert.Contains(G7Assertions.Check(unmodeled, [correct]), issue => issue.Code == "ASSERT_RICH_MISMATCH");
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(richInput)).GetProperty("session").GetString()!;
+            sessions.Apply(id, 0, [new SetValueOp("Sheet1", "B1", "number", "27")]);
+            var blocked = Path.Combine(directory, "blocked.xlsx");
+            Assert.Contains(Assert.Throws<SaveBlockedException>(() => sessions.Save(id, blocked, [wrong])).Issues,
+                issue => issue.Code == "ASSERT_RICH_MISMATCH");
+            Assert.False(File.Exists(blocked));
+            var output = Path.Combine(directory, "verified.xlsx");
+            sessions.Save(id, output, [correct]);
+            Assert.True(File.Exists(output));
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("<r unknown=\"1\">hello</r>")]
+    [InlineData("<r><b/></r>")]
+    [InlineData("<r b=\"maybe\">hello</r>")]
+    [InlineData("<r color=\"theme:5,2\">hello</r>")]
+    [InlineData("<r>hello</i>")]
+    [InlineData("<!DOCTYPE rich [<!ENTITY x SYSTEM \"file:///etc/passwd\">]>&x;")]
+    public void RichAssertionRejectsMalformedOrUnmodeledMarkup(string rich)
+    {
+        var error = Record.Exception(() => Assertion("Sheet1!A1", new { rich }).Normalize());
+        Assert.True(error is ArgumentException or NotSupportedException, error?.ToString());
+    }
+
+    [Fact]
+    public void RichAssertionValidatesSupportedRunAttributes()
+    {
+        var rich = "plain<r b i u sz=\"14\" font=\"Times New Roman\" color=\"theme:5,-0.25\" va=\"superscript\" family=\"2\" charset=\"1\" scheme=\"minor\">run</r>";
+        Assert.Equal(rich, Assertion("Sheet1!A1", new { rich }).Normalize().Rich);
+        Assert.Throws<NotSupportedException>(() => Assertion("Sheet1!A1", new { rich = new string('x', 8193) }).Normalize());
+    }
+
+    [Theory]
     [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":false}")]
     [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":null}")]
     [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":\"true\"}")]

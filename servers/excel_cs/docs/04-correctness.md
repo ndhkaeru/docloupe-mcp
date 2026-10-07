@@ -97,6 +97,8 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
   - `except` lists paths to exclude.
 - One failed assertion fails the gate.
 
+**Current P2b subset:** `equals.value`, `equals.formula`, and bounded `equals.rich` compare cells in W using the independent reader; `equals.rich` checks shared/inline string run boundaries, text, and supported run properties, ignoring phonetic annotations. Malformed or unmodeled expected markup is rejected before save; a formatting mismatch blocks staging. Standalone `unchanged: true` also checks the original cell and referenced shared-string markup. `display`, `style`, `except`, and structural paths remain unsupported.
+
 ### 3.8 G8 — Oracles (optional)
 
 - **Gates:** `recalc`, `render`, `open_check`; see §7.

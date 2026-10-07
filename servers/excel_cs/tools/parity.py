@@ -178,7 +178,7 @@ def check_facet_negative_controls(source, output, corrupted):
         raise AssertionError(f"Facet negative controls: expected {expected}, got {actual}")
 
 
-async def save_new(source, output, dll):
+async def save_new(source, output, dll, assert_rich=False):
     parameters = StdioServerParameters(command="dotnet", args=[str(dll)], cwd=str(ROOT))
     async with stdio_client(parameters) as (reader, writer):
         async with ClientSession(reader, writer) as client:
@@ -201,7 +201,11 @@ async def save_new(source, output, dll):
                 {"op": "fill", "target": "G7:H7", "value": 4},
                 {"op": "set_values", "target": "I8:J8", "values": [[12, "batch"]]},
             ]})
-            await call("excel_save", {"session": session, "mode": "copy", "path": str(output)})
+            save = {"session": session, "mode": "copy", "path": str(output)}
+            if assert_rich:
+                save["assert"] = [{"target": "Sheet1!A1", "equals": {
+                    "value": "plain bold", "rich": '<r>plain</r><r b color="FF0000"> bold</r>'}}]
+            await call("excel_save", save)
             await call("excel_close", {"session": session, "discard_unsaved": True})
 
 
@@ -232,8 +236,8 @@ async def main():
             source = directory / f"{variant}.xlsx"
             current = directory / f"{variant}-cs.xlsx"
             legacy = directory / f"{variant}-python.xlsx"
-            await save_new(source, current, dll)
             include_facets = variant == "openpyxl-rich-style"
+            await save_new(source, current, dll, include_facets)
             current_errors = check_output(source, current, include_facets)
             if current_errors:
                 failures.append(f"{variant} C#: {current_errors}")

@@ -350,8 +350,8 @@ public sealed class SaveAssertionRequest
         if (Expected.ValueKind != JsonValueKind.Object) throw new ArgumentException("Assertion equals must be an object");
         var properties = Expected.EnumerateObject().ToArray();
         if (properties.Length == 0 || properties.GroupBy(property => property.Name).Any(group => group.Count() > 1) ||
-            properties.Any(property => property.Name is not ("value" or "formula")))
-            throw new NotSupportedException("Only equals.value and equals.formula assertions are supported");
+            properties.Any(property => property.Name is not ("value" or "formula" or "rich")))
+            throw new NotSupportedException("Only equals.value, equals.formula and equals.rich assertions are supported");
         var checkValue = Expected.TryGetProperty("value", out var value);
         var (kind, scalar) = checkValue ? value.ValueKind switch
         {
@@ -374,6 +374,14 @@ public sealed class SaveAssertionRequest
                 string.IsNullOrEmpty(formula = expectedFormula.GetString()?.TrimStart('=')))
                 throw new ArgumentException("Assertion formula must be a nonempty string");
         }
-        return new DocLoupe.Excel.Verify.ValueAssertion(sheet, address, checkValue, kind, scalar, formula);
+        string? rich = null;
+        if (Expected.TryGetProperty("rich", out var expectedRich))
+        {
+            if (expectedRich.ValueKind != JsonValueKind.String)
+                throw new ArgumentException("Assertion rich must be a markup string");
+            rich = expectedRich.GetString()!;
+            DocLoupe.Excel.Verify.RichTextAssertions.Validate(rich);
+        }
+        return new DocLoupe.Excel.Verify.ValueAssertion(sheet, address, checkValue, kind, scalar, formula, Rich: rich);
     }
 }
