@@ -84,9 +84,9 @@ public static class SetValueEngine
                     var rich = existingShared && strings.IsRich(index) || inline is not null &&
                         inline.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "r" or "rPh" or "phoneticPr");
                     if (operation.Operation == "rich_set" &&
-                        (existingShared && strings.IsRich(index) || inline is not null &&
+                        (existingShared && strings.IsPhonetic(index) || inline is not null &&
                             inline.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "rPh" or "phoneticPr")))
-                        throw new NotSupportedException("rich_set cannot replace shared rich text or phonetic annotations yet");
+                        throw new NotSupportedException("rich_set cannot replace phonetic annotations yet");
                     if (rich && operation.RichPolicy != "replace" && operation.Operation is not ("clear" or "rich_set"))
                         throw new InvalidDataException("RICH_CONTENT_REQUIRES_REPLACE");
                     if (operation.RemoveCell)
@@ -398,6 +398,7 @@ public static class SetValueEngine
         private readonly string _part;
         private readonly string? _relationship;
         private readonly List<string?> _values = [];
+        private readonly List<bool> _phonetic = [];
         private readonly List<string> _added = [];
         private int _references;
 
@@ -411,12 +412,18 @@ public static class SetValueEngine
             if (relationship is null) return;
             var document = PackageStore.Parse(store.Read(_part));
             foreach (var item in document.DocumentElement!.ChildNodes.OfType<XmlElement>().Where(item => item.LocalName == "si" && item.NamespaceURI == PackageStore.Main))
+            {
                 _values.Add(item.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "r" or "rPh" or "phoneticPr") ? null :
                     item.GetElementsByTagName("t", PackageStore.Main).OfType<XmlElement>().FirstOrDefault()?.InnerText);
+                _phonetic.Add(item.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "rPh" or "phoneticPr"));
+            }
         }
 
         public bool IsRich(int index) => index < 0 || index >= _values.Count
             ? throw new InvalidDataException("Invalid shared-string index") : _values[index] is null;
+
+        public bool IsPhonetic(int index) => index < 0 || index >= _phonetic.Count
+            ? throw new InvalidDataException("Invalid shared-string index") : _phonetic[index];
 
         public void RemoveReference() => _references--;
 

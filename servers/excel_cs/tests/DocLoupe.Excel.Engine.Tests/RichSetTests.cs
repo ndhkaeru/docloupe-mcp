@@ -106,6 +106,53 @@ public sealed class RichSetTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Fact]
+    public void RichSetReplacesSharedRichWithoutChangingTheSharedItem()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-rich-shared-run-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "shared-rich.xlsx");
+            var richWithPhonetic = Path.Combine(directory, "rich-phonetic.xlsx");
+            RichFixture.Create(Path.Combine(directory, "default.xlsx"), richWithPhonetic, inline: false);
+            using (var prepared = new PackageStore(richWithPhonetic))
+            {
+                var document = PackageStore.Parse(prepared.Read("xl/sharedStrings.xml"));
+                foreach (var name in new[] { "rPh", "phoneticPr" })
+                    foreach (var child in document.GetElementsByTagName(name, PackageStore.Main).OfType<XmlElement>().ToArray())
+                        child.ParentNode!.RemoveChild(child);
+                prepared.Set("xl/sharedStrings.xml", Encoding.UTF8.GetBytes(document.OuterXml));
+                prepared.Save(source);
+            }
+            using var original = new PackageStore(source);
+            var originalItem = Assert.Single(PackageStore.Parse(original.Read("xl/sharedStrings.xml"))
+                .GetElementsByTagName("si", PackageStore.Main).OfType<XmlElement>()).OuterXml;
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            const string markup = "<r>replaced</r><r b=\"false\"> shared</r>";
+            sessions.Apply(id, 0, [Request(JsonSerializer.Serialize(new
+            {
+                op = "rich_set", target = "Sheet1!A1", rich = markup,
+                expect = new { rich = "<r>hello</r><r b color=\"FFFF0000\"> bold</r>" }
+            }))]);
+            var output = Path.Combine(directory, "written.xlsx");
+            Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(id, output,
+                [new ValueAssertion("Sheet1", "A1", false, null, null, null, Rich: markup)]))
+                .GetProperty("status").GetString());
+            var cell = Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["A1"]));
+            Assert.Equal("inline", cell.Kind);
+            Assert.True(RichTextAssertions.Matches(cell, markup));
+            using var saved = new PackageStore(output);
+            var shared = PackageStore.Parse(saved.Read("xl/sharedStrings.xml"));
+            Assert.Equal("0", shared.DocumentElement!.GetAttribute("count"));
+            Assert.Equal(originalItem, Assert.Single(shared.GetElementsByTagName("si", PackageStore.Main)
+                .OfType<XmlElement>()).OuterXml);
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     [Theory]
     [InlineData("""{"op":"rich_set","target":"Sheet1!A1","runs":[]}""")]
     [InlineData("""{"op":"rich_set","target":"Sheet1!A1","runs":[{"text":"x","font":{"bold":"yes"}}]}""")]
