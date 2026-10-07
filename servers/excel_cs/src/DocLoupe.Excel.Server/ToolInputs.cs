@@ -20,6 +20,8 @@ public sealed class SetValueRequest
     public JsonElement Value { get; init; }
     [JsonPropertyName("rich")]
     public JsonElement Rich { get; init; }
+    [JsonPropertyName("runs")]
+    public JsonElement Runs { get; init; }
     [JsonPropertyName("values")]
     public JsonElement Values { get; init; }
     [JsonPropertyName("series")]
@@ -50,8 +52,8 @@ public sealed class SetValueRequest
         if (Label is { Length: > 256 }) throw new ArgumentException("Op label exceeds 256 characters");
         if (Op is not ("set_value" or "set_formula" or "clear" or "rich_set")) throw new NotSupportedException("Unsupported cell operation");
         if (Other is { Count: > 0 }) throw new NotSupportedException("Unsupported cell operation fields");
-        if (Op != "rich_set" && Rich.ValueKind != JsonValueKind.Undefined)
-            throw new NotSupportedException("rich requires rich_set");
+        if (Op != "rich_set" && (Rich.ValueKind != JsonValueKind.Undefined || Runs.ValueKind != JsonValueKind.Undefined))
+            throw new NotSupportedException("rich and runs require rich_set");
         if (Op == "clear")
         {
             if (Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Undefined ||
@@ -70,15 +72,16 @@ public sealed class SetValueRequest
         }
         if (Op == "rich_set")
         {
-            if (Rich.ValueKind != JsonValueKind.String || Target.Contains(':') ||
+            if (!(Rich.ValueKind == JsonValueKind.String && Runs.ValueKind == JsonValueKind.Undefined ||
+                  Runs.ValueKind == JsonValueKind.Array && Rich.ValueKind == JsonValueKind.Undefined) || Target.Contains(':') ||
                 Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Undefined ||
                 Series.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
                 Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null ||
                 What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
-                throw new NotSupportedException("rich_set requires one cell and rich markup; runs and phonetic are not supported yet");
+                throw new NotSupportedException("rich_set requires one cell and exactly one of rich or runs; phonetic is not supported yet");
             var richSheet = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
             var richAddress = CellAddress.Parse(Target).ToString();
-            var markup = Rich.GetString()!;
+            var markup = Runs.ValueKind == JsonValueKind.Array ? RenderRuns(Runs) : Rich.GetString()!;
             return new SetValueOp(richSheet, richAddress, "inline", RichSetMarkup.Parse(markup).Text,
                 Operation: "rich_set", Expect: NormalizeExpect(richSheet, richAddress), Label: Label,
                 RichMarkup: markup);
@@ -146,6 +149,41 @@ public sealed class SetValueRequest
             Expect: NormalizeExpect(name, address), Label: Label);
     }
 
+    private static string RenderRuns(JsonElement input)
+    {
+        if (input.GetArrayLength() is < 1 or > 256)
+            throw new NotSupportedException("rich_set requires 1..256 runs");
+        var runs = new List<RichSetRun>(input.GetArrayLength());
+        foreach (var entry in input.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object ||
+                entry.EnumerateObject().Any(property => property.Name is not ("text" or "font")) ||
+                !entry.TryGetProperty("text", out var text) || text.ValueKind != JsonValueKind.String)
+                throw new NotSupportedException("rich_set runs require text and optional font");
+            entry.TryGetProperty("font", out var font);
+            if (font.ValueKind != JsonValueKind.Undefined &&
+                (font.ValueKind != JsonValueKind.Object ||
+                 font.EnumerateObject().Any(property => property.Name is not ("bold" or "italic" or "color"))))
+                throw new NotSupportedException("rich_set font supports only bold, italic and color");
+            bool? Flag(string name)
+            {
+                if (font.ValueKind == JsonValueKind.Undefined || !font.TryGetProperty(name, out var flag)) return null;
+                return flag.ValueKind switch
+                {
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    _ => throw new NotSupportedException("rich_set font flags require booleans")
+                };
+            }
+            string? color = null;
+            if (font.ValueKind == JsonValueKind.Object && font.TryGetProperty("color", out var value))
+                color = value.ValueKind == JsonValueKind.String ? value.GetString() :
+                    throw new NotSupportedException("rich_set color requires RGB or ARGB hex text");
+            runs.Add(new RichSetRun(text.GetString()!, Flag("bold"), Flag("italic"), color));
+        }
+        return RichSetMarkup.Render(runs);
+    }
+
     private CellPrecondition? NormalizeExpect(string sheet, string address)
     {
         if (Expect.ValueKind == JsonValueKind.Undefined) return null;
@@ -200,8 +238,8 @@ public sealed class SetValueRequest
 
     private SetValueOp[] NormalizeManyCore(string? defaultSheet)
     {
-        if (Rich.ValueKind != JsonValueKind.Undefined && Op != "rich_set")
-            throw new NotSupportedException("rich requires rich_set");
+        if ((Rich.ValueKind != JsonValueKind.Undefined || Runs.ValueKind != JsonValueKind.Undefined) && Op != "rich_set")
+            throw new NotSupportedException("rich and runs require rich_set");
         if (Expect.ValueKind != JsonValueKind.Undefined && Op is not ("set_value" or "set_values" or "set_formula" or "fill" or "clear" or "rich_set"))
             throw new NotSupportedException("expect requires a supported cell operation");
         var hasValue = Value.ValueKind != JsonValueKind.Undefined;

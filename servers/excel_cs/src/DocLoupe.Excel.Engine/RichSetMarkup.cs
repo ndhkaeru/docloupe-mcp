@@ -49,6 +49,25 @@ public static class RichSetMarkup
         return new RichSetValue(string.Concat(runs.Select(run => run.Text)), runs);
     }
 
+    public static string Render(IReadOnlyList<RichSetRun> runs)
+    {
+        if (runs.Count is < 1 or > 256) throw new NotSupportedException("rich_set requires 1..256 runs");
+        var document = new XmlDocument { XmlResolver = null };
+        var elements = new List<string>(runs.Count);
+        foreach (var run in runs)
+        {
+            var element = document.CreateElement("r");
+            if (run.Bold is { } bold) element.SetAttribute("b", bold ? "true" : "false");
+            if (run.Italic is { } italic) element.SetAttribute("i", italic ? "true" : "false");
+            if (run.Color is { } color) element.SetAttribute("color", color);
+            element.InnerText = run.Text;
+            elements.Add(element.OuterXml);
+        }
+        var markup = string.Concat(elements);
+        Parse(markup);
+        return markup;
+    }
+
     public static void Append(XmlDocument document, XmlElement inline, RichSetValue value)
     {
         foreach (var run in value.Runs)

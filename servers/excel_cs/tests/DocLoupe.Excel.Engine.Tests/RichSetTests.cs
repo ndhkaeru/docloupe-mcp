@@ -79,6 +79,49 @@ public sealed class RichSetTests
     }
 
     [Fact]
+    public void StructuredRunsRoundTripAndVerifyOnSavedFile()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-rich-runs-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var operation = Request("""{"op":"rich_set","target":"Sheet1!A1","runs":[{"text":"<&ệ"},{"text":" bold","font":{"bold":true,"italic":false,"color":"ff0000"}}]}""");
+            Assert.Equal("<&ệ bold", operation.Value);
+            var parsed = RichSetMarkup.Parse(operation.RichMarkup!);
+            Assert.Equal(2, parsed.Runs.Count);
+            Assert.Equal(new RichSetRun(" bold", true, false, "FFFF0000"), parsed.Runs[1]);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(Path.Combine(directory, "new-shared-strings.xlsx")))
+                .GetProperty("session").GetString()!;
+            sessions.Apply(id, 0, [operation]);
+            var output = Path.Combine(directory, "runs.xlsx");
+            var assertion = new ValueAssertion("Sheet1", "A1", true, "text", "<&ệ bold", null,
+                Rich: operation.RichMarkup);
+            Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(id, output, [assertion]))
+                .GetProperty("status").GetString());
+            Assert.True(RichTextAssertions.Matches(Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["A1"])),
+                operation.RichMarkup!));
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("""{"op":"rich_set","target":"Sheet1!A1","runs":[]}""")]
+    [InlineData("""{"op":"rich_set","target":"Sheet1!A1","runs":[{"text":"x","font":{"bold":"yes"}}]}""")]
+    [InlineData("""{"op":"rich_set","target":"Sheet1!A1","runs":[{"text":"x","font":{"color":"theme:5"}}]}""")]
+    [InlineData("""{"op":"rich_set","target":"Sheet1!A1","runs":[{"text":"x","font":{"strike":true}}]}""")]
+    [InlineData("""{"op":"rich_set","target":"Sheet1!A1","runs":[{"text":"x","unknown":1}]}""")]
+    [InlineData("""{"op":"rich_set","target":"Sheet1!A1","runs":[{"text":"x"}],"rich":"<r>x</r>"}""")]
+    [InlineData("""{"op":"rich_set","target":"Sheet1!A1","runs":[{"text":"x"}],"rich":null}""")]
+    [InlineData("""{"op":"rich_set","target":"Sheet1!A1","rich":"<r>x</r>","runs":null}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!A1","value":1,"runs":[{"text":"x"}]}""")]
+    public void StructuredRunsFailClosedOnUnsupportedInputs(string json)
+    {
+        Assert.ThrowsAny<Exception>(() => Request(json));
+    }
+
+    [Fact]
     public void RichSetRejectsPhoneticSourceAndInvalidMarkupBeforeChangingRevision()
     {
         var directory = Path.Combine(Path.GetTempPath(), "docloupe-rich-guard-" + Guid.NewGuid().ToString("N"));
