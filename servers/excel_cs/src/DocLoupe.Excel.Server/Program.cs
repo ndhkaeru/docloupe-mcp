@@ -162,9 +162,15 @@ static CallToolResult Handle(Func<object> action)
     }
     catch (PreconditionFailedException failed)
     {
+        var details = new Dictionary<string, object?>
+        {
+            ["index"] = failed.Index, ["target"] = failed.Target,
+            ["expected"] = failed.Expected, ["actual"] = failed.Actual
+        };
+        if (failed.Expected.FontBold is not null)
+            details["actual_style"] = failed.ActualFontBold is { } bold ? new { font = new { bold } } : null;
         return Result(new { ok = false, error = new { code = "PRECONDITION_FAILED", message = failed.Message,
-            details = new { index = failed.Index, target = failed.Target, expected = failed.Expected,
-                actual = failed.Actual }, retryable = false } }, true);
+            details, retryable = false } }, true);
     }
     catch (Exception error)
     {

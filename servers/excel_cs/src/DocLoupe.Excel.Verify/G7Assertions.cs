@@ -31,15 +31,7 @@ public static class G7Assertions
             Dictionary<string, CellRead>? originals = null;
             IReadOnlyDictionary<string, bool?>? fontBold = null;
             if (group.Any(item => item.FontBold is not null))
-            {
-                try { fontBold = P2aGates.ReadExplicitFontBold(path, group.Key, cells.Values); }
-                catch (Exception error) when (error is InvalidDataException or System.Xml.XmlException or
-                                              InvalidOperationException or KeyNotFoundException or UriFormatException or ArgumentException)
-                {
-                    issues.AddRange(group.Where(item => item.FontBold is not null).Select(item =>
-                        new GateIssue("G7", "ASSERT_STYLE_UNVERIFIED", $"{group.Key}!{item.Address}")));
-                }
-            }
+                fontBold = ReadFontBold(path, group.Key, cells.Values);
             if (source is not null && group.Any(item => item.Unchanged))
             {
                 try
@@ -99,6 +91,17 @@ public static class G7Assertions
         !assertion.Unchanged && assertion.FontBold is null && !CheckValueAndFormula(actual, assertion,
             assertion.Sheet + "!" + assertion.Address).Any() &&
         (assertion.Rich is null || RichTextAssertions.Matches(actual, assertion.Rich));
+
+    public static IReadOnlyDictionary<string, bool?> ReadFontBold(string path, string sheetName, IEnumerable<CellRead> cells)
+    {
+        var observed = cells.ToArray();
+        try { return P2aGates.ReadExplicitFontBold(path, sheetName, observed); }
+        catch (Exception error) when (error is InvalidDataException or System.Xml.XmlException or
+                                      InvalidOperationException or KeyNotFoundException or UriFormatException or ArgumentException)
+        {
+            return observed.ToDictionary(cell => cell.Address, _ => (bool?)null, StringComparer.Ordinal);
+        }
+    }
 
     private static IEnumerable<GateIssue> CheckValueAndFormula(CellRead? actual,
         ValueAssertion assertion, string target)

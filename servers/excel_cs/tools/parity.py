@@ -198,6 +198,16 @@ async def save_new(source, output, dll, assert_rich=False):
                     "sheet": "Sheet1", "dry_run": True, "ops": [{"op": "set_value", "target": "A1",
                     "value": "plain bold", "rich_policy": "replace",
                     "expect": {"rich": '<r>plain</r><r b color="FF0000"> bold</r>'}}]})
+                style_failure = await client.call_tool("excel_apply", {"session": session,
+                    "base_revision": 0, "sheet": "Sheet1", "ops": [{"op": "set_value", "target": "B1",
+                    "value": 27, "expect": {"style": {"font": {"bold": False}}}}]})
+                envelope = style_failure.structuredContent
+                if not style_failure.isError or envelope is None or envelope.get("error", {}).get("code") != "PRECONDITION_FAILED":
+                    raise AssertionError(f"Style precondition must fail before writing: {envelope}")
+                details = envelope["error"]["details"]
+                if details["index"] != 0 or details["target"] != "Sheet1!B1" or details.get("actual_style") not in (
+                    None, {"font": {"bold": True}}):
+                    raise AssertionError(f"Unexpected style precondition evidence: {details}")
             await call("excel_apply", {"session": session, "base_revision": 0, "sheet": "Sheet1", "ops": [
                 *({"op": "set_value", "target": address, "value": VALUES[address]}
                   for address in ("B1", "C1", "E5", "F6")),

@@ -8,7 +8,7 @@ using DocLoupe.Excel.Package;
 namespace DocLoupe.Excel.Engine;
 
 public sealed record FormulaCache(string Type, string Value);
-public sealed record CellPrecondition(bool CheckValue, string? Kind, string? Value, string? Formula, bool? Empty = null, string? Text = null, string? Rich = null);
+public sealed record CellPrecondition(bool CheckValue, string? Kind, string? Value, string? Formula, bool? Empty = null, string? Text = null, string? Rich = null, bool? FontBold = null);
 public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, CellPrecondition? Expect = null, int SourceIndex = -1, string? Label = null);
 public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCache? ExplicitCache = null);
 public sealed record ApplyResult(IReadOnlyList<ExpectedCell> Intent, IReadOnlyList<ByteEdit> Edits, IReadOnlyList<string> ChangedParts);

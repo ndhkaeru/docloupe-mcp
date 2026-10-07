@@ -486,6 +486,7 @@ public sealed class ExcelSessions : IDisposable
                 {
                     var preconditions = operations.Where(operation => operation.Expect is not null).ToArray();
                     var observed = new Dictionary<string, CellRead?>(StringComparer.Ordinal);
+                    var observedBold = new Dictionary<string, bool?>(StringComparer.Ordinal);
                     var missingSheets = new HashSet<string>(StringComparer.Ordinal);
                     foreach (var group in preconditions.GroupBy(operation => operation.Sheet, StringComparer.Ordinal))
                     {
@@ -496,6 +497,15 @@ public sealed class ExcelSessions : IDisposable
                                 .ToDictionary(cell => cell.Address, StringComparer.Ordinal);
                             foreach (var operation in group)
                                 observed[operation.Sheet + "!" + operation.Address] = cells.GetValueOrDefault(operation.Address);
+                            if (group.Any(operation => operation.Expect?.FontBold is not null))
+                            {
+                                var bold = G7Assertions.ReadFontBold(basePath, group.Key, cells.Values);
+                                foreach (var operation in group.Where(operation => operation.Expect?.FontBold is not null))
+                                {
+                                    bold.TryGetValue(operation.Address, out var value);
+                                    observedBold[operation.Sheet + "!" + operation.Address] = value;
+                                }
+                            }
                         }
                         catch (InvalidOperationException) { missingSheets.Add(group.Key); }
                     }
@@ -505,16 +515,18 @@ public sealed class ExcelSessions : IDisposable
                         if (operation.Expect is not { } expected) continue;
                         var target = operation.Sheet + "!" + operation.Address;
                         observed.TryGetValue(target, out var actual);
+                        observedBold.TryGetValue(target, out var actualBold);
                         var assertionMatches = G7Assertions.Matches(actual, new ValueAssertion(
                             operation.Sheet, operation.Address, expected.CheckValue,
                             expected.Kind, expected.Value, expected.Formula, Rich: expected.Rich));
                         var isEmpty = actual is null || actual.Kind == "blank" && actual.Formula is null;
                         if (assertionMatches && !missingSheets.Contains(operation.Sheet) &&
                             (expected.Empty is null || expected.Empty == isEmpty) &&
+                            (expected.FontBold is null || actualBold == expected.FontBold) &&
                             (expected.Text is null || actual is { Kind: "text" or "inline" } &&
                                 string.Equals(actual.Value, expected.Text, StringComparison.Ordinal))) continue;
                         throw new PreconditionFailedException(operation.SourceIndex < 0 ? index : operation.SourceIndex,
-                            target, expected, actual);
+                            target, expected, actual, actualBold);
                     }
                 }
                 finally { if (basePath != session.BasePath) File.Delete(basePath); }
@@ -894,13 +906,15 @@ public sealed record SessionSnapshot(int Revision, int SavedRevision, IReadOnlyL
 
 public sealed record BusyOperation(string Operation, string Since);
 
-public sealed class PreconditionFailedException(int index, string target, CellPrecondition expected, CellRead? actual)
+public sealed class PreconditionFailedException(int index, string target, CellPrecondition expected, CellRead? actual,
+    bool? actualFontBold = null)
     : Exception("PRECONDITION_FAILED: " + target)
 {
     public int Index { get; } = index;
     public string Target { get; } = target;
     public CellPrecondition Expected { get; } = expected;
     public CellRead? Actual { get; } = actual;
+    public bool? ActualFontBold { get; } = actualFontBold;
 }
 
 public sealed class SaveBlockedException(IReadOnlyList<GateIssue> issues) : Exception("SAVE_BLOCKED: " + JsonSerializer.Serialize(issues))

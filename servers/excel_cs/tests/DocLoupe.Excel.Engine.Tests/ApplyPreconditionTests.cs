@@ -296,6 +296,51 @@ public sealed class ApplyPreconditionTests
     }
 
     [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("new-shared-strings")]
+    public void ExpectExplicitBoldStyleChecksBeforeBatchAndDryRun(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-style-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var styled = Path.Combine(directory, "styled.xlsx");
+            StyledFixture.Create(Path.Combine(directory, variant + ".xlsx"), styled);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(styled)).GetProperty("session").GetString()!;
+            const string good = """{"op":"set_value","target":"Sheet1!B1","value":27,"expect":{"value":42,"style":{"font":{"bold":true}}}}""";
+            const string wrong = """{"op":"set_value","target":"Sheet1!B1","value":28,"expect":{"style":{"font":{"bold":false}}}}""";
+            sessions.Apply(id, 0, [Request(good)], dryRun: true);
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            var failed = Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"set_value","target":"Sheet1!E5","value":99}"""), Request(wrong)]));
+            Assert.Equal(1, failed.Index);
+            Assert.Equal("Sheet1!B1", failed.Target);
+            Assert.False(failed.Expected.FontBold);
+            Assert.True(failed.ActualFontBold);
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            Assert.Empty(JsonSerializer.SerializeToElement(sessions.Read(id, "Sheet1", ["E5"]))
+                .GetProperty("cells").EnumerateArray());
+            var range = JsonSerializer.Deserialize<SetValueRequest>("""{"op":"set_value","target":"Sheet1!B1:C1","value":30,"expect":{"style":{"font":{"bold":true}}}}""")!
+                .NormalizeMany(null).Select(cell => cell with { SourceIndex = 1 }).ToArray();
+            var rangeFailure = Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"set_value","target":"Sheet1!E5","value":99}"""), .. range]));
+            Assert.Equal(1, rangeFailure.Index);
+            Assert.Equal("Sheet1!C1", rangeFailure.Target);
+            Assert.Null(rangeFailure.ActualFontBold);
+            sessions.Apply(id, 0, [Request(good), Request("""{"op":"clear","target":"Sheet1!D3","expect":{"style":{"font":{"bold":false}},"empty":false}}""")]);
+            Assert.Equal(1, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            sessions.Apply(id, 1, [Request("""{"op":"set_value","target":"Sheet1!B1","value":28,"expect":{"value":27,"style":{"font":{"bold":true}}}}""")]);
+            var output = Path.Combine(directory, "verified.xlsx");
+            sessions.Save(id, output);
+            Assert.Equal("28", Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["B1"])).Value);
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":null}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"formula":""}}""")]
@@ -310,6 +355,9 @@ public sealed class ApplyPreconditionTests
     [InlineData("""{"op":"set_value","target":"Sheet1!A1","value":"x","expect":{"rich":"<r bad=\"1\">x</r>"}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!A1","value":"x","expect":{"rich":null}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!A1","value":"x","expect":{"rich":"x","empty":true}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"style":{}}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"style":{"font":{"bold":1}}}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"style":{"font":{"bold":true,"italic":true}}}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"value":1e2147483648}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1:C1","value":1,"expect":{"rich":17}}""")]
     [InlineData("""{"op":"set_values","target":"Sheet1!B1","values":[[1]],"expect":{"style":{}}}""")]

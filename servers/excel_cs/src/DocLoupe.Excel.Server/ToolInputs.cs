@@ -131,10 +131,10 @@ public sealed class SetValueRequest
     {
         if (Expect.ValueKind == JsonValueKind.Undefined) return null;
         if (Expect.ValueKind != JsonValueKind.Object)
-            throw new NotSupportedException("Only expect.value, expect.formula, expect.empty, expect.text and expect.rich are supported");
+            throw new NotSupportedException("Only expect.value, expect.formula, expect.empty, expect.text, expect.rich and bounded expect.style are supported");
         var properties = Expect.EnumerateObject().ToArray();
         if (properties.Length == 0 || properties.GroupBy(property => property.Name).Any(group => group.Count() > 1) ||
-            properties.Any(property => property.Name is not ("value" or "formula" or "empty" or "text" or "rich")))
+            properties.Any(property => property.Name is not ("value" or "formula" or "empty" or "text" or "rich" or "style")))
             throw new NotSupportedException("Unsupported expect fields");
         bool? empty = null;
         if (Expect.TryGetProperty("empty", out var expectedEmpty))
@@ -159,17 +159,18 @@ public sealed class SetValueRequest
         }
         if (rich is not null && empty == true)
             throw new NotSupportedException("expect.rich cannot require an empty cell");
-        var valueAndFormula = properties.Where(property => property.Name is "value" or "formula").ToArray();
-        if (valueAndFormula.Length == 0) return new CellPrecondition(false, null, null, null, empty, text, rich);
+        var valueFormulaStyle = properties.Where(property => property.Name is "value" or "formula" or "style").ToArray();
+        if (valueFormulaStyle.Length == 0) return new CellPrecondition(false, null, null, null, empty, text, rich);
         var assertion = new SaveAssertionRequest
         {
             Target = sheet + "!" + address,
-            Expected = JsonSerializer.SerializeToElement(valueAndFormula.ToDictionary(property => property.Name, property => property.Value))
+            Expected = JsonSerializer.SerializeToElement(valueFormulaStyle.ToDictionary(property => property.Name, property => property.Value))
         }.Normalize();
         if (rich is not null && (assertion.Formula is not null ||
             assertion.CheckValue && assertion.Kind != "text"))
             throw new NotSupportedException("expect.rich requires text content, not a formula or another value type");
-        return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula, empty, text, rich);
+        return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula, empty, text, rich,
+            assertion.FontBold);
     }
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)
