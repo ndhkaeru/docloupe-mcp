@@ -72,6 +72,8 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
 - **Readback:** the `readback` block of the save report is produced by this gate's reader, so the agent sees exactly what is in the file.
 - *Legacy:* not implemented. In V-06, both sides of the legacy comparison were identical, so it passed.
 
+**Current `rich_set` slice:** G4 independently reads the saved inline-string runs and compares their boundaries, text, and supported explicit bold/italic/color attributes to the declared markup. A run-formatting change that preserves the concatenated text still blocks save. This does not establish coverage for arbitrary rich/phonetic content.
+
 ### 3.5 G5 — Preservation
 
 - **What is compared:** for every facet and part that is **not** covered by a declared effect, `W == T(O)`, where `T` applies the batch transforms (§6).

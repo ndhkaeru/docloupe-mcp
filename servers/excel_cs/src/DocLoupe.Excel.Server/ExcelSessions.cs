@@ -713,20 +713,20 @@ public sealed class ExcelSessions : IDisposable
                 reports.AddRange(schema.Issues.Select(issue => new GateIssue("G2", issue.Code, issue.Detail)));
                 reports.AddRange(P2aMarkupGate.Check(session.BasePath, staging, result.ChangedParts));
                 reports.AddRange(P2aGates.CheckIntent(staging, result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
-                    item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null))));
+                    item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null, item.RichMarkup))));
                 var addedOrRemoved = result.ChangedParts.Where(part => !store.Contains(part) || !PartExists(session.BasePath, part));
                 reports.AddRange(P2aGates.CheckPreservation(session.BasePath, staging,
                     result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After)), addedOrRemoved));
                 reports.AddRange(P2aGates.CheckTouchedCells(session.BasePath, staging,
                     result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
-                    item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null))));
+                    item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null, item.RichMarkup))));
                 reports.AddRange(P2aGates.CheckSemanticPreservation(session.BasePath, staging,
                     result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
-                    item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null)),
+                    item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null, item.RichMarkup)),
                     result.Edits.Select(edit => new DeclaredByteSpan(edit.Part, edit.Start, edit.End, edit.Before, edit.After))));
                 reports.AddRange(AdvancedPartGate.Check(session.BasePath, staging,
                     result.Intent.Select(item => new CellExpectation(item.Sheet, item.Address, item.Kind, item.Value, item.AllowMissing, item.RequireMissing, item.KeepCache,
-                    item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null))));
+                    item.ExplicitCache is { } cache ? new FormulaCacheExpectation(cache.Type, cache.Value) : null, item.RichMarkup))));
                 if (reports.Count == 0) reports.AddRange(G7Assertions.Check(staging, assertions ?? [], session.BasePath));
                 if (reports.Count > 0) throw new SaveBlockedException(reports);
                 if (schema.Gaps.Count > 0) throw new SaveBlockedException(schema.Gaps.Select(issue => new GateIssue("G2", issue.Code, issue.Detail)).ToArray());

@@ -9,8 +9,8 @@ namespace DocLoupe.Excel.Engine;
 
 public sealed record FormulaCache(string Type, string Value);
 public sealed record CellPrecondition(bool CheckValue, string? Kind, string? Value, string? Formula, bool? Empty = null, string? Text = null, string? Rich = null, bool? FontBold = null);
-public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, CellPrecondition? Expect = null, int SourceIndex = -1, string? Label = null);
-public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCache? ExplicitCache = null);
+public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, CellPrecondition? Expect = null, int SourceIndex = -1, string? Label = null, string? RichMarkup = null);
+public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, string? RichMarkup = null);
 public sealed record ApplyResult(IReadOnlyList<ExpectedCell> Intent, IReadOnlyList<ByteEdit> Edits, IReadOnlyList<string> ChangedParts);
 
 public static class SetValueEngine
@@ -26,6 +26,10 @@ public static class SetValueEngine
         if (operations.Any(operation => operation.KeepCache && (operation.Operation != "set_formula" || operation.Kind != "formula") ||
             operation.ExplicitCache is not null && (operation.Operation != "set_formula" || operation.Kind != "formula" || operation.KeepCache) ||
             operation.RemoveCell && operation.Operation != "clear" ||
+            operation.RichMarkup is not null && operation.Operation != "rich_set" ||
+            operation.Operation == "rich_set" &&
+            (operation.Kind != "inline" || operation.RichMarkup is null || operation.RichPolicy != "reject" ||
+             operation.AsText || operation.Value != RichSetMarkup.Parse(operation.RichMarkup).Text) ||
             operation.Operation == "clear" &&
             (operation.Kind != "blank" || operation.Value is not null || operation.RichPolicy != "reject" || operation.AsText)))
             throw new NotSupportedException("Only value-only clear is supported");
@@ -79,7 +83,11 @@ public static class SetValueEngine
                     var inline = Direct(cell, "is");
                     var rich = existingShared && strings.IsRich(index) || inline is not null &&
                         inline.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "r" or "rPh" or "phoneticPr");
-                    if (rich && operation.RichPolicy != "replace" && operation.Operation != "clear")
+                    if (operation.Operation == "rich_set" &&
+                        (existingShared && strings.IsRich(index) || inline is not null &&
+                            inline.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "rPh" or "phoneticPr")))
+                        throw new NotSupportedException("rich_set cannot replace shared rich text or phonetic annotations yet");
+                    if (rich && operation.RichPolicy != "replace" && operation.Operation is not ("clear" or "rich_set"))
                         throw new InvalidDataException("RICH_CONTENT_REQUIRES_REPLACE");
                     if (operation.RemoveCell)
                     {
@@ -109,7 +117,8 @@ public static class SetValueEngine
                     }
                 }
                 intent.Add(new ExpectedCell(operation.Sheet, address.ToString(), operation.Kind, operation.Value,
-                    operation.Operation == "clear", operation.RemoveCell, operation.KeepCache, operation.ExplicitCache));
+                    operation.Operation == "clear", operation.RemoveCell, operation.KeepCache, operation.ExplicitCache,
+                    operation.RichMarkup));
             }
             foreach (var (row, added) in newCells)
                 InsertCells(lexical, row, added);
@@ -230,11 +239,16 @@ public static class SetValueEngine
         {
             cell.SetAttribute("t", "inlineStr");
             var inline = document.CreateElement(cell.Prefix, "is", PackageStore.Main);
-            var text = document.CreateElement(cell.Prefix, "t", PackageStore.Main);
-            text.InnerText = value ?? "";
-            if (value?.Length > 0 && (char.IsWhiteSpace(value[0]) || char.IsWhiteSpace(value[^1])))
-                text.SetAttribute("xml:space", "preserve");
-            inline.AppendChild(text);
+            if (operation.RichMarkup is { } richMarkup)
+                RichSetMarkup.Append(document, inline, RichSetMarkup.Parse(richMarkup));
+            else
+            {
+                var text = document.CreateElement(cell.Prefix, "t", PackageStore.Main);
+                text.InnerText = value ?? "";
+                if (value?.Length > 0 && (char.IsWhiteSpace(value[0]) || char.IsWhiteSpace(value[^1])))
+                    text.SetAttribute("xml:space", "preserve");
+                inline.AppendChild(text);
+            }
             cell.AppendChild(inline);
         }
         else

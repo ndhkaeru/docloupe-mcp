@@ -301,6 +301,8 @@ Effects listed per op are the semantic paths (02 §6) the op **declares**. G4 ch
 | `rich_delete` | `target`, `at: Span` | `.rich`, `.value` |
 | `phonetic_set` | `target`, `runs`, `properties?` | `.phonetic` |
 
+**Current `rich_set` slice:** requires a single cell and `rich` markup of 1–256 text-only `<r>` elements, optionally carrying explicit `b`, `i` (boolean), or `color` (RGB/ARGB hex) attributes. It writes inline rich text, preserving run boundaries and whitespace. Existing shared-rich and phonetic content, `runs`, `phonetic`, and all other rich ops remain unsupported; unsupported input fails before the session revision changes. Plain shared strings may become inline strings; unrelated shared-string references remain unchanged.
+
 **Current `clear` slice:** only `what: ["values"]` (or omitted) is supported, for a cell or rectangular range of at most 500 cells. With `remove_cells: false` (default), existing cells retain their style; with `remove_cells: true`, existing `<c>` elements are removed while their rows remain. Absent cells remain absent in both modes. Clearing an existing formula invalidates its `calcChain` entry; a no-op clear leaves all package part bytes unchanged. Other facets fail closed.
 
 **Current error-value slice:** `set_value` and `set_values` accept `{"error":"#N/A"}` and the canonical error tokens recognized by the legacy formula-cache writer. A new or existing cell stores `t="e"`; unsupported tokens fail before mutation. `excel_save.assert` accepts `equals.value: {"error":"#N/A"}` with exact readback.

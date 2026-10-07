@@ -377,6 +377,32 @@ try
         ["session"] = savedId, ["discard_unsaved"] = false
     });
     if (savedClosed.IsError == true) throw new InvalidOperationException("Saved session close failed");
+    var richSession = await client.CallToolAsync("excel_open", new Dictionary<string, object?> { ["path"] = output });
+    if (richSession.IsError == true) throw new InvalidOperationException("Rich smoke could not reopen saved file");
+    var richId = richSession.StructuredContent!.Value.GetProperty("data").GetProperty("session").GetString()!;
+    const string richMarkup = "<r>bold</r><r b=\"true\" color=\"336699\"> text</r>";
+    var richApplied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = richId, ["base_revision"] = 0, ["sheet"] = "Sheet1",
+        ["ops"] = new[] { new { op = "rich_set", target = "D3", rich = richMarkup, expect = new { empty = true } } }
+    });
+    if (richApplied.IsError == true || richApplied.StructuredContent?.GetProperty("data")
+        .GetProperty("readback").GetProperty("Sheet1!D3").GetProperty("Value").GetString() != "bold text")
+        throw new InvalidOperationException("MCP rich_set apply failed: " + richApplied.StructuredContent?.GetRawText());
+    var richOutput = Path.Combine(directory, "rich.xlsx");
+    var richSaved = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
+    {
+        ["session"] = richId, ["mode"] = "copy", ["path"] = richOutput,
+        ["assert"] = new[] { new { target = "Sheet1!D3", equals = new { rich = richMarkup } } }
+    });
+    if (richSaved.IsError == true || richSaved.StructuredContent?.GetProperty("data")
+        .GetProperty("status").GetString() != "verified" || !File.Exists(richOutput))
+        throw new InvalidOperationException("MCP rich_set save failed: " + richSaved.StructuredContent?.GetRawText());
+    var richClosed = await client.CallToolAsync("excel_close", new Dictionary<string, object?>
+    {
+        ["session"] = richId, ["discard_unsaved"] = true
+    });
+    if (richClosed.IsError == true) throw new InvalidOperationException("Rich smoke close failed");
     var verifiedGates = saved.StructuredContent.Value.GetProperty("data").GetProperty("gates").EnumerateArray()
         .Select(gate => gate.GetString()).ToArray();
     if (!verifiedGates.Contains("G6") || !verifiedGates.Contains("G7"))

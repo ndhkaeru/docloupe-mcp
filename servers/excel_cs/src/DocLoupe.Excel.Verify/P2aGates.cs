@@ -8,7 +8,7 @@ namespace DocLoupe.Excel.Verify;
 
 public sealed record DeclaredByteSpan(string Part, int Start, int End, byte[] Before, byte[] After);
 public sealed record FormulaCacheExpectation(string Type, string Value);
-public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCacheExpectation? ExplicitCache = null);
+public sealed record CellExpectation(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCacheExpectation? ExplicitCache = null, string? RichMarkup = null);
 public sealed record CellRead(string Address, string Kind, string? Value, string? Formula,
     [property: JsonIgnore] string? CacheType = null, [property: JsonIgnore] string? CacheRawValue = null,
     [property: JsonIgnore] string? CellMarkup = null, [property: JsonIgnore] string? SharedMarkup = null);
@@ -461,6 +461,9 @@ public static partial class P2aGates
                 var expectedValue = expectation.Kind == "formula" ? expectation.Value?.TrimStart('=') : expectation.Value;
                 if (actual.Item1 != expectation.Kind && !(actual.Item1 == "inline" && expectation.Kind == "text") || actual.Item2 != expectedValue)
                     issues.Add(new("G4", "INTENT_MISMATCH", $"{group.Key}!{expectation.Address}: expected {expectation.Kind} {expectedValue}, found {actual.Item1} {actual.Item2}"));
+                if (expectation.RichMarkup is { } markup && !RichTextAssertions.Matches(
+                    new CellRead(expectation.Address, actual.Item1, actual.Item2, null, CellMarkup: cell!.OuterXml), markup))
+                    issues.Add(new("G4", "INTENT_RICH_MISMATCH", $"{group.Key}!{expectation.Address}"));
             }
         }
         return issues;

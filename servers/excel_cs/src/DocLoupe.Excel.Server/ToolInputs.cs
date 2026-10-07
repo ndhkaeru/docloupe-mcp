@@ -18,6 +18,8 @@ public sealed class SetValueRequest
     public required string Target { get; init; }
     [JsonPropertyName("value")]
     public JsonElement Value { get; init; }
+    [JsonPropertyName("rich")]
+    public JsonElement Rich { get; init; }
     [JsonPropertyName("values")]
     public JsonElement Values { get; init; }
     [JsonPropertyName("series")]
@@ -46,8 +48,10 @@ public sealed class SetValueRequest
     public SetValueOp Normalize(string? defaultSheet)
     {
         if (Label is { Length: > 256 }) throw new ArgumentException("Op label exceeds 256 characters");
-        if (Op is not ("set_value" or "set_formula" or "clear")) throw new NotSupportedException("Unsupported cell operation");
+        if (Op is not ("set_value" or "set_formula" or "clear" or "rich_set")) throw new NotSupportedException("Unsupported cell operation");
         if (Other is { Count: > 0 }) throw new NotSupportedException("Unsupported cell operation fields");
+        if (Op != "rich_set" && Rich.ValueKind != JsonValueKind.Undefined)
+            throw new NotSupportedException("rich requires rich_set");
         if (Op == "clear")
         {
             if (Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Undefined ||
@@ -63,6 +67,21 @@ public sealed class SetValueRequest
             return new SetValueOp(clearSheet, clearAddress, "blank", null,
                 Operation: "clear", RemoveCell: RemoveCells.ValueKind == JsonValueKind.True,
                 Expect: NormalizeExpect(clearSheet, clearAddress), Label: Label);
+        }
+        if (Op == "rich_set")
+        {
+            if (Rich.ValueKind != JsonValueKind.String || Target.Contains(':') ||
+                Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Undefined ||
+                Series.ValueKind != JsonValueKind.Undefined || AsText || RichPolicy != "reject" ||
+                Formula is not null || FormulaKind is not null || Reference is not null || Cache is not null ||
+                What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
+                throw new NotSupportedException("rich_set requires one cell and rich markup; runs and phonetic are not supported yet");
+            var richSheet = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
+            var richAddress = CellAddress.Parse(Target).ToString();
+            var markup = Rich.GetString()!;
+            return new SetValueOp(richSheet, richAddress, "inline", RichSetMarkup.Parse(markup).Text,
+                Operation: "rich_set", Expect: NormalizeExpect(richSheet, richAddress), Label: Label,
+                RichMarkup: markup);
         }
         if (What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
             throw new NotSupportedException("what and remove_cells require clear");
@@ -181,7 +200,9 @@ public sealed class SetValueRequest
 
     private SetValueOp[] NormalizeManyCore(string? defaultSheet)
     {
-        if (Expect.ValueKind != JsonValueKind.Undefined && Op is not ("set_value" or "set_values" or "set_formula" or "fill" or "clear"))
+        if (Rich.ValueKind != JsonValueKind.Undefined && Op != "rich_set")
+            throw new NotSupportedException("rich requires rich_set");
+        if (Expect.ValueKind != JsonValueKind.Undefined && Op is not ("set_value" or "set_values" or "set_formula" or "fill" or "clear" or "rich_set"))
             throw new NotSupportedException("expect requires a supported cell operation");
         var hasValue = Value.ValueKind != JsonValueKind.Undefined;
         var hasSeries = Series.ValueKind != JsonValueKind.Undefined;
