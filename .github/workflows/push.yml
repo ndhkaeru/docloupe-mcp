@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 env:
-  SOURCE_OVERLAY_REF: 5108c871e313912129c6f89353a424f8aacad290
-  DOCLOUPE_SOURCE_SHA: 5108c871e313912129c6f89353a424f8aacad290
+  SOURCE_OVERLAY_REF: 80abc9c1e4c94c854ef4cf46797bcb16405b660c
+  DOCLOUPE_SOURCE_SHA: 80abc9c1e4c94c854ef4cf46797bcb16405b660c
 
 concurrency:
   group: push-${{ github.ref }}
