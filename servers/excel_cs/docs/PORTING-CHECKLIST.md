@@ -1,6 +1,6 @@
 # Checklist tiến độ port Excel MCP sang C#
 
-**Ảnh chụp tiến độ:** cập nhật 2026-10-03 trên `feat/excel-cs-port` (bao gồm `expect.value`/`expect.formula` và kịch bản parity hẹp). Đây là checklist thực thi; hợp đồng đầy đủ nằm trong [01](01-architecture.md), [03](03-tools.md), [04](04-correctness.md), [05](05-legacy-mapping.md) và [06](06-testing-and-roadmap.md). Dấu `[x]` chỉ khẳng định **phạm vi ghi ngay trong mục đó**, không có nghĩa toàn bộ phase đã hoàn tất.
+**Ảnh chụp tiến độ:** cập nhật 2026-10-07 trên `feat/excel-cs-port` (bao gồm `expect.text`, readback/diff hẹp và kịch bản parity rich/style chỉ ở mức bảo toàn). Đây là checklist thực thi; hợp đồng đầy đủ nằm trong [01](01-architecture.md), [03](03-tools.md), [04](04-correctness.md), [05](05-legacy-mapping.md) và [06](06-testing-and-roadmap.md). Dấu `[x]` chỉ khẳng định **phạm vi ghi ngay trong mục đó**, không có nghĩa toàn bộ phase đã hoàn tất.
 
 **Đích cuối:** server C# thay thế được `servers/excel` (Python) mà không mất chỉnh sửa hoặc phá hỏng nội dung OOXML; trước khi đổi launcher cần đạt tiêu chí P7 trong [06 §4](06-testing-and-roadmap.md#4-roadmap). **Hiện tại: P2a chạy được; P2b đang làm; chưa thể thay server Python.**
 
@@ -61,7 +61,7 @@
 - [x] 2026-10-06: G7 save và `expect.value`/`expect.formula` dùng cùng phép so giá trị/công thức/cache (kể cả cache không hỗ trợ), tránh hai đường so bị lệch; test đối chiếu ca đúng/sai và cache hỏng. **616/616** test với corpus local và MCP stdio smoke qua Windows/Docker Linux; rich/style vẫn mở.
 - [ ] Hoàn tất rich-text/phonetic và style ops, các facet `expect` còn lại (kể cả bulk/hash), readback/diff đầy đủ; không coi các op `set_value` hiện có là parity của toàn bộ 03 §4.
 - [ ] `excel_create` đã có workbook mới (sheets/active_sheet) hoặc từ template cho bốn định dạng OOXML, đã hỗ trợ `document_properties.core` dạng chuỗi giới hạn cho workbook mới, nhưng thiếu app/custom/ngày, props khi tạo từ template, `vba_from`, target_path ngầm định; `excel_save` đã có `copy`/`save_as`/`overwrite` qua staging và backup cục bộ, nhưng còn thiếu expiry/report/accept/override/oracles; persistent ledger/redo (nếu quyết định hỗ trợ) và các option session khác vẫn mở.
-- [ ] Chạy ma trận op × fixture, parity Python/C# có danh sách sai khác được duyệt, và agent-eval subset đạt **0 silent failure** theo [06 §2.7](06-testing-and-roadmap.md#27-agent-level-evals). Đã có [kịch bản parity hẹp](../tools/PARITY.md) qua 6 fixture cho scalar edits, formula/cache, value-only clear; 1 Python output tương đương, 5 divergence được kiểm đúng theo fixture trên Windows và Docker Linux; chưa phải ma trận đầy đủ.
+- [ ] Chạy ma trận op × fixture, parity Python/C# có danh sách sai khác được duyệt, và agent-eval subset đạt **0 silent failure** theo [06 §2.7](06-testing-and-roadmap.md#27-agent-level-evals). Đã có [kịch bản parity hẹp](../tools/PARITY.md) qua 6 fixture tổng hợp cho scalar edits, formula/cache, value-only clear (Windows/Docker Linux), cộng 1 fixture rich/style tạo độc lập với C# fixture generator và hai test âm (Windows/Docker Linux 2026-10-07); 7 C# output đạt, 2 Python output tương đương, 5 divergence được kiểm đúng theo fixture. Chưa chạy macOS/CI cho fixture mới, chưa có rich/style mutation parity hoặc ma trận đầy đủ.
 
 ## 3. Phần còn lại của mục tiêu port
 
