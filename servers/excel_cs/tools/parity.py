@@ -26,13 +26,15 @@ EXPECTED = {**{address: (float(value) if type(value) in (int, float) else value,
                for address, value in VALUES.items()}, "D3": (None, None), "K9": (5.0, "2+3")}
 VARIANTS = ("default", "prefixed-x", "bom-crlf-standalone", "opc-percent-case",
             "new-shared-strings", "nested-workbook")
+RICH_MARKUP = '<r>next</r><r b="true" color="FF0000"> rich</r>'
+RICH_RUNS = (("next", None, None, None), (" rich", True, None, "FFFF0000"))
 
 
 def dotnet(*arguments):
     subprocess.run(["dotnet", *arguments], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
 
 
-def read_cells(path, include_facets=False):
+def read_cells(path, include_facets=False, include_runs=False):
     """Resolve OPC relationships and read cells without either implementation's locator."""
     with zipfile.ZipFile(path) as archive:
         entries = {name.lower(): name for name in archive.namelist()}
@@ -102,6 +104,20 @@ def read_cells(path, include_facets=False):
             else:
                 rich_item = rich_cell.find(f"{{{MAIN}}}is")
         facets = {"A1.rich": shape(rich_item)}
+        if include_runs:
+            runs = []
+            for run in rich_item.findall(f"{{{MAIN}}}r"):
+                properties = run.find(f"{{{MAIN}}}rPr")
+
+                def flag(name):
+                    element = properties.find(f"{{{MAIN}}}{name}") if properties is not None else None
+                    return None if element is None else element.attrib.get("val", "1") in ("1", "true")
+
+                color = properties.find(f"{{{MAIN}}}color") if properties is not None else None
+                text = run.find(f"{{{MAIN}}}t")
+                runs.append((text.text or "" if text is not None else "", flag("b"), flag("i"),
+                             color.attrib.get("rgb", "").upper() if color is not None else None))
+            facets["A1.runs"] = tuple(runs)
         style_part = next(target for kind, target in rels.values() if kind == "styles")
         styles = ET.fromstring(part(style_part))
         xfs = styles.find(f"{{{MAIN}}}cellXfs")
@@ -178,6 +194,39 @@ def check_facet_negative_controls(source, output, corrupted):
         raise AssertionError(f"Facet negative controls: expected {expected}, got {actual}")
 
 
+def check_rich_mutation(source, output):
+    original, original_facets = read_cells(source, True)
+    actual, facets = read_cells(output, True, True)
+    errors = []
+    if actual.get("A1") != ("next rich", None):
+        errors.append(f"A1: expected ('next rich', None), got {actual.get('A1')!r}")
+    for address, expected in original.items():
+        if address != "A1" and actual.get(address) != expected:
+            errors.append(f"{address}: unrelated cell changed")
+    if facets["A1.runs"] != RICH_RUNS:
+        errors.append(f"A1.runs: expected {RICH_RUNS!r}, got {facets['A1.runs']!r}")
+    for name in ("B1.style", "D3.style"):
+        if facets[name] != original_facets[name]:
+            errors.append(f"{name}: preserved facet changed")
+    return errors
+
+
+def check_rich_mutation_negative(source, output, corrupted):
+    with zipfile.ZipFile(output) as original, zipfile.ZipFile(corrupted, "w") as altered:
+        for entry in original.infolist():
+            content = original.read(entry)
+            if entry.filename.lower() == "xl/worksheets/sheet1.xml":
+                worksheet = ET.fromstring(content)
+                cell = next(cell for cell in worksheet.iter(f"{{{MAIN}}}c") if cell.attrib["r"] == "A1")
+                properties = cell.findall(f"{{{MAIN}}}is/{{{MAIN}}}r/{{{MAIN}}}rPr")[-1]
+                properties.remove(properties.find(f"{{{MAIN}}}b"))
+                content = ET.tostring(worksheet, encoding="utf-8")
+            altered.writestr(entry, content)
+    errors = check_rich_mutation(source, corrupted)
+    if len(errors) != 1 or not errors[0].startswith("A1.runs:"):
+        raise AssertionError(f"Rich mutation negative control missed lost bold: {errors}")
+
+
 async def save_new(source, output, dll, assert_rich=False):
     parameters = StdioServerParameters(command="dotnet", args=[str(dll)], cwd=str(ROOT))
     async with stdio_client(parameters) as (reader, writer):
@@ -224,6 +273,28 @@ async def save_new(source, output, dll, assert_rich=False):
             await call("excel_close", {"session": session, "discard_unsaved": True})
 
 
+async def save_rich_new(source, output, dll):
+    parameters = StdioServerParameters(command="dotnet", args=[str(dll)], cwd=str(ROOT))
+    async with stdio_client(parameters) as (reader, writer):
+        async with ClientSession(reader, writer) as client:
+            await client.initialize()
+
+            async def call(name, arguments):
+                response = await client.call_tool(name, arguments)
+                envelope = response.structuredContent
+                if response.isError or envelope is None or not envelope.get("ok"):
+                    raise RuntimeError(f"{name}: {envelope}")
+                return envelope["data"]
+
+            session = (await call("excel_open", {"path": str(source)}))["session"]
+            await call("excel_apply", {"session": session, "base_revision": 0, "sheet": "Sheet1",
+                "ops": [{"op": "rich_set", "target": "A1", "rich": RICH_MARKUP,
+                         "expect": {"rich": '<r>plain</r><r b color="FF0000"> bold</r>'}}]})
+            await call("excel_save", {"session": session, "mode": "copy", "path": str(output),
+                "assert": [{"target": "Sheet1!A1", "equals": {"rich": RICH_MARKUP}}]})
+            await call("excel_close", {"session": session, "discard_unsaved": True})
+
+
 def save_legacy(source, output):
     sys.path.insert(0, str(EXCEL))
     import main
@@ -234,6 +305,19 @@ def save_legacy(source, output):
                                               for address, value in VALUES.items()])
     main.excel_clear_range(session, "Sheet1", 2, 3, 2, 3)
     main.excel_set_formula(session, "Sheet1", "K9", "=2+3", cached_value=5, cached_value_present=True)
+    main.excel_save_as_copy(session, str(output), report_format="json", verify_preservation=False)
+    main.excel_close(session)
+
+
+def save_rich_legacy(source, output):
+    sys.path.insert(0, str(EXCEL))
+    import main
+
+    main.excel_load(str(source))
+    session = str(source.resolve())
+    main.excel_edit_rich_text(session, "Sheet1", "A1", [{"op": "replace_runs", "runs": [
+        {"text": "next"}, {"text": " rich", "font": {"bold": True, "color": {"type": "rgb", "rgb": "FFFF0000"}}}
+    ]}], expected_text="plain bold")
     main.excel_save_as_copy(session, str(output), report_format="json", verify_preservation=False)
     main.excel_close(session)
 
@@ -276,9 +360,24 @@ async def main():
                 failures.append(f"{variant} Python: expected {expected_errors}, got {legacy_errors}")
             print(f"{variant}: C# {'PASS' if not current_errors else 'FAIL'}; "
                   f"Python {'PASS' if not legacy_errors else 'known divergence: ' + str(legacy_errors)}")
+        source = directory / "openpyxl-rich-style.xlsx"
+        current = directory / "rich-set-cs.xlsx"
+        legacy = directory / "rich-set-python.xlsx"
+        await save_rich_new(source, current, dll)
+        current_errors = check_rich_mutation(source, current)
+        if current_errors:
+            failures.append(f"rich_set C#: {current_errors}")
+        else:
+            check_rich_mutation_negative(source, current, directory / "rich-set-corrupted.xlsx")
+        save_rich_legacy(source, legacy)
+        legacy_errors = check_rich_mutation(source, legacy)
+        if legacy_errors:
+            failures.append(f"rich_set Python: {legacy_errors}")
+        print(f"rich_set: C# {'PASS' if not current_errors else 'FAIL'}; "
+              f"Python {'PASS' if not legacy_errors else 'FAIL'}")
         if failures:
             raise AssertionError("\n".join(failures))
-    print("Parity scenario PASS: 7 C# outputs, 2 comparable Python outputs, 5 recorded divergences")
+    print("Parity scenario PASS: 8 C# outputs, 3 comparable Python outputs, 5 recorded divergences")
 
 
 if __name__ == "__main__":
