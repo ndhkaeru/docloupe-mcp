@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace DocLoupe.Excel.Verify;
 
-public sealed record ValueAssertion(string Sheet, string Address, bool CheckValue, string? Kind, string? Value, string? Formula, bool Unchanged = false, string? Rich = null);
+public sealed record ValueAssertion(string Sheet, string Address, bool CheckValue, string? Kind, string? Value, string? Formula, bool Unchanged = false, string? Rich = null, bool? FontBold = null);
 
 public static class G7Assertions
 {
@@ -29,6 +29,17 @@ public static class G7Assertions
                 continue;
             }
             Dictionary<string, CellRead>? originals = null;
+            IReadOnlyDictionary<string, bool?>? fontBold = null;
+            if (group.Any(item => item.FontBold is not null))
+            {
+                try { fontBold = P2aGates.ReadExplicitFontBold(path, group.Key, cells.Values); }
+                catch (Exception error) when (error is InvalidDataException or System.Xml.XmlException or
+                                              InvalidOperationException or KeyNotFoundException or UriFormatException or ArgumentException)
+                {
+                    issues.AddRange(group.Where(item => item.FontBold is not null).Select(item =>
+                        new GateIssue("G7", "ASSERT_STYLE_UNVERIFIED", $"{group.Key}!{item.Address}")));
+                }
+            }
             if (source is not null && group.Any(item => item.Unchanged))
             {
                 try
@@ -59,6 +70,13 @@ public static class G7Assertions
                 issues.AddRange(CheckValueAndFormula(actual, assertion, target));
                 if (assertion.Rich is { } rich && !RichTextAssertions.Matches(actual, rich))
                     issues.Add(new GateIssue("G7", "ASSERT_RICH_MISMATCH", target));
+                if (assertion.FontBold is { } expectedBold && fontBold is not null)
+                {
+                    if (!fontBold.TryGetValue(assertion.Address, out var observedBold) || observedBold is null)
+                        issues.Add(new GateIssue("G7", "ASSERT_STYLE_UNVERIFIED", target));
+                    else if (observedBold != expectedBold)
+                        issues.Add(new GateIssue("G7", "ASSERT_STYLE_MISMATCH", target));
+                }
             }
         }
         return issues;
@@ -78,7 +96,7 @@ public static class G7Assertions
     }
 
     public static bool Matches(CellRead? actual, ValueAssertion assertion) =>
-        !assertion.Unchanged && !CheckValueAndFormula(actual, assertion,
+        !assertion.Unchanged && assertion.FontBold is null && !CheckValueAndFormula(actual, assertion,
             assertion.Sheet + "!" + assertion.Address).Any() &&
         (assertion.Rich is null || RichTextAssertions.Matches(actual, assertion.Rich));
 

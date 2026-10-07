@@ -333,6 +333,66 @@ public static partial class P2aGates
             }).ToArray();
     }
 
+    public static IReadOnlyDictionary<string, bool?> ReadExplicitFontBold(string path, string sheetName, IEnumerable<CellRead> cells)
+    {
+        var requested = cells.ToArray();
+        var result = requested.ToDictionary(cell => cell.Address, _ => (bool?)null, StringComparer.Ordinal);
+        using var archive = ZipFile.OpenRead(path);
+        var entries = archive.Entries.ToDictionary(entry => entry.FullName, StringComparer.OrdinalIgnoreCase);
+        var root = Relations(entries, "");
+        var main = Resolve("", root.Values.Single(item => item.Type.EndsWith("/officeDocument", StringComparison.Ordinal)).Target);
+        var workbook = Load(entries[main]);
+        var workbookRelationships = Relations(entries, main);
+        var sheet = workbook.GetElementsByTagName("sheet", Main).OfType<XmlElement>()
+            .Single(item => item.GetAttribute("name") == sheetName);
+        var sheetPart = Resolve(main, workbookRelationships[sheet.GetAttribute("id", Office)].Target);
+        var sheetDocument = Load(entries[sheetPart]);
+        if (new[] { "conditionalFormatting", "tableParts", "extLst" }.Any(name =>
+            sheetDocument.GetElementsByTagName(name, Main).Count > 0)) return result;
+        var styleRelationship = workbookRelationships.Values
+            .SingleOrDefault(item => item.Type.EndsWith("/styles", StringComparison.Ordinal));
+        if (styleRelationship.Type is null || !entries.TryGetValue(Resolve(main, styleRelationship.Target), out var stylePart))
+            return result;
+        var styleSheet = Load(stylePart).DocumentElement;
+        if (styleSheet is null || styleSheet.LocalName != "styleSheet" || styleSheet.NamespaceURI != Main)
+            return result;
+        var xfs = styleSheet.ChildNodes.OfType<XmlElement>()
+            .SingleOrDefault(item => item.LocalName == "cellXfs" && item.NamespaceURI == Main)?
+            .ChildNodes.OfType<XmlElement>().Where(item => item.LocalName == "xf" && item.NamespaceURI == Main).ToArray();
+        var fonts = styleSheet.ChildNodes.OfType<XmlElement>()
+            .SingleOrDefault(item => item.LocalName == "fonts" && item.NamespaceURI == Main)?
+            .ChildNodes.OfType<XmlElement>().Where(item => item.LocalName == "font" && item.NamespaceURI == Main).ToArray();
+        if (xfs is null || fonts is null) return result;
+        foreach (var cell in requested)
+        {
+            if (cell.CellMarkup is null) continue;
+            var cellDocument = new XmlDocument { XmlResolver = null };
+            using var cellReader = XmlReader.Create(new StringReader(cell.CellMarkup),
+                new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null });
+            cellDocument.Load(cellReader);
+            var element = cellDocument.DocumentElement;
+            if (element is null || element.LocalName != "c" || element.NamespaceURI != Main || !element.HasAttribute("s") ||
+                !int.TryParse(element.GetAttribute("s"), NumberStyles.None, CultureInfo.InvariantCulture, out var styleIndex) ||
+                styleIndex < 0 || styleIndex >= xfs.Length) continue;
+            var xf = xfs[styleIndex];
+            if (xf.HasAttribute("xfId") && xf.GetAttribute("xfId") != "0" ||
+                xf.GetAttribute("applyFont") is not ("1" or "true") ||
+                !int.TryParse(xf.GetAttribute("fontId"), NumberStyles.None, CultureInfo.InvariantCulture, out var fontIndex) ||
+                fontIndex < 0 || fontIndex >= fonts.Length) continue;
+            var font = fonts[fontIndex];
+            if (font.ChildNodes.OfType<XmlElement>().Any(item => item.NamespaceURI != Main)) continue;
+            var bold = font.ChildNodes.OfType<XmlElement>()
+                .Where(item => item.LocalName == "b" && item.NamespaceURI == Main).ToArray();
+            if (bold.Length > 1 || bold.Length == 1 &&
+                (bold[0].Attributes.Count > 1 || bold[0].Attributes.Count == 1 && !bold[0].HasAttribute("val") ||
+                 bold[0].HasChildNodes)) continue;
+            var value = bold.Length == 0 ? "0" : bold[0].HasAttribute("val") ? bold[0].GetAttribute("val") : "1";
+            if (value is "0" or "false") result[cell.Address] = false;
+            else if (value is "1" or "true") result[cell.Address] = true;
+        }
+        return result;
+    }
+
     public static IReadOnlyList<GateIssue> CheckIntent(string path, IEnumerable<CellExpectation> expected)
     {
         var issues = new List<GateIssue>();

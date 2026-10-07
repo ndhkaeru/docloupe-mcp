@@ -364,8 +364,8 @@ public sealed class SaveAssertionRequest
         if (Expected.ValueKind != JsonValueKind.Object) throw new ArgumentException("Assertion equals must be an object");
         var properties = Expected.EnumerateObject().ToArray();
         if (properties.Length == 0 || properties.GroupBy(property => property.Name).Any(group => group.Count() > 1) ||
-            properties.Any(property => property.Name is not ("value" or "formula" or "rich")))
-            throw new NotSupportedException("Only equals.value, equals.formula and equals.rich assertions are supported");
+            properties.Any(property => property.Name is not ("value" or "formula" or "rich" or "style")))
+            throw new NotSupportedException("Only equals.value, equals.formula, equals.rich and bounded equals.style assertions are supported");
         var checkValue = Expected.TryGetProperty("value", out var value);
         var (kind, scalar) = checkValue ? value.ValueKind switch
         {
@@ -396,6 +396,17 @@ public sealed class SaveAssertionRequest
             rich = expectedRich.GetString()!;
             DocLoupe.Excel.Verify.RichTextAssertions.Validate(rich);
         }
-        return new DocLoupe.Excel.Verify.ValueAssertion(sheet, address, checkValue, kind, scalar, formula, Rich: rich);
+        bool? fontBold = null;
+        if (Expected.TryGetProperty("style", out var expectedStyle))
+        {
+            if (expectedStyle.ValueKind != JsonValueKind.Object || expectedStyle.EnumerateObject().Count() != 1 ||
+                !expectedStyle.TryGetProperty("font", out var font) || font.ValueKind != JsonValueKind.Object ||
+                font.EnumerateObject().Count() != 1 || !font.TryGetProperty("bold", out var bold) ||
+                bold.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                throw new NotSupportedException("Only equals.style.font.bold (boolean) is supported");
+            fontBold = bold.GetBoolean();
+        }
+        return new DocLoupe.Excel.Verify.ValueAssertion(sheet, address, checkValue, kind, scalar, formula,
+            Rich: rich, FontBold: fontBold);
     }
 }

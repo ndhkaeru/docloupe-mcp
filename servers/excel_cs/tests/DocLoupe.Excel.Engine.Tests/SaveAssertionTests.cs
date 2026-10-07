@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Xml;
 using DocLoupe.Excel.Engine;
 using DocLoupe.Excel.Package;
 using DocLoupe.Excel.Server;
@@ -10,6 +11,125 @@ namespace DocLoupe.Excel.Engine.Tests;
 
 public sealed class SaveAssertionTests
 {
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("new-shared-strings")]
+    public void G7ChecksExplicitBoldStyleOnStaging(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-g7-style-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var styled = Path.Combine(directory, "styled.xlsx");
+            CreateStyledFixture(Path.Combine(directory, variant + ".xlsx"), styled);
+            Assert.Empty(G7Assertions.Check(styled, [Assertion("Sheet1!B1", new
+                { value = 42, style = new { font = new { bold = true } } }).Normalize()]));
+            Assert.Empty(G7Assertions.Check(styled, [Assertion("Sheet1!D3", new
+                { style = new { font = new { bold = false } } }).Normalize()]));
+            Assert.Contains(G7Assertions.Check(styled, [Assertion("Sheet1!B1", new
+                { style = new { font = new { bold = false } } }).Normalize()]),
+                issue => issue.Code == "ASSERT_STYLE_MISMATCH");
+            var altered = Path.Combine(directory, "altered.xlsx");
+            using (var store = new PackageStore(styled))
+            {
+                var original = Encoding.UTF8.GetString(store.Read("xl/styles.xml"));
+                store.Set("xl/styles.xml", Encoding.UTF8.GetBytes(original.Replace("<b/>", "<b val=\"0\"/>", StringComparison.Ordinal)));
+                store.Save(altered);
+            }
+            var boldAssertion = Assertion("Sheet1!B1", new
+                { style = new { font = new { bold = true } } }).Normalize();
+            Assert.Contains(G7Assertions.Check(altered, [boldAssertion]), issue => issue.Code == "ASSERT_STYLE_MISMATCH");
+            Assert.False(G7Assertions.Matches(Assert.Single(P2aGates.ReadCells(styled, "Sheet1", ["B1"])), boldAssertion));
+            var unsupported = Path.Combine(directory, "unsupported.xlsx");
+            using (var store = new PackageStore(styled))
+            {
+                var original = Encoding.UTF8.GetString(store.Read("xl/styles.xml"));
+                store.Set("xl/styles.xml", Encoding.UTF8.GetBytes(original.Replace("fontId=\"1\"", "fontId=\"3\"", StringComparison.Ordinal)));
+                store.Save(unsupported);
+            }
+            Assert.Contains(G7Assertions.Check(unsupported, [boldAssertion]),
+                issue => issue.Code == "ASSERT_STYLE_UNVERIFIED");
+            var disabled = Path.Combine(directory, "disabled.xlsx");
+            using (var store = new PackageStore(styled))
+            {
+                var original = Encoding.UTF8.GetString(store.Read("xl/styles.xml"));
+                store.Set("xl/styles.xml", Encoding.UTF8.GetBytes(original.Replace(
+                    "xfId=\"0\" applyFont=\"1\"/></cellXfs>", "xfId=\"0\" applyFont=\"0\"/></cellXfs>", StringComparison.Ordinal)));
+                store.Save(disabled);
+            }
+            Assert.Contains(G7Assertions.Check(disabled, [boldAssertion]),
+                issue => issue.Code == "ASSERT_STYLE_UNVERIFIED");
+            var conditional = Path.Combine(directory, "conditional.xlsx");
+            using (var store = new PackageStore(styled))
+            {
+                var part = store.SheetPart("Sheet1");
+                var sheet = PackageStore.Parse(store.Read(part));
+                var formatting = sheet.CreateElement(sheet.DocumentElement!.Prefix, "conditionalFormatting", PackageStore.Main);
+                formatting.SetAttribute("sqref", "B1");
+                sheet.DocumentElement.AppendChild(formatting);
+                store.Set(part, Encoding.UTF8.GetBytes(sheet.OuterXml));
+                store.Save(conditional);
+            }
+            Assert.Contains(G7Assertions.Check(conditional, [boldAssertion]),
+                issue => issue.Code == "ASSERT_STYLE_UNVERIFIED");
+            Assert.Contains(G7Assertions.Check(styled, [Assertion("Sheet1!C1", new
+                { style = new { font = new { bold = false } } }).Normalize()]),
+                issue => issue.Code == "ASSERT_STYLE_UNVERIFIED");
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(styled)).GetProperty("session").GetString()!;
+            sessions.Apply(id, 0, [new SetValueOp("Sheet1", "B1", "number", "27")]);
+            var output = Path.Combine(directory, "written.xlsx");
+            var expected = Assertion("Sheet1!B1", new { value = 27,
+                style = new { font = new { bold = true } } }).Normalize();
+            Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(id, output, [expected]))
+                .GetProperty("status").GetString());
+            var blockedPath = Path.Combine(directory, "blocked.xlsx");
+            var wrong = Assertion("Sheet1!B1", new
+                { style = new { font = new { bold = false } } }).Normalize();
+            var blocked = Assert.Throws<SaveBlockedException>(() => sessions.Save(id, blockedPath, [wrong]));
+            Assert.Contains(blocked.Issues, issue => issue.Code == "ASSERT_STYLE_MISMATCH");
+            Assert.False(File.Exists(blockedPath));
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    private static void CreateStyledFixture(string source, string destination)
+    {
+        using var store = new PackageStore(source);
+        var relationshipsPart = PackageStore.RelationshipPart(store.WorkbookPart);
+        var relationships = PackageStore.Parse(store.Read(relationshipsPart));
+        var relationship = relationships.CreateElement("Relationship", PackageStore.PackageRelationships);
+        relationship.SetAttribute("Id", "rId3");
+        relationship.SetAttribute("Type", PackageStore.OfficeRelationships + "/styles");
+        relationship.SetAttribute("Target", "styles.xml");
+        relationships.DocumentElement!.AppendChild(relationship);
+        store.Set(relationshipsPart, Encoding.UTF8.GetBytes(relationships.OuterXml));
+
+        var contentTypes = PackageStore.Parse(store.Read("[Content_Types].xml"));
+        var contentType = contentTypes.CreateElement("Override", PackageStore.ContentTypes);
+        contentType.SetAttribute("PartName", "/xl/styles.xml");
+        contentType.SetAttribute("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml");
+        contentTypes.DocumentElement!.AppendChild(contentType);
+        store.Set("[Content_Types].xml", Encoding.UTF8.GetBytes(contentTypes.OuterXml));
+
+        const string styles = """
+            <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>
+            """;
+        store.Set("xl/styles.xml", Encoding.UTF8.GetBytes(styles));
+        var sheetPart = store.SheetPart("Sheet1");
+        var sheet = PackageStore.Parse(store.Read(sheetPart));
+        foreach (var (address, styleIndex) in new[] { ("B1", "1"), ("D3", "0") })
+        {
+            var cell = Assert.Single(sheet.GetElementsByTagName("c", PackageStore.Main).OfType<XmlElement>(),
+                element => element.GetAttribute("r") == address);
+            cell.SetAttribute("s", styleIndex);
+        }
+        store.Set(sheetPart, Encoding.UTF8.GetBytes(sheet.OuterXml));
+        store.Save(destination);
+    }
+
     [Fact]
     public void PerCellPreconditionMatcherAgreesWithSaveGate()
     {
@@ -343,6 +463,9 @@ public sealed class SaveAssertionTests
     [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":true,\"except\":[\"value\"]}")]
     [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":true,\"equals\":{\"value\":\"hello\"}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"display\":\"27\"}}")]
+    [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"style\":{\"font\":{\"bold\":\"true\"}}}}")]
+    [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"style\":{\"font\":{\"color\":\"FF000000\"}}}}")]
+    [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"style\":{\"font\":{\"bold\":true},\"fill\":{}}}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"value\":27},\"unchanged\":true}")]
     [InlineData("{\"target\":\"B1\",\"equals\":{\"value\":27}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{}}")]
