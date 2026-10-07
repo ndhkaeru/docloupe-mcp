@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using DocLoupe.Excel.Engine;
 using DocLoupe.Excel.Model;
+using DocLoupe.Excel.Verify;
 
 namespace DocLoupe.Excel.Server;
 
@@ -130,10 +131,10 @@ public sealed class SetValueRequest
     {
         if (Expect.ValueKind == JsonValueKind.Undefined) return null;
         if (Expect.ValueKind != JsonValueKind.Object)
-            throw new NotSupportedException("Only expect.value, expect.formula, expect.empty and expect.text are supported");
+            throw new NotSupportedException("Only expect.value, expect.formula, expect.empty, expect.text and expect.rich are supported");
         var properties = Expect.EnumerateObject().ToArray();
         if (properties.Length == 0 || properties.GroupBy(property => property.Name).Any(group => group.Count() > 1) ||
-            properties.Any(property => property.Name is not ("value" or "formula" or "empty" or "text")))
+            properties.Any(property => property.Name is not ("value" or "formula" or "empty" or "text" or "rich")))
             throw new NotSupportedException("Unsupported expect fields");
         bool? empty = null;
         if (Expect.TryGetProperty("empty", out var expectedEmpty))
@@ -148,14 +149,27 @@ public sealed class SetValueRequest
             text = expectedText.ValueKind == JsonValueKind.String
                 ? expectedText.GetString()
                 : throw new ArgumentException("expect.text must be a string");
+        string? rich = null;
+        if (Expect.TryGetProperty("rich", out var expectedRich))
+        {
+            if (expectedRich.ValueKind != JsonValueKind.String)
+                throw new ArgumentException("expect.rich must be a markup string");
+            rich = expectedRich.GetString()!;
+            RichTextAssertions.Validate(rich);
+        }
+        if (rich is not null && empty == true)
+            throw new NotSupportedException("expect.rich cannot require an empty cell");
         var valueAndFormula = properties.Where(property => property.Name is "value" or "formula").ToArray();
-        if (valueAndFormula.Length == 0) return new CellPrecondition(false, null, null, null, empty, text);
+        if (valueAndFormula.Length == 0) return new CellPrecondition(false, null, null, null, empty, text, rich);
         var assertion = new SaveAssertionRequest
         {
             Target = sheet + "!" + address,
             Expected = JsonSerializer.SerializeToElement(valueAndFormula.ToDictionary(property => property.Name, property => property.Value))
         }.Normalize();
-        return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula, empty, text);
+        if (rich is not null && (assertion.Formula is not null ||
+            assertion.CheckValue && assertion.Kind != "text"))
+            throw new NotSupportedException("expect.rich requires text content, not a formula or another value type");
+        return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula, empty, text, rich);
     }
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)

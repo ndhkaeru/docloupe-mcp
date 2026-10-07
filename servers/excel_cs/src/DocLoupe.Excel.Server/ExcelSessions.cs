@@ -507,7 +507,7 @@ public sealed class ExcelSessions : IDisposable
                         observed.TryGetValue(target, out var actual);
                         var assertionMatches = G7Assertions.Matches(actual, new ValueAssertion(
                             operation.Sheet, operation.Address, expected.CheckValue,
-                            expected.Kind, expected.Value, expected.Formula));
+                            expected.Kind, expected.Value, expected.Formula, Rich: expected.Rich));
                         var isEmpty = actual is null || actual.Kind == "blank" && actual.Formula is null;
                         if (assertionMatches && !missingSheets.Contains(operation.Sheet) &&
                             (expected.Empty is null || expected.Empty == isEmpty) &&

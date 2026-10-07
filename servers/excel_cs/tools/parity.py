@@ -193,6 +193,11 @@ async def save_new(source, output, dll, assert_rich=False):
 
             opened = await call("excel_open", {"path": str(source)})
             session = opened["session"]
+            if assert_rich:
+                await call("excel_apply", {"session": session, "base_revision": 0,
+                    "sheet": "Sheet1", "dry_run": True, "ops": [{"op": "set_value", "target": "A1",
+                    "value": "plain bold", "rich_policy": "replace",
+                    "expect": {"rich": '<r>plain</r><r b color="FF0000"> bold</r>'}}]})
             await call("excel_apply", {"session": session, "base_revision": 0, "sheet": "Sheet1", "ops": [
                 *({"op": "set_value", "target": address, "value": VALUES[address]}
                   for address in ("B1", "C1", "E5", "F6")),

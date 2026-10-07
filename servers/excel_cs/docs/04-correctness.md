@@ -99,6 +99,8 @@ All gates run on the staging file before commit. Gates G1–G7 are **required**.
 
 **Current P2b subset:** `equals.value`, `equals.formula`, and bounded `equals.rich` compare cells in W using the independent reader; `equals.rich` checks shared/inline string run boundaries, text, and supported run properties, ignoring phonetic annotations. Malformed or unmodeled expected markup is rejected before save; a formatting mismatch blocks staging. Standalone `unchanged: true` also checks the original cell and referenced shared-string markup. `display`, `style`, `except`, and structural paths remain unsupported.
 
+The same bounded independent rich comparison also backs `excel_apply.expect.rich` before the batch (including dry-run and expanded ranges). It rejects invalid markup and incompatible formula, non-text value or `empty: true` combinations; a mismatch leaves the revision unchanged. This is not a full rich-text/phonetic precondition or effective-style comparison.
+
 ### 3.8 G8 — Oracles (optional)
 
 - **Gates:** `recalc`, `render`, `open_check`; see §7.
