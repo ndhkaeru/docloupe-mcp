@@ -414,20 +414,26 @@ try
     if (styledSession.IsError == true) throw new InvalidOperationException("Rich style smoke could not open rich output");
     var styledId = styledSession.StructuredContent!.Value.GetProperty("data").GetProperty("session").GetString()!;
     const string styledMarkup = "<r b=\"true\">bold</r><r b=\"true\" color=\"FF336699\"> text</r>";
+    const string styledRangeMarkup = "<r>f</r><r i=\"true\">rom</r><r b=\"false\"> runs</r>";
     var styledApplied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = styledId, ["base_revision"] = 0, ["sheet"] = "Sheet1",
-        ["ops"] = new[] { new { op = "rich_style", target = "D3", at = "all",
-            style = new { bold = true }, expect = new { rich = richMarkup } } }
+        ["ops"] = new object[] { new { op = "rich_style", target = "D3", at = (object)"all",
+            style = new { bold = true }, expect = new { rich = richMarkup } },
+            new { op = "rich_style", target = "E12", at = (object)new { range = new[] { 1, 4 } },
+                style = new { italic = true }, expect = new { rich = runsMarkup } } }
     });
     if (styledApplied.IsError == true || styledApplied.StructuredContent?.GetProperty("data")
-        .GetProperty("readback").GetProperty("Sheet1!D3").GetProperty("Value").GetString() != "bold text")
+        .GetProperty("readback").GetProperty("Sheet1!D3").GetProperty("Value").GetString() != "bold text" ||
+        styledApplied.StructuredContent?.GetProperty("data")
+        .GetProperty("readback").GetProperty("Sheet1!E12").GetProperty("Value").GetString() != "from runs")
         throw new InvalidOperationException("MCP rich_style apply failed: " + styledApplied.StructuredContent?.GetRawText());
     var styledOutput = Path.Combine(directory, "styled.xlsx");
     var styledSaved = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
     {
         ["session"] = styledId, ["mode"] = "copy", ["path"] = styledOutput,
-        ["assert"] = new[] { new { target = "Sheet1!D3", equals = new { rich = styledMarkup } } }
+        ["assert"] = new[] { new { target = "Sheet1!D3", equals = new { rich = styledMarkup } },
+            new { target = "Sheet1!E12", equals = new { rich = styledRangeMarkup } } }
     });
     if (styledSaved.IsError == true || styledSaved.StructuredContent?.GetProperty("data")
         .GetProperty("status").GetString() != "verified" || !File.Exists(styledOutput))

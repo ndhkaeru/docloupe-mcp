@@ -1,13 +1,15 @@
+using System.Globalization;
 using System.Xml;
 using DocLoupe.Excel.Package;
 
 namespace DocLoupe.Excel.Engine;
 
 public sealed record RichStylePatch(bool? Bold, bool? Italic, string? Color);
+public sealed record RichStyleSpan(int Start, int End);
 
 public static class RichStyleMarkup
 {
-    public static RichSetValue ApplyAll(XmlElement container, RichStylePatch patch)
+    public static RichSetValue Apply(XmlElement container, RichStylePatch patch, RichStyleSpan? span)
     {
         if (container.NamespaceURI != PackageStore.Main || container.LocalName is not ("is" or "si"))
             throw new NotSupportedException("rich_style requires inline or shared rich text");
@@ -15,14 +17,35 @@ public static class RichStyleMarkup
         if (elements.Length is < 1 or > 256 || elements.Any(element =>
                 element.LocalName != "r" || element.NamespaceURI != PackageStore.Main || element.HasAttributes))
             throw new NotSupportedException("rich_style supports only bounded rich runs without phonetics");
-        var runs = elements.Select(ReadRun).Select(run => run with
+        var runs = elements.Select(ReadRun).ToArray();
+        if (span is null)
+            return RichSetMarkup.Parse(RichSetMarkup.Render(runs.Select(run => PatchRun(run, patch)).ToArray()));
+        var text = string.Concat(runs.Select(run => run.Text));
+        var graphemes = StringInfo.ParseCombiningCharacters(text);
+        if (span.Start < 0 || span.End > graphemes.Length || span.Start >= span.End)
+            throw new ArgumentOutOfRangeException(nameof(span), "rich_style range must select existing graphemes");
+        var start = graphemes[span.Start];
+        var end = span.End == graphemes.Length ? text.Length : graphemes[span.End];
+        var styled = new List<RichSetRun>();
+        var offset = 0;
+        foreach (var run in runs)
         {
-            Bold = patch.Bold ?? run.Bold,
-            Italic = patch.Italic ?? run.Italic,
-            Color = patch.Color ?? run.Color
-        }).ToArray();
-        return RichSetMarkup.Parse(RichSetMarkup.Render(runs));
+            var before = Math.Clamp(start - offset, 0, run.Text.Length);
+            var after = Math.Clamp(end - offset, 0, run.Text.Length);
+            if (before > 0) styled.Add(run with { Text = run.Text[..before] });
+            if (after > before) styled.Add(PatchRun(run with { Text = run.Text[before..after] }, patch));
+            if (after < run.Text.Length) styled.Add(run with { Text = run.Text[after..] });
+            offset += run.Text.Length;
+        }
+        return RichSetMarkup.Parse(RichSetMarkup.Render(styled));
     }
+
+    private static RichSetRun PatchRun(RichSetRun run, RichStylePatch patch) => run with
+    {
+        Bold = patch.Bold ?? run.Bold,
+        Italic = patch.Italic ?? run.Italic,
+        Color = patch.Color ?? run.Color
+    };
 
     private static RichSetRun ReadRun(XmlElement element)
     {

@@ -13,6 +13,7 @@ public sealed class RichStyleTests
 {
     private const string Original = "<r>hello</r><r b color=\"FFFF0000\"> bold</r>";
     private const string Italic = "<r i=\"true\">hello</r><r b i=\"true\" color=\"FFFF0000\"> bold</r>";
+    private const string AcrossRuns = "<r>hel</r><r i=\"true\">lo</r><r b i=\"true\" color=\"FFFF0000\"> b</r><r b color=\"FFFF0000\">old</r>";
 
     [Fact]
     public void RichStyleAllUpdatesOnlySupportedRunsAndVerifiesSave()
@@ -44,6 +45,78 @@ public sealed class RichStyleTests
             Assert.Equal(1, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
             sessions.Undo(id, 1, 0);
             Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void RichStyleGraphemeRangeSplitsRunsWithoutChangingUnselectedFormatting()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-rich-style-range-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "inline-rich.xlsx");
+            RichFixture.Create(Path.Combine(directory, "new-shared-strings.xlsx"), source, inline: true);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            var operation = Request(JsonSerializer.Serialize(new
+            {
+                op = "rich_style", target = "Sheet1!A1", at = new { range = new[] { 3, 7 } },
+                style = new { italic = true }, expect = new { rich = Original }
+            }));
+            sessions.Apply(id, 0, [operation], dryRun: true);
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            sessions.Apply(id, 0, [operation]);
+            var output = Path.Combine(directory, "styled.xlsx");
+            Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(id, output,
+                [new ValueAssertion("Sheet1", "A1", true, "text", "hello bold", null, Rich: AcrossRuns)]))
+                .GetProperty("status").GetString());
+            Assert.True(RichTextAssertions.Matches(Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["A1"])), AcrossRuns));
+            sessions.Undo(id, 1, 0);
+            Assert.Throws<ArgumentOutOfRangeException>(() => sessions.Apply(id, 0,
+                [operation with { StyleSpan = new RichStyleSpan(3, 11), Expect = null }]));
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            sessions.Close(id, true);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("Vie\u0323\u0302t", "Vi", "e\u0323\u0302", "t", 2, 3)]
+    [InlineData("A👩‍💻B", "A", "👩‍💻", "B", 1, 2)]
+    public void RichStyleRangeCountsCombinedTextAsOneGrapheme(
+        string original, string leading, string selected, string trailing, int start, int end)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-rich-style-nfd-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var intermediate = Path.Combine(directory, "inline-rich.xlsx");
+            var source = Path.Combine(directory, "nfd.xlsx");
+            RichFixture.Create(Path.Combine(directory, "new-shared-strings.xlsx"), intermediate, inline: true);
+            using (var store = new PackageStore(intermediate))
+            {
+                var part = store.SheetPart("Sheet1");
+                var document = PackageStore.Parse(store.Read(part));
+                var cell = Assert.Single(document.GetElementsByTagName("c", PackageStore.Main)
+                    .OfType<XmlElement>(), item => item.GetAttribute("r") == "A1");
+                var text = Assert.Single(cell.GetElementsByTagName("t", PackageStore.Main)
+                    .OfType<XmlElement>(), item => item.InnerText == "hello");
+                text.InnerText = original;
+                store.Set(part, Encoding.UTF8.GetBytes(document.OuterXml));
+                store.Save(source);
+            }
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            var operation = Request(JsonSerializer.Serialize(new { op = "rich_style", target = "Sheet1!A1",
+                at = new { range = new[] { start, end } }, style = new { italic = true } }));
+            sessions.Apply(id, 0, [operation]);
+            var expected = $"<r>{leading}</r><r i=\"true\">{selected}</r><r>{trailing}</r><r b color=\"FFFF0000\"> bold</r>";
+            var output = Path.Combine(directory, "styled.xlsx");
+            sessions.Save(id, output, [new ValueAssertion("Sheet1", "A1", true, "text", original + " bold", null, Rich: expected)]);
+            Assert.True(RichTextAssertions.Matches(Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["A1"])), expected));
             sessions.Close(id, true);
         }
         finally { Directory.Delete(directory, true); }
@@ -170,6 +243,9 @@ public sealed class RichStyleTests
 
     [Theory]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold"},"style":{"italic":true}}""")]
+    [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"range":[0,0]},"style":{"italic":true}}""")]
+    [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"range":[-1,1]},"style":{"italic":true}}""")]
+    [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"range":[0,2],"range":[0,3]},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":"all","style":{}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":"all","style":{"color":"theme:5"}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":"all","style":{"bold":null}}""")]

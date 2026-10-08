@@ -94,18 +94,18 @@ public sealed class SetValueRequest
         }
         if (Op == "rich_style")
         {
-            if (Target.Contains(':') || At.ValueKind != JsonValueKind.String || At.GetString() != "all" ||
+            if (Target.Contains(':') ||
                 Style.ValueKind != JsonValueKind.Object || Value.ValueKind != JsonValueKind.Undefined ||
                 Values.ValueKind != JsonValueKind.Undefined || Series.ValueKind != JsonValueKind.Undefined ||
                 AsText || RichPolicy != "reject" || Formula is not null || FormulaKind is not null ||
                 Reference is not null || Cache is not null || What.ValueKind != JsonValueKind.Undefined ||
                 RemoveCells.ValueKind != JsonValueKind.Undefined)
-                throw new NotSupportedException("rich_style currently requires one cell, at: all and a bounded style patch");
+                throw new NotSupportedException("rich_style requires one cell and a bounded style patch");
             var styleSheet = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
             var styleAddress = CellAddress.Parse(Target).ToString();
             return new SetValueOp(styleSheet, styleAddress, "inline", null,
                 Operation: "rich_style", Expect: NormalizeExpect(styleSheet, styleAddress), Label: Label,
-                StylePatch: NormalizeRichStyle(Style));
+                StylePatch: NormalizeRichStyle(Style), StyleSpan: NormalizeRichSpan(At));
         }
         if (What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
             throw new NotSupportedException("what and remove_cells require clear");
@@ -203,6 +203,18 @@ public sealed class SetValueRequest
             runs.Add(new RichSetRun(text.GetString()!, Flag("bold"), Flag("italic"), color));
         }
         return RichSetMarkup.Render(runs);
+    }
+
+    private static RichStyleSpan? NormalizeRichSpan(JsonElement input)
+    {
+        if (input.ValueKind == JsonValueKind.String && input.GetString() == "all") return null;
+        if (input.ValueKind != JsonValueKind.Object || input.EnumerateObject().Count() != 1 ||
+            !input.TryGetProperty("range", out var range) || range.ValueKind != JsonValueKind.Array ||
+            range.GetArrayLength() != 2 || range[0].ValueKind != JsonValueKind.Number ||
+            range[1].ValueKind != JsonValueKind.Number || !range[0].TryGetInt32(out var start) ||
+            !range[1].TryGetInt32(out var end) || start < 0 || end <= start)
+            throw new NotSupportedException("rich_style supports at: all or a nonempty grapheme range");
+        return new RichStyleSpan(start, end);
     }
 
     private static RichStylePatch NormalizeRichStyle(JsonElement input)
