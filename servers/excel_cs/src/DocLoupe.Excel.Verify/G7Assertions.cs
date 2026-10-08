@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace DocLoupe.Excel.Verify;
 
-public sealed record ValueAssertion(string Sheet, string Address, bool CheckValue, string? Kind, string? Value, string? Formula, bool Unchanged = false, string? Rich = null, bool? FontBold = null);
+public sealed record ValueAssertion(string Sheet, string Address, bool CheckValue, string? Kind, string? Value, string? Formula, bool Unchanged = false, string? Rich = null, bool? FontBold = null, bool? FontItalic = null);
 
 public static class G7Assertions
 {
@@ -29,9 +29,9 @@ public static class G7Assertions
                 continue;
             }
             Dictionary<string, CellRead>? originals = null;
-            IReadOnlyDictionary<string, bool?>? fontBold = null;
-            if (group.Any(item => item.FontBold is not null))
-                fontBold = ReadFontBold(path, group.Key, cells.Values);
+            IReadOnlyDictionary<string, ExplicitFontStyle>? fontStyle = null;
+            if (group.Any(item => item.FontBold is not null || item.FontItalic is not null))
+                fontStyle = ReadFontStyle(path, group.Key, cells.Values);
             if (source is not null && group.Any(item => item.Unchanged))
             {
                 try
@@ -62,11 +62,14 @@ public static class G7Assertions
                 issues.AddRange(CheckValueAndFormula(actual, assertion, target));
                 if (assertion.Rich is { } rich && !RichTextAssertions.Matches(actual, rich))
                     issues.Add(new GateIssue("G7", "ASSERT_RICH_MISMATCH", target));
-                if (assertion.FontBold is { } expectedBold && fontBold is not null)
+                if (assertion.FontBold is not null || assertion.FontItalic is not null)
                 {
-                    if (!fontBold.TryGetValue(assertion.Address, out var observedBold) || observedBold is null)
+                    var observedStyle = fontStyle?.GetValueOrDefault(assertion.Address);
+                    if (assertion.FontBold is not null && observedStyle?.Bold is null ||
+                        assertion.FontItalic is not null && observedStyle?.Italic is null)
                         issues.Add(new GateIssue("G7", "ASSERT_STYLE_UNVERIFIED", target));
-                    else if (observedBold != expectedBold)
+                    else if (assertion.FontBold is { } expectedBold && observedStyle?.Bold != expectedBold ||
+                             assertion.FontItalic is { } expectedItalic && observedStyle?.Italic != expectedItalic)
                         issues.Add(new GateIssue("G7", "ASSERT_STYLE_MISMATCH", target));
                 }
             }
@@ -88,18 +91,21 @@ public static class G7Assertions
     }
 
     public static bool Matches(CellRead? actual, ValueAssertion assertion) =>
-        !assertion.Unchanged && assertion.FontBold is null && !CheckValueAndFormula(actual, assertion,
+        !assertion.Unchanged && assertion.FontBold is null && assertion.FontItalic is null && !CheckValueAndFormula(actual, assertion,
             assertion.Sheet + "!" + assertion.Address).Any() &&
         (assertion.Rich is null || RichTextAssertions.Matches(actual, assertion.Rich));
 
-    public static IReadOnlyDictionary<string, bool?> ReadFontBold(string path, string sheetName, IEnumerable<CellRead> cells)
+    public static IReadOnlyDictionary<string, bool?> ReadFontBold(string path, string sheetName, IEnumerable<CellRead> cells) =>
+        ReadFontStyle(path, sheetName, cells).ToDictionary(item => item.Key, item => item.Value.Bold, StringComparer.Ordinal);
+
+    public static IReadOnlyDictionary<string, ExplicitFontStyle> ReadFontStyle(string path, string sheetName, IEnumerable<CellRead> cells)
     {
         var observed = cells.ToArray();
-        try { return P2aGates.ReadExplicitFontBold(path, sheetName, observed); }
+        try { return P2aGates.ReadExplicitFontStyle(path, sheetName, observed); }
         catch (Exception error) when (error is InvalidDataException or System.Xml.XmlException or
                                       InvalidOperationException or KeyNotFoundException or UriFormatException or ArgumentException)
         {
-            return observed.ToDictionary(cell => cell.Address, _ => (bool?)null, StringComparer.Ordinal);
+            return observed.ToDictionary(cell => cell.Address, _ => new ExplicitFontStyle(null, null), StringComparer.Ordinal);
         }
     }
 

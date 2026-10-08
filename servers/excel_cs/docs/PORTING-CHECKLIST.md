@@ -8,7 +8,7 @@
 |---|---|---|
 | P0 | Một phần | Các spike S1–S9 còn mở |
 | P1 | Một phần | Reader/verifier tổng quát và parity corpus |
-| P2a | [Đạt nghiệm thu local trong phạm vi hẹp](P2A-ACCEPTANCE.md) | CI thực tế trên bốn runner chưa chạy cho các commit chưa push |
+| P2a | [Đạt nghiệm thu lát cắt hẹp local và CI bốn runner](P2A-ACCEPTANCE.md) | Corpus riêng chỉ có trên Windows; chưa suy ra P1/P7 hoặc oracle Excel |
 | P2b | Đang thực hiện | Rich/style, full G6–G7, create/save modes và agent eval |
 | P3 | Chưa bắt đầu | Thao tác cấu trúc và công thức liên quan |
 | P4 | Chưa bắt đầu | Tính năng workbook/worksheet nâng cao |
@@ -44,7 +44,7 @@
 - [x] G3 kiểm prefix của `sheetData` và row hiện hữu/mới theo hình dạng đầu vào và quy tắc writer; test giả mạo prefix row mới đã đỏ riêng ở G3 dù G1/G2/G4/G5 chấp nhận. Windows và Docker Linux đạt **606/606** test với corpus local; chưa chạy lại CI remote/macOS.
 - [x] G3 chặn prefix không đúng ở `calcPr` mới (G1/G2/G4/G5 vẫn chấp nhận ca giả mạo), bảo toàn tên `calcPr` cũ; đối chứng trên workbook mặc định và `x:`. Windows và Docker Linux đạt **609/609** test với corpus local; ma trận 13 pass/1 G2 gap/0 failed. Chưa kiểm CI remote/macOS.
 
-- [x] 2026-10-08: G2 chỉ bỏ **gap giả** khi lỗi content-model có sẵn nằm ở worksheet root và tên/namespace/thuộc tính của root cùng danh sách con trực tiếp không đổi; lỗi dưới sheetData vẫn được phát hiện, thêm con trực tiếp hoặc sửa thuộc tính con vẫn báo gap, lỗi baseline ở cell vẫn giữ gap. Fixture 01 còn schema-invalid ở nguồn, nhưng các edit trong ma trận có G1–G5 **14/14 pass, 0 gap, 0 fail** trên Windows; MCP `open/read/apply/save` staging qua trên fixture 01 và nguồn giữ nguyên. Toàn solution **715/715** Windows có corpus local; Docker Linux **698 đạt/9 skipped**, ma trận synthetic 6/6, schema-order và MCP smoke qua hai OS. [Báo cáo nghiệm thu P2a local](P2A-ACCEPTANCE.md); không suy ra mọi edit hoặc Excel-open trên nguồn invalid đều an toàn; CI remote/macOS chưa chạy.
+- [x] 2026-10-08: G2 chỉ bỏ **gap giả** khi lỗi content-model có sẵn nằm ở worksheet root và tên/namespace/thuộc tính của root cùng danh sách con trực tiếp không đổi; lỗi dưới sheetData vẫn được phát hiện, thêm con trực tiếp hoặc sửa thuộc tính con vẫn báo gap, lỗi baseline ở cell vẫn giữ gap. Fixture 01 còn schema-invalid ở nguồn, nhưng các edit trong ma trận có G1–G5 **14/14 pass, 0 gap, 0 fail** trên Windows; MCP `open/read/apply/save` staging qua trên fixture 01 và nguồn giữ nguyên. Toàn solution **715/715** Windows có corpus local; Docker Linux **698 đạt/9 skipped**, ma trận synthetic 6/6, schema-order và MCP smoke qua hai OS. [Báo cáo nghiệm thu P2a](P2A-ACCEPTANCE.md); không suy ra mọi edit hoặc Excel-open trên nguồn invalid đều an toàn. Commit `4c8a25d` đạt [CI bốn runner](https://github.com/ndhkaeru/docloupe-mcp/actions/runs/37725629083): Windows/Linux x64 và macOS x64/arm64; corpus riêng không chạy trên CI.
 
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 
@@ -83,6 +83,8 @@
 - [x] 2026-10-08: `rich_style.match.case_sensitive: false` chọn hit từng grapheme với `InvariantCulture` `IgnoreCase`, kể cả hit qua ranh giới run và `occurrence: "all"`; giữ mặc định case-sensitive, từ chối input sai và non-ASCII khi runtime thiếu globalization data. Test dry-run, save/G7, tiếng Việt, MCP SDK apply/save và invariant globalization: Windows **706/706**, Docker Linux **691 đạt/7 skipped** (thiếu corpus local), 35/35 test nhắm đích trong invariant trên hai OS; schema-order/MCP smoke qua hai OS. S9 Unicode tổng quát, parity Python, macOS/CI từ xa vẫn mở.
 
 - [x] 2026-10-08: parity mutation `rich_style` hẹp trên nguồn `openpyxl` độc lập sau `rich_set` Python: C# MCP chọn grapheme range đúng ranh giới run, Python `style_run` cho cùng outcome. ZIP/OPC reader độc lập xác nhận text, run, bold/italic/RGB và style B1/D3 không đổi; negative control mất italic bị bắt. Windows **9 C# output, 4 Python tương đương, 5 divergence cũ**; Linux parity mutation, span tùy ý, phonetic, case-insensitive, macOS/CI từ xa vẫn chưa xác nhận.
+
+- [x] 2026-10-08: `excel_apply.expect.style.font.italic` và `excel_save.assert.equals.style.font.italic` dùng chung reader G7 độc lập với `font.bold`; hỗ trợ từng flag hoặc kết hợp trên ô có style `s` tường minh và `applyFont=true`, chặn input khác/duplicate, inherited/CF/table/extensions và giá trị `<i val>` không rõ. Test âm mismatch trước batch (revision không đổi), save staging không ra output, run Windows **725/725** với corpus riêng và Docker Linux **708 đạt/9 skipped**; MCP smoke và ma trận synthetic 6/6 qua cả hai OS, ma trận Windows corpus **14/14**. Chưa kiểm CI remote cho lát cắt này, chưa phải style hiệu lực đầy đủ.
 
 ## 3. Phần còn lại của mục tiêu port
 

@@ -299,6 +299,41 @@ public sealed class ApplyPreconditionTests
     [InlineData("default")]
     [InlineData("prefixed-x")]
     [InlineData("new-shared-strings")]
+    public void ExpectItalicStyleChecksBeforeBatchAndDryRun(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-italic-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var styled = Path.Combine(directory, "styled.xlsx");
+            StyledFixture.Create(Path.Combine(directory, variant + ".xlsx"), styled);
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(styled)).GetProperty("session").GetString()!;
+            const string good = """{"op":"set_value","target":"Sheet1!B1","value":27,"expect":{"style":{"font":{"bold":true,"italic":true}}}}""";
+            const string wrong = """{"op":"set_value","target":"Sheet1!B1","value":28,"expect":{"style":{"font":{"italic":false}}}}""";
+            sessions.Apply(id, 0, [Request(good)], dryRun: true);
+            var failed = Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"set_value","target":"Sheet1!E5","value":99}"""), Request(wrong)]));
+            Assert.Equal(1, failed.Index);
+            Assert.True(failed.ActualFontItalic);
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            var unsupported = JsonSerializer.Deserialize<SetValueRequest>("""{"op":"set_value","target":"Sheet1!B1:C1","value":30,"expect":{"style":{"font":{"italic":true}}}}""")!
+                .NormalizeMany(null).Select(cell => cell with { SourceIndex = 1 }).ToArray();
+            var rangeFailure = Assert.Throws<PreconditionFailedException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"set_value","target":"Sheet1!E5","value":99}"""), .. unsupported]));
+            Assert.Equal(1, rangeFailure.Index);
+            Assert.Null(rangeFailure.ActualFontItalic);
+            sessions.Apply(id, 0, [Request(good)]);
+            sessions.Apply(id, 1, [Request("""{"op":"set_value","target":"Sheet1!B1","value":28,"expect":{"style":{"font":{"italic":true}}}}""")]);
+            Assert.Equal(2, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("new-shared-strings")]
     public void ExpectExplicitBoldStyleChecksBeforeBatchAndDryRun(string variant)
     {
         var directory = Path.Combine(Path.GetTempPath(), "docloupe-expect-style-" + Guid.NewGuid().ToString("N"));
@@ -357,7 +392,9 @@ public sealed class ApplyPreconditionTests
     [InlineData("""{"op":"set_value","target":"Sheet1!A1","value":"x","expect":{"rich":"x","empty":true}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"style":{}}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"style":{"font":{"bold":1}}}}""")]
-    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"style":{"font":{"bold":true,"italic":true}}}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"style":{"font":{"bold":true,"underline":true}}}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"style":{"font":{"italic":1}}}}""")]
+    [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"style":{"font":{"italic":true,"italic":false}}}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1","value":1,"expect":{"value":1e2147483648}}""")]
     [InlineData("""{"op":"set_value","target":"Sheet1!B1:C1","value":1,"expect":{"rich":17}}""")]
     [InlineData("""{"op":"set_values","target":"Sheet1!B1","values":[[1]],"expect":{"style":{}}}""")]

@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Text.Json;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
@@ -197,6 +198,16 @@ try
     if (stale.IsError != true || stale.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PRECONDITION_FAILED" ||
         stale.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("index").GetInt32() != 0)
         throw new InvalidOperationException("MCP precondition failure was not structured: " + stale.StructuredContent?.GetRawText());
+    var unverifiedItalic = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",
+        ["ops"] = new[] { new { op = "set_value", target = "B1", value = 99,
+            expect = new { style = new { font = new { italic = true } } } } }
+    });
+    if (unverifiedItalic.IsError != true ||
+        unverifiedItalic.StructuredContent?.GetProperty("error").GetProperty("code").GetString() != "PRECONDITION_FAILED" ||
+        unverifiedItalic.StructuredContent?.GetProperty("error").GetProperty("details").GetProperty("actual_style").ValueKind != JsonValueKind.Null)
+        throw new InvalidOperationException("MCP italic precondition did not fail closed: " + unverifiedItalic.StructuredContent?.GetRawText());
     var expandedFailure = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = session, ["base_revision"] = 0, ["sheet"] = "Sheet1",

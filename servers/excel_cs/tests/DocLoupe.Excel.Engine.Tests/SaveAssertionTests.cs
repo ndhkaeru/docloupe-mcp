@@ -14,6 +14,61 @@ public sealed class SaveAssertionTests
     [InlineData("default")]
     [InlineData("prefixed-x")]
     [InlineData("new-shared-strings")]
+    public void G7ChecksExplicitItalicStyleOnStaging(string variant)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-g7-italic-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var styled = Path.Combine(directory, "styled.xlsx");
+            StyledFixture.Create(Path.Combine(directory, variant + ".xlsx"), styled);
+            var expected = Assertion("Sheet1!B1", new
+                { value = 42, style = new { font = new { bold = true, italic = true } } }).Normalize();
+            Assert.Empty(G7Assertions.Check(styled, [expected]));
+            Assert.Empty(G7Assertions.Check(styled, [Assertion("Sheet1!D3", new
+                { style = new { font = new { italic = false } } }).Normalize()]));
+            Assert.Contains(G7Assertions.Check(styled, [Assertion("Sheet1!B1", new
+                { style = new { font = new { italic = false } } }).Normalize()]),
+                issue => issue.Code == "ASSERT_STYLE_MISMATCH");
+            var damaged = Path.Combine(directory, "damaged.xlsx");
+            using (var store = new PackageStore(styled))
+            {
+                var styles = Encoding.UTF8.GetString(store.Read("xl/styles.xml"));
+                store.Set("xl/styles.xml", Encoding.UTF8.GetBytes(styles.Replace("<i/>", "<i val=\"unknown\"/>", StringComparison.Ordinal)));
+                store.Save(damaged);
+            }
+            Assert.Contains(G7Assertions.Check(damaged, [expected]),
+                issue => issue.Code == "ASSERT_STYLE_UNVERIFIED");
+            var explicitFalse = Path.Combine(directory, "explicit-false.xlsx");
+            using (var store = new PackageStore(styled))
+            {
+                var styles = Encoding.UTF8.GetString(store.Read("xl/styles.xml"));
+                store.Set("xl/styles.xml", Encoding.UTF8.GetBytes(styles.Replace("<i/>", "<i val=\"0\"/>", StringComparison.Ordinal)));
+                store.Save(explicitFalse);
+            }
+            Assert.Empty(G7Assertions.Check(explicitFalse, [Assertion("Sheet1!B1", new
+                { style = new { font = new { bold = true, italic = false } } }).Normalize()]));
+            Assert.Contains(G7Assertions.Check(explicitFalse, [expected]), issue => issue.Code == "ASSERT_STYLE_MISMATCH");
+            using var sessions = new ExcelSessions();
+            var id = JsonSerializer.SerializeToElement(sessions.Open(styled)).GetProperty("session").GetString()!;
+            sessions.Apply(id, 0, [new SetValueOp("Sheet1", "B1", "number", "27")]);
+            var output = Path.Combine(directory, "verified.xlsx");
+            Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(id, output,
+                [Assertion("Sheet1!B1", new { value = 27,
+                    style = new { font = new { italic = true } } }).Normalize()]))
+                .GetProperty("status").GetString());
+            var blocked = Path.Combine(directory, "blocked.xlsx");
+            Assert.Throws<SaveBlockedException>(() => sessions.Save(id, blocked,
+                [Assertion("Sheet1!B1", new { style = new { font = new { italic = false } } }).Normalize()]));
+            Assert.False(File.Exists(blocked));
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("default")]
+    [InlineData("prefixed-x")]
+    [InlineData("new-shared-strings")]
     public void G7ChecksExplicitBoldStyleOnStaging(string variant)
     {
         var directory = Path.Combine(Path.GetTempPath(), "docloupe-g7-style-" + Guid.NewGuid().ToString("N"));
@@ -428,6 +483,8 @@ public sealed class SaveAssertionTests
     [InlineData("{\"target\":\"Sheet1!A1\",\"unchanged\":true,\"equals\":{\"value\":\"hello\"}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"display\":\"27\"}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"style\":{\"font\":{\"bold\":\"true\"}}}}")]
+    [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"style\":{\"font\":{\"italic\":\"true\"}}}}")]
+    [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"style\":{\"font\":{\"italic\":true,\"italic\":false}}}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"style\":{\"font\":{\"color\":\"FF000000\"}}}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"style\":{\"font\":{\"bold\":true},\"fill\":{}}}}")]
     [InlineData("{\"target\":\"Sheet1!B1\",\"equals\":{\"value\":27},\"unchanged\":true}")]

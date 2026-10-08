@@ -319,7 +319,7 @@ public sealed class SetValueRequest
             assertion.CheckValue && assertion.Kind != "text"))
             throw new NotSupportedException("expect.rich requires text content, not a formula or another value type");
         return new CellPrecondition(assertion.CheckValue, assertion.Kind, assertion.Value, assertion.Formula, empty, text, rich,
-            assertion.FontBold);
+            assertion.FontBold, assertion.FontItalic);
     }
 
     public SetValueOp[] NormalizeMany(string? defaultSheet)
@@ -551,16 +551,21 @@ public sealed class SaveAssertionRequest
             DocLoupe.Excel.Verify.RichTextAssertions.Validate(rich);
         }
         bool? fontBold = null;
+        bool? fontItalic = null;
         if (Expected.TryGetProperty("style", out var expectedStyle))
         {
             if (expectedStyle.ValueKind != JsonValueKind.Object || expectedStyle.EnumerateObject().Count() != 1 ||
-                !expectedStyle.TryGetProperty("font", out var font) || font.ValueKind != JsonValueKind.Object ||
-                font.EnumerateObject().Count() != 1 || !font.TryGetProperty("bold", out var bold) ||
-                bold.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-                throw new NotSupportedException("Only equals.style.font.bold (boolean) is supported");
-            fontBold = bold.GetBoolean();
+                !expectedStyle.TryGetProperty("font", out var font) || font.ValueKind != JsonValueKind.Object)
+                throw new NotSupportedException("Only equals.style.font.bold/italic (boolean) are supported");
+            var flags = font.EnumerateObject().ToArray();
+            if (flags.Length is < 1 or > 2 || flags.GroupBy(flag => flag.Name).Any(group => group.Count() > 1) ||
+                flags.Any(flag => flag.Name is not ("bold" or "italic") ||
+                    flag.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)))
+                throw new NotSupportedException("Only equals.style.font.bold/italic (boolean) are supported");
+            if (font.TryGetProperty("bold", out var bold)) fontBold = bold.GetBoolean();
+            if (font.TryGetProperty("italic", out var italic)) fontItalic = italic.GetBoolean();
         }
         return new DocLoupe.Excel.Verify.ValueAssertion(sheet, address, checkValue, kind, scalar, formula,
-            Rich: rich, FontBold: fontBold);
+            Rich: rich, FontBold: fontBold, FontItalic: fontItalic);
     }
 }

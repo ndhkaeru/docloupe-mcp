@@ -167,8 +167,13 @@ static CallToolResult Handle(Func<object> action)
             ["index"] = failed.Index, ["target"] = failed.Target,
             ["expected"] = failed.Expected, ["actual"] = failed.Actual
         };
-        if (failed.Expected.FontBold is not null)
-            details["actual_style"] = failed.ActualFontBold is { } bold ? new { font = new { bold } } : null;
+        if (failed.Expected.FontBold is not null || failed.Expected.FontItalic is not null)
+        {
+            var font = new Dictionary<string, bool?>();
+            if (failed.Expected.FontBold is not null) font["bold"] = failed.ActualFontBold;
+            if (failed.Expected.FontItalic is not null) font["italic"] = failed.ActualFontItalic;
+            details["actual_style"] = font.Values.All(value => value is null) ? null : new { font };
+        }
         return Result(new { ok = false, error = new { code = "PRECONDITION_FAILED", message = failed.Message,
             details, retryable = false } }, true);
     }

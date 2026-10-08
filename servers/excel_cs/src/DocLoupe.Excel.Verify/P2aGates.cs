@@ -13,6 +13,7 @@ public sealed record CellRead(string Address, string Kind, string? Value, string
     [property: JsonIgnore] string? CacheType = null, [property: JsonIgnore] string? CacheRawValue = null,
     [property: JsonIgnore] string? CellMarkup = null, [property: JsonIgnore] string? SharedMarkup = null);
 public sealed record GateIssue(string Gate, string Code, string Detail);
+public sealed record ExplicitFontStyle(bool? Bold, bool? Italic);
 
 public static partial class P2aGates
 {
@@ -333,10 +334,13 @@ public static partial class P2aGates
             }).ToArray();
     }
 
-    public static IReadOnlyDictionary<string, bool?> ReadExplicitFontBold(string path, string sheetName, IEnumerable<CellRead> cells)
+    public static IReadOnlyDictionary<string, bool?> ReadExplicitFontBold(string path, string sheetName, IEnumerable<CellRead> cells) =>
+        ReadExplicitFontStyle(path, sheetName, cells).ToDictionary(item => item.Key, item => item.Value.Bold, StringComparer.Ordinal);
+
+    public static IReadOnlyDictionary<string, ExplicitFontStyle> ReadExplicitFontStyle(string path, string sheetName, IEnumerable<CellRead> cells)
     {
         var requested = cells.ToArray();
-        var result = requested.ToDictionary(cell => cell.Address, _ => (bool?)null, StringComparer.Ordinal);
+        var result = requested.ToDictionary(cell => cell.Address, _ => new ExplicitFontStyle(null, null), StringComparer.Ordinal);
         using var archive = ZipFile.OpenRead(path);
         var entries = archive.Entries.ToDictionary(entry => entry.FullName, StringComparer.OrdinalIgnoreCase);
         var root = Relations(entries, "");
@@ -381,16 +385,20 @@ public static partial class P2aGates
                 fontIndex < 0 || fontIndex >= fonts.Length) continue;
             var font = fonts[fontIndex];
             if (font.ChildNodes.OfType<XmlElement>().Any(item => item.NamespaceURI != Main)) continue;
-            var bold = font.ChildNodes.OfType<XmlElement>()
-                .Where(item => item.LocalName == "b" && item.NamespaceURI == Main).ToArray();
-            if (bold.Length > 1 || bold.Length == 1 &&
-                (bold[0].Attributes.Count > 1 || bold[0].Attributes.Count == 1 && !bold[0].HasAttribute("val") ||
-                 bold[0].HasChildNodes)) continue;
-            var value = bold.Length == 0 ? "0" : bold[0].HasAttribute("val") ? bold[0].GetAttribute("val") : "1";
-            if (value is "0" or "false") result[cell.Address] = false;
-            else if (value is "1" or "true") result[cell.Address] = true;
+            result[cell.Address] = new ExplicitFontStyle(ReadFlag(font, "b"), ReadFlag(font, "i"));
         }
         return result;
+    }
+
+    private static bool? ReadFlag(XmlElement font, string name)
+    {
+        var flags = font.ChildNodes.OfType<XmlElement>()
+            .Where(item => item.LocalName == name && item.NamespaceURI == Main).ToArray();
+        if (flags.Length > 1 || flags.Length == 1 &&
+            (flags[0].Attributes.Count > 1 || flags[0].Attributes.Count == 1 && !flags[0].HasAttribute("val") ||
+             flags[0].HasChildNodes)) return null;
+        var value = flags.Length == 0 ? "0" : flags[0].HasAttribute("val") ? flags[0].GetAttribute("val") : "1";
+        return value switch { "0" or "false" => false, "1" or "true" => true, _ => null };
     }
 
     public static IReadOnlyList<GateIssue> CheckIntent(string path, IEnumerable<CellExpectation> expected)

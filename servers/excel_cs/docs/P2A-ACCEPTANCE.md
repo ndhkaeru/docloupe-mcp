@@ -1,4 +1,4 @@
-# P2a local acceptance — 2026-10-08
+# P2a thin-slice acceptance — 2026-10-08
 
 Scope: only the thin `set_value` path defined in [06 §4](06-testing-and-roadmap.md#4-roadmap): open, bounded cells read, apply, staging save through G1–G5, independent readback, and close. This report does **not** close P1, P2b, P6, or P7 or authorize changing the Python launcher.
 
@@ -9,6 +9,7 @@ Scope: only the thin `set_value` path defined in [06 §4](06-testing-and-roadmap
 | Staging save for local fixture 01 | `ExcelSessions.Open` → `Read` → `Apply` (three `set_value` edits) → `Save(copy)` returned `verified`; the source hash stayed unchanged. This does not imply the original schema-invalid workbook is repaired or can be opened by Excel. |
 | Full solution tests | Windows with local corpus: **715 passed**. Docker Linux without the local corpus: **698 passed, 9 skipped**. |
 | Independent commands | Schema-order and MCP SDK stdio smoke passed on Windows and Docker Linux; the Linux synthetic-only matrix passed **6/6**. |
+| Remote CI for commit `4c8a25d` | [Run 37725629083](https://github.com/ndhkaeru/docloupe-mcp/actions/runs/37725629083) completed successfully on Windows x64, Linux x64, macOS x64 and macOS arm64; each job ran solution tests, schema-order and MCP stdio smoke. The four downloaded matrix artifacts each report **6 passed, 0 gaps, 0 failed**. The private corpus is not in CI. |
 
 From the repository root, with .NET 10 installed, reproduce the private-corpus check without adding its source files to Git:
 
@@ -20,4 +21,4 @@ dotnet run --project servers/excel_cs/tools/SchemaOrder/SchemaOrder.csproj -c Re
 dotnet run --project servers/excel_cs/spikes/S3/S3.csproj -c Release -- servers/excel_cs/src/DocLoupe.Excel.Server/bin/Release/net10.0/DocLoupe.Excel.Server.dll
 ```
 
-**Outstanding cross-platform evidence:** `.github/workflows/excel-cs.yml` declares Windows x64, Linux x64, macOS x64, and macOS arm64, but this unpushed branch has not run those four remote runners. No local macOS run was performed. The private corpus is not in CI; its acceptance evidence is local Windows only. Do not label P2a cross-platform complete until the remote matrix and MCP smoke are green on all four runners. Excel-open/repair testing of baseline-invalid fixtures is a separate oracle/release concern and is not inferred from G1–G5.
+**Remaining limits:** the four-runner CI passed for the committed P2a thin slice, not the private corpus or full P1/P2b/P7. No local macOS run was performed. Private-corpus acceptance evidence is local Windows only. Excel-open/repair testing of baseline-invalid fixtures is a separate oracle/release concern and is not inferred from G1–G5.
