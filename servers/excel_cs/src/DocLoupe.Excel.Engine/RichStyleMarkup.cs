@@ -7,7 +7,7 @@ namespace DocLoupe.Excel.Engine;
 
 public sealed record RichStylePatch(bool? Bold, bool? Italic, string? Color);
 public sealed record RichStyleSpan(int Start, int End);
-public sealed record RichStyleMatch(string Text, bool Normalize);
+public sealed record RichStyleMatch(string Text, bool Normalize, int? Occurrence = 1);
 
 public static class RichStyleMarkup
 {
@@ -27,27 +27,44 @@ public static class RichStyleMarkup
         var text = string.Concat(runs.Select(run => run.Text));
         if (text.Length > 8192) throw new NotSupportedException("rich_style exceeds 8192 characters");
         var graphemes = StringInfo.ParseCombiningCharacters(text);
-        if (match is not null) span = FindSpan(text, graphemes, match);
-        if (span is null) throw new InvalidOperationException("Missing rich_style selection");
-        if (span.Start < 0 || span.End > graphemes.Length || span.Start >= span.End)
-            throw new ArgumentOutOfRangeException(nameof(span), "rich_style range must select existing graphemes");
-        var start = graphemes[span.Start];
-        var end = span.End == graphemes.Length ? text.Length : graphemes[span.End];
+        var selections = match is null ? [span ?? throw new InvalidOperationException("Missing rich_style selection")]
+            : FindSpans(text, graphemes, match);
+        var merged = new List<RichStyleSpan>();
+        foreach (var selection in selections)
+        {
+            if (selection.Start < 0 || selection.End > graphemes.Length || selection.Start >= selection.End)
+                throw new ArgumentOutOfRangeException(nameof(span), "rich_style range must select existing graphemes");
+            if (merged.Count > 0 && merged[^1].End == selection.Start)
+                merged[^1] = merged[^1] with { End = selection.End };
+            else merged.Add(selection);
+        }
+        var offsets = merged.Select(selection => (Start: graphemes[selection.Start],
+            End: selection.End == graphemes.Length ? text.Length : graphemes[selection.End])).ToArray();
         var styled = new List<RichSetRun>();
         var offset = 0;
         foreach (var run in runs)
         {
-            var before = Math.Clamp(start - offset, 0, run.Text.Length);
-            var after = Math.Clamp(end - offset, 0, run.Text.Length);
-            if (before > 0) styled.Add(run with { Text = run.Text[..before] });
-            if (after > before) styled.Add(PatchRun(run with { Text = run.Text[before..after] }, patch));
-            if (after < run.Text.Length) styled.Add(run with { Text = run.Text[after..] });
-            offset += run.Text.Length;
+            var runEnd = offset + run.Text.Length;
+            var position = offset;
+            foreach (var selection in offsets)
+            {
+                if (selection.End <= position) continue;
+                if (selection.Start >= runEnd) break;
+                var beforeEnd = Math.Max(position, selection.Start);
+                if (beforeEnd > position)
+                    styled.Add(run with { Text = run.Text[(position - offset)..(beforeEnd - offset)] });
+                var selectedEnd = Math.Min(runEnd, selection.End);
+                styled.Add(PatchRun(run with { Text = run.Text[(beforeEnd - offset)..(selectedEnd - offset)] }, patch));
+                position = selectedEnd;
+            }
+            if (position < runEnd)
+                styled.Add(run with { Text = run.Text[(position - offset)..] });
+            offset = runEnd;
         }
         return RichSetMarkup.Parse(RichSetMarkup.Render(styled));
     }
 
-    private static RichStyleSpan FindSpan(string text, int[] graphemes, RichStyleMatch match)
+    private static RichStyleSpan[] FindSpans(string text, int[] graphemes, RichStyleMatch match)
     {
         var sought = StringInfo.ParseCombiningCharacters(match.Text);
         if (sought.Length == 0 || sought.Length > graphemes.Length)
@@ -56,11 +73,18 @@ public static class RichStyleMarkup
             match.Text[sought[index]..(index + 1 == sought.Length ? match.Text.Length : sought[index + 1])], match.Normalize)).ToArray();
         var actual = Enumerable.Range(0, graphemes.Length).Select(index => Normalize(
             text[graphemes[index]..(index + 1 == graphemes.Length ? text.Length : graphemes[index + 1])], match.Normalize)).ToArray();
-        for (var start = 0; start <= graphemes.Length - expected.Length; start++)
+        var found = new List<RichStyleSpan>();
+        for (var start = 0; start <= graphemes.Length - expected.Length;)
         {
             if (actual.AsSpan(start, expected.Length).SequenceEqual(expected))
-                return new RichStyleSpan(start, start + expected.Length);
+            {
+                found.Add(new RichStyleSpan(start, start + expected.Length));
+                if (found.Count == match.Occurrence) return [found[^1]];
+                start += expected.Length;
+            }
+            else start++;
         }
+        if (match.Occurrence is null && found.Count > 0) return found.ToArray();
         throw new ArgumentException("rich_style match not found");
     }
 

@@ -446,20 +446,26 @@ try
     var matchSession = await client.CallToolAsync("excel_open", new Dictionary<string, object?> { ["path"] = styledOutput });
     if (matchSession.IsError == true) throw new InvalidOperationException("Rich match smoke could not open styled output");
     var matchId = matchSession.StructuredContent!.Value.GetProperty("data").GetProperty("session").GetString()!;
-    const string matchedMarkup = "<r b=\"true\">bold</r><r b=\"true\" color=\"FF336699\"> </r><r b=\"true\" i=\"true\" color=\"FF336699\">text</r>";
+    const string matchedMarkup = "<r b=\"true\">bold</r><r b=\"true\" color=\"FF336699\"> tex</r><r b=\"true\" i=\"true\" color=\"FF336699\">t</r>";
+    const string matchedAllMarkup = "<r>f</r><r i=\"true\">r</r><r i=\"true\">om</r><r b=\"false\"> </r><r b=\"false\" i=\"true\">r</r><r b=\"false\">uns</r>";
     var matchApplied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = matchId, ["base_revision"] = 0, ["sheet"] = "Sheet1",
-        ["ops"] = new[] { new { op = "rich_style", target = "D3", at = new { match = "text" },
-            style = new { italic = true }, expect = new { rich = styledMarkup } } }
+        ["ops"] = new object[] { new { op = "rich_style", target = "D3", at = new { match = "t", occurrence = (object)2 },
+            style = new { italic = true }, expect = new { rich = styledMarkup } },
+            new { op = "rich_style", target = "E12", at = new { match = "r", occurrence = (object)"all" },
+                style = new { italic = true }, expect = new { rich = styledRangeMarkup } } }
     });
     if (matchApplied.IsError == true || matchApplied.StructuredContent?.GetProperty("data")
-        .GetProperty("readback").GetProperty("Sheet1!D3").GetProperty("Value").GetString() != "bold text")
+        .GetProperty("readback").GetProperty("Sheet1!D3").GetProperty("Value").GetString() != "bold text" ||
+        matchApplied.StructuredContent?.GetProperty("data")
+        .GetProperty("readback").GetProperty("Sheet1!E12").GetProperty("Value").GetString() != "from runs")
         throw new InvalidOperationException("MCP rich_style match failed: " + matchApplied.StructuredContent?.GetRawText());
     var matchSaved = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
     {
         ["session"] = matchId, ["mode"] = "copy", ["path"] = Path.Combine(directory, "matched.xlsx"),
-        ["assert"] = new[] { new { target = "Sheet1!D3", equals = new { rich = matchedMarkup } } }
+        ["assert"] = new[] { new { target = "Sheet1!D3", equals = new { rich = matchedMarkup } },
+            new { target = "Sheet1!E12", equals = new { rich = matchedAllMarkup } } }
     });
     if (matchSaved.IsError == true || matchSaved.StructuredContent?.GetProperty("data")
         .GetProperty("status").GetString() != "verified")

@@ -225,15 +225,23 @@ public sealed class SetValueRequest
         if (properties.Length is < 1 or > 3 ||
             properties.Select(property => property.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length ||
             properties.Any(property => property.Name is not ("match" or "normalize" or "occurrence")) ||
-            match.ValueKind != JsonValueKind.String || match.GetString() is not { Length: > 0 and <= 8192 } text ||
-            input.TryGetProperty("occurrence", out var occurrence) &&
-            (occurrence.ValueKind != JsonValueKind.Number || !occurrence.TryGetInt32(out var index) || index != 1))
-            throw new NotSupportedException("rich_style match requires nonempty text and at most occurrence: 1");
+            match.ValueKind != JsonValueKind.String || match.GetString() is not { Length: > 0 and <= 8192 } text)
+            throw new NotSupportedException("rich_style match requires nonempty text");
         var normalization = input.TryGetProperty("normalize", out var mode) && mode.ValueKind == JsonValueKind.String
             ? mode.GetString() : input.TryGetProperty("normalize", out _) ? null : "nfc";
         if (normalization is not ("nfc" or "none"))
             throw new NotSupportedException("rich_style match supports normalize: nfc or none");
-        return new RichStyleMatch(text, normalization == "nfc");
+        int? selectedOccurrence = 1;
+        if (input.TryGetProperty("occurrence", out var occurrence))
+        {
+            if (occurrence.ValueKind == JsonValueKind.String && occurrence.GetString() == "all")
+                selectedOccurrence = null;
+            else if (occurrence.ValueKind == JsonValueKind.Number && occurrence.TryGetInt32(out var index) &&
+                index is >= 1 and <= 8192)
+                selectedOccurrence = index;
+            else throw new NotSupportedException("rich_style occurrence must be 1..8192 or all");
+        }
+        return new RichStyleMatch(text, normalization == "nfc", selectedOccurrence);
     }
 
     private static RichStylePatch NormalizeRichStyle(JsonElement input)
