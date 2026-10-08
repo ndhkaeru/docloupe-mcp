@@ -26,6 +26,8 @@ The original probe passed as soon as **one** fixture detected the injected child
 3. **G2 catches child-order mistakes:** `<v>` before `<f>` inside a cell, and `<sheetData>` before `<sheetViews>`, were both detected. With hand-written System.Xml edits, G2 is therefore the safety net for element order. The engine still needs schema-derived element-order tables to insert children at the right position in the first place; G2 only catches mistakes.
 4. **Fixture 01 is schema-invalid at baseline**, like the Excel-refused fixtures 02 and 05 (S2b review finding 9). Record this alongside the local fixture manifest.
 
+**Follow-up (2026-10-08):** production G2 now narrows the masked-parent check for the two known worksheet-root content-model diagnostics. It checks the worksheet's own attributes and its ordered immediate children (names, namespaces, attributes); if unchanged, descendant edits are validated at their own locations without treating a changed worksheet subtree as a root-level edit. A new direct child, changed direct-child attributes, or a baseline cell error still reports a gap. Local fixture 01's baseline error remains; its modeled `set_value` matrix and staged MCP save now pass, while its other edits and Excel-open behavior are not inferred from that result.
+
 Reproduce from `servers/excel_cs` after S2b's probe has created its ignored output files:
 
 ```powershell

@@ -92,7 +92,11 @@ public static class DetachedValidator
                         var originalParent = Locate(originalDocument, location);
                         var writtenParent = Locate(writtenDocument, location);
                         if (originalParent is null || writtenParent is null
-                            ? changed : originalParent.OuterXml != writtenParent.OuterXml)
+                            ? changed : originalParent.OuterXml != writtenParent.OuterXml &&
+                                !((baselineError.Id is "Sch_InvalidElementContentExpectingComplex" or
+                                    "Sch_UnexpectedElementContentExpectingComplex") &&
+                                    UnchangedWorksheetSurface(originalDocument, writtenDocument,
+                                        originalParent, writtenParent)))
                             gaps.Add(new SchemaIssue(part, "G2_MASKED_BY_BASELINE_ERROR", location));
                     }
                 }
@@ -148,6 +152,38 @@ public static class DetachedValidator
         }
         return new SchemaReport(issues, gaps);
     }
+
+    private static bool UnchangedWorksheetSurface(XmlDocument originalDocument, XmlDocument writtenDocument,
+        XmlElement original, XmlElement written)
+    {
+        if (original != originalDocument.DocumentElement || written != writtenDocument.DocumentElement ||
+            original.LocalName != "worksheet" || written.LocalName != "worksheet" ||
+            original.NamespaceURI != "http://schemas.openxmlformats.org/spreadsheetml/2006/main" ||
+            original.Name != written.Name || !SameAttributes(original, written))
+            return false;
+        var before = original.ChildNodes.Cast<XmlNode>().Where(node => node.NodeType is not
+            (XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace)).ToArray();
+        var after = written.ChildNodes.Cast<XmlNode>().Where(node => node.NodeType is not
+            (XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace)).ToArray();
+        if (before.Length != after.Length) return false;
+        for (var index = 0; index < before.Length; index++)
+        {
+            if (before[index] is XmlElement originalChild && after[index] is XmlElement writtenChild)
+            {
+                if (originalChild.Name != writtenChild.Name ||
+                    originalChild.NamespaceURI != writtenChild.NamespaceURI ||
+                    !SameAttributes(originalChild, writtenChild)) return false;
+            }
+            else if (before[index].OuterXml != after[index].OuterXml) return false;
+        }
+        return true;
+    }
+
+    private static bool SameAttributes(XmlElement original, XmlElement written) =>
+        original.Attributes.Cast<XmlAttribute>().Select(attribute =>
+            (attribute.Name, attribute.NamespaceURI, attribute.Value)).SequenceEqual(
+            written.Attributes.Cast<XmlAttribute>().Select(attribute =>
+                (attribute.Name, attribute.NamespaceURI, attribute.Value)));
 
     private static string Key(ValidationErrorInfo error) => $"{error.Path?.XPath}|{error.Id}|{error.Description}";
 

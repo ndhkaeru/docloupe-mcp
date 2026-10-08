@@ -49,6 +49,41 @@ public sealed class CorruptionGateTests
             issue => issue.Code == "G2_MASKED_BY_BASELINE_ERROR");
     }
 
+    [Theory]
+    [InlineData("default", "")]
+    [InlineData("prefixed-x", "x:")]
+    public void G2DoesNotMaskChangesInsideUnchangedWorksheetChildren(string variant, string prefix)
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var source = Path.Combine(fixture.Directory, variant + ".xlsx");
+        var invalid = fixture.Corrupt(part, xml => xml.Replace("<" + prefix + "sheetData>",
+            "<" + prefix + "bogus/><" + prefix + "sheetData>", StringComparison.Ordinal), source);
+        var written = fixture.Corrupt(part, xml => xml.Replace("<" + prefix + "v>42</" + prefix + "v>",
+            "<" + prefix + "v>9</" + prefix + "v>", StringComparison.Ordinal), invalid);
+        Assert.NotEmpty(DetachedValidator.CheckPackage(invalid).Issues);
+        var result = DetachedValidator.Check(invalid, written, [part]);
+        Assert.Empty(result.Issues);
+        Assert.Empty(result.Gaps);
+    }
+
+    [Theory]
+    [InlineData("default", "")]
+    [InlineData("prefixed-x", "x:")]
+    public void G2ReportsNewDirectChildMaskedByBaselineWorksheetError(string variant, string prefix)
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var source = Path.Combine(fixture.Directory, variant + ".xlsx");
+        var invalid = fixture.Corrupt(part, xml => xml.Replace("<" + prefix + "sheetData>",
+            "<" + prefix + "bogus/><" + prefix + "sheetData>", StringComparison.Ordinal), source);
+        var written = fixture.Corrupt(part, xml => xml.Replace("<" + prefix + "sheetData>",
+            "<" + prefix + "another/><" + prefix + "sheetData>", StringComparison.Ordinal), invalid);
+        var result = DetachedValidator.Check(invalid, written, [part]);
+        Assert.Empty(result.Issues);
+        Assert.Contains(result.Gaps, issue => issue.Code == "G2_MASKED_BY_BASELINE_ERROR");
+    }
+
     [Fact]
     public void G2ReportsChangesBelowBaselineErrorWithCollidingLocalNames()
     {
@@ -79,6 +114,71 @@ public sealed class CorruptionGateTests
         var result = DetachedValidator.Check(source, written, [part]);
         Assert.Empty(result.Issues);
         Assert.Empty(result.Gaps);
+    }
+
+    [Theory]
+    [InlineData("default", "")]
+    [InlineData("prefixed-x", "x:")]
+    public void G2StillFindsInvalidDescendantUnderWorksheetBaselineError(string variant, string prefix)
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var source = Path.Combine(fixture.Directory, variant + ".xlsx");
+        var invalid = fixture.Corrupt(part, xml => xml.Replace("<" + prefix + "sheetData>",
+            "<" + prefix + "bogus/><" + prefix + "sheetData>", StringComparison.Ordinal), source);
+        var written = fixture.Corrupt(part, xml => xml.Replace("<" + prefix + "sheetData>",
+            "<" + prefix + "sheetData><" + prefix + "unexpected/>", StringComparison.Ordinal), invalid);
+        var result = DetachedValidator.Check(invalid, written, [part]);
+        Assert.Contains(result.Issues, issue => issue.Code == "NEW_SCHEMA_ERROR" &&
+            issue.Detail.Contains("sheetData", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void G2ReportsChangedDirectChildAttributesUnderWorksheetBaselineError()
+    {
+        using var fixture = new Fixture();
+        const string part = "xl/worksheets/sheet1.xml";
+        var invalid = fixture.Corrupt(part, xml => xml.Replace("<sheetData>",
+            "<bogus/><sheetData>", StringComparison.Ordinal));
+        var written = fixture.Corrupt(part, xml => xml.Replace("<sheetData>",
+            "<sheetData extra=\"1\">", StringComparison.Ordinal), invalid);
+        var result = DetachedValidator.Check(invalid, written, [part]);
+        Assert.Contains(result.Gaps, issue => issue.Code == "G2_MASKED_BY_BASELINE_ERROR");
+    }
+
+    [LocalFixtureFact]
+    public void G2LocalFixtureWorksheetBaselineHasKnownContentError()
+    {
+        var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES")!;
+        var source = Path.Combine(directory, "01-audit-87-source.xlsx");
+        var baseline = DetachedValidator.CheckPackage(source).Issues;
+        Assert.Contains(baseline, issue => issue.Detail.Contains("Sch_UnexpectedElementContentExpectingComplex", StringComparison.Ordinal));
+        using var store = new PackageStore(source);
+        var sheet = store.SheetNames()[0];
+        SetValueEngine.Apply(store, [new SetValueOp(sheet, "B3", "text", "converted"),
+            new SetValueOp(sheet, "A4", "number", "4"), new SetValueOp(sheet, "C4", "inline", "new inline")]);
+        var written = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".xlsx");
+        var corrupted = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".xlsx");
+        try
+        {
+            store.Save(written);
+            var part = store.SheetPart(sheet);
+            var result = DetachedValidator.Check(source, written, [part]);
+            Assert.Empty(result.Issues);
+            Assert.Empty(result.Gaps);
+            var worksheet = PackageStore.Parse(store.Read(part));
+            var root = worksheet.DocumentElement!;
+            root.AppendChild(worksheet.CreateElement(root.Prefix, "unexpected", PackageStore.Main));
+            store.Set(part, Encoding.UTF8.GetBytes(worksheet.OuterXml));
+            store.Save(corrupted);
+            Assert.Contains(DetachedValidator.Check(source, corrupted, [part]).Gaps,
+                issue => issue.Code == "G2_MASKED_BY_BASELINE_ERROR");
+        }
+        finally
+        {
+            if (File.Exists(written)) File.Delete(written);
+            if (File.Exists(corrupted)) File.Delete(corrupted);
+        }
     }
 
     [Fact]

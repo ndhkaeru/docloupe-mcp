@@ -8,7 +8,7 @@
 |---|---|---|
 | P0 | Một phần | Các spike S1–S9 còn mở |
 | P1 | Một phần | Reader/verifier tổng quát và parity corpus |
-| P2a | Lát cắt hoạt động | Kiểm nốt điều kiện nghiệm thu với corpus local/CI thực tế |
+| P2a | [Đạt nghiệm thu local trong phạm vi hẹp](P2A-ACCEPTANCE.md) | CI thực tế trên bốn runner chưa chạy cho các commit chưa push |
 | P2b | Đang thực hiện | Rich/style, full G6–G7, create/save modes và agent eval |
 | P3 | Chưa bắt đầu | Thao tác cấu trúc và công thức liên quan |
 | P4 | Chưa bắt đầu | Tính năng workbook/worksheet nâng cao |
@@ -43,6 +43,8 @@
 - [x] G3 chặn cell mới dùng prefix khác prefix root dù namespace URI, ý định, G1/G2/G4/G5 và byte-span đều hợp lệ; test đối kháng đã đỏ ở G3 trước khi sửa, đối chứng writer trên fixture mặc định và `prefixed-x` qua. Windows và Docker Linux đạt **603/603** test với corpus local; schema-order đạt, ma trận 13 pass/1 G2 gap/0 failed. Chưa kiểm CI remote/macOS.
 - [x] G3 kiểm prefix của `sheetData` và row hiện hữu/mới theo hình dạng đầu vào và quy tắc writer; test giả mạo prefix row mới đã đỏ riêng ở G3 dù G1/G2/G4/G5 chấp nhận. Windows và Docker Linux đạt **606/606** test với corpus local; chưa chạy lại CI remote/macOS.
 - [x] G3 chặn prefix không đúng ở `calcPr` mới (G1/G2/G4/G5 vẫn chấp nhận ca giả mạo), bảo toàn tên `calcPr` cũ; đối chứng trên workbook mặc định và `x:`. Windows và Docker Linux đạt **609/609** test với corpus local; ma trận 13 pass/1 G2 gap/0 failed. Chưa kiểm CI remote/macOS.
+
+- [x] 2026-10-08: G2 chỉ bỏ **gap giả** khi lỗi content-model có sẵn nằm ở worksheet root và tên/namespace/thuộc tính của root cùng danh sách con trực tiếp không đổi; lỗi dưới sheetData vẫn được phát hiện, thêm con trực tiếp hoặc sửa thuộc tính con vẫn báo gap, lỗi baseline ở cell vẫn giữ gap. Fixture 01 còn schema-invalid ở nguồn, nhưng các edit trong ma trận có G1–G5 **14/14 pass, 0 gap, 0 fail** trên Windows; MCP `open/read/apply/save` staging qua trên fixture 01 và nguồn giữ nguyên. Toàn solution **715/715** Windows có corpus local; Docker Linux **698 đạt/9 skipped**, ma trận synthetic 6/6, schema-order và MCP smoke qua hai OS. [Báo cáo nghiệm thu P2a local](P2A-ACCEPTANCE.md); không suy ra mọi edit hoặc Excel-open trên nguồn invalid đều an toàn; CI remote/macOS chưa chạy.
 
 ## 2. P2b — đã có từng lát cắt, chưa xong phase
 
@@ -117,7 +119,7 @@
 - [x] 2026-10-03: tạo mới/copy template cho `.xlsx`/`.xlsm`/`.xltx`/`.xltm` với content type workbook tương ứng, không sinh VBA mặc định, từ chối đổi định dạng khi copy; test kiểm save lần đầu trên từng loại. **543/543** test Windows (gồm corpus local) và Docker Linux (không có corpus local), schema-order và MCP stdio smoke qua hai OS.
 - [ ] Chạy CI trên **cả bốn runner** cho commit mới (workflow đã cấu hình, nhưng các commit local này chưa push); macOS local được hoãn theo yêu cầu, không đánh dấu đã kiểm chứng.
 - [ ] S3: đo **model thực nhận** `structuredContent` hay `TextContent` trên từng client đích; smoke SDK chỉ chứng minh giao thức tới client, không chứng minh forwarding vào model.
-- [ ] Ma trận `set_value` với corpus cục bộ `D:\data-test\excel-preservation-fixtures\sources` và bộ tổng hợp: [công cụ JSON](../tools/FixtureMatrix/README.md) báo riêng G1–G5 cho từng fixture; **13/14 pass, 01 có G2 gap** do schema baseline. Tám fixture local đều chạy (kể cả source 05 có chữ ký, bị G6 chặn khi save); 02/05 Excel từ chối ngay file gốc ([S2b](../spikes/S2b/REPORT.md)). Chưa chạy CI remote/có oracle Excel cho report này; không coi gap là pass hoặc đóng tiêu chí release.
+- [x] Ma trận `set_value` với corpus cục bộ `D:\data-test\excel-preservation-fixtures\sources` và bộ tổng hợp: [công cụ JSON](../tools/FixtureMatrix/README.md) báo riêng G1–G5 cho từng fixture; **14/14 pass, 0 gap, 0 fail** đối với đúng các edit trong ma trận sau khi G2 giới hạn phạm vi lỗi baseline. Tám fixture local đều chạy (kể cả source 05 có chữ ký, bị G6 chặn khi save); 02/05 Excel từ chối ngay file gốc ([S2b](../spikes/S2b/REPORT.md)). Chưa chạy CI remote/có oracle Excel cho report này; nguồn invalid không được coi là đã sửa và chưa đóng tiêu chí release.
 - [ ] Thử release trên Windows/Linux và sau đó macOS/clean-machine trước khi tuyên bố khả năng thay Python trên mọi OS.
 
 Chạy lại từ root repo (test local fixture là tuỳ chọn, không được thêm các file này vào commit):

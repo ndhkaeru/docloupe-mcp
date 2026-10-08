@@ -1,4 +1,6 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text.Json;
 using DocLoupe.Excel.Engine;
 using DocLoupe.Excel.Server;
 using DocLoupe.Excel.Package;
@@ -28,6 +30,33 @@ public sealed class LocalFixtureTheoryAttribute : TheoryAttribute
 
 public sealed class LocalFixtureTests
 {
+    [LocalFixtureFact]
+    public void BaselineInvalidWorksheetCanCompleteP2aStagingSave()
+    {
+        var directory = Environment.GetEnvironmentVariable("DOCLOUPE_P2A_LOCAL_FIXTURES")!;
+        var source = Path.Combine(directory, "01-audit-87-source.xlsx");
+        var output = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".xlsx");
+        var sourceHash = SHA256.HashData(File.ReadAllBytes(source));
+        try
+        {
+            using var sessions = new ExcelSessions();
+            var opened = JsonSerializer.SerializeToElement(sessions.Open(source));
+            var session = opened.GetProperty("session").GetString()!;
+            var sheet = opened.GetProperty("sheets")[0].GetString()!;
+            Assert.NotNull(sessions.Read(session, sheet, ["B3"]));
+            sessions.Apply(session, 0, [new SetValueOp(sheet, "B3", "text", "converted"),
+                new SetValueOp(sheet, "A4", "number", "4"),
+                new SetValueOp(sheet, "C4", "inline", "new inline")]);
+            var result = JsonSerializer.SerializeToElement(sessions.Save(session, output));
+            Assert.Equal("verified", result.GetProperty("status").GetString());
+            Assert.Equal("converted", Assert.Single(P2aGates.ReadCells(output, sheet, ["B3"])).Value);
+            Assert.Empty(DetachedValidator.Check(source, output, ["xl/worksheets/sheet1.xml"]).Gaps);
+            Assert.Equal(sourceHash, SHA256.HashData(File.ReadAllBytes(source)));
+            sessions.Close(session, true);
+        }
+        finally { if (File.Exists(output)) File.Delete(output); }
+    }
+
     [LocalFixtureFact]
     public void LocalSourcesSupportSessionlessPeek()
     {
