@@ -212,8 +212,11 @@ public sealed class ExcelSessions : IDisposable
                 summary = entry.Summary }).ToArray(), server = ServerInfo };
     }
 
-    public object Read(string id, string? sheet, string[] addresses, bool skipEmpty = true, string view = "cells")
+    public object Read(string id, string? sheet, string[] addresses, bool skipEmpty = true, string view = "cells",
+        string[]? include = null)
     {
+        if (include is not null && (view != "cells" || include.Length != 1 || include[0] != "rich"))
+            throw new NotSupportedException("Only include: [rich] in cells view is supported");
         var session = Get(id);
         lock (session.Sync)
         {
@@ -299,6 +302,10 @@ public sealed class ExcelSessions : IDisposable
                     cells = targets.Select(target => indexed.TryGetValue(target.Address, out var cell)
                         ? cell : new CellRead(target.Address, "blank", null, null)).ToArray();
                 }
+                if (include is not null)
+                    return new { session = id, revision = session.Revision, sheet = selectedSheet, view = "cells",
+                        cells = cells.Select(cell => new { cell.Address, cell.Kind, cell.Value, cell.Formula,
+                            rich = RichTextAssertions.ReadMarkup(cell) }).ToArray() };
                 return new { session = id, revision = session.Revision, sheet = selectedSheet, view = "cells", cells };
             }
             finally { if (source != session.BasePath) File.Delete(source); }

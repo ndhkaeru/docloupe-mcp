@@ -37,8 +37,8 @@ builder.Services.AddMcpServer().WithStdioServerTransport().WithTools([
             : sessions.Verify(after_path, before_path, max_differences, NormalizeAssertions(@assert))),
         new McpServerToolCreateOptions { Name = "excel_verify" }),
     McpServerTool.Create((string? session = null) => Handle(() => sessions.Status(session)), new McpServerToolCreateOptions { Name = "excel_status" }),
-    McpServerTool.Create((string session, JsonElement? target = null, string? sheet = null, bool skip_empty = true, string view = "cells") =>
-        Handle(() => sessions.Read(session, sheet, ReadTargets(target), skip_empty, view)),
+    McpServerTool.Create((string session, JsonElement? target = null, string? sheet = null, bool skip_empty = true, string view = "cells", string[]? include = null) =>
+        Handle(() => sessions.Read(session, sheet, ReadTargets(target), skip_empty, view, include)),
         new McpServerToolCreateOptions
         {
             Name = "excel_read",

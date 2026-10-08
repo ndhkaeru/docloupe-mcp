@@ -24,6 +24,49 @@ public static class RichTextAssertions
 
     public static void Validate(string markup) => ParseExpected(markup);
 
+    public static string? ReadMarkup(CellRead cell)
+    {
+        if (cell.Kind is not ("text" or "inline") || cell.Formula is not null) return null;
+        var document = Load(cell.Kind == "text" ? cell.SharedMarkup : cell.CellMarkup);
+        var root = document.DocumentElement;
+        var container = cell.Kind == "text" ? root : root?.ChildNodes.OfType<XmlElement>()
+            .SingleOrDefault(child => child.LocalName == "is" && child.NamespaceURI == Main);
+        if (container is null || container.LocalName is not ("is" or "si") || container.NamespaceURI != Main ||
+            container.Attributes.OfType<XmlAttribute>().Any(attribute => attribute.NamespaceURI != "http://www.w3.org/2000/xmlns/"))
+            throw new NotSupportedException("Unsupported rich text container");
+        var markup = new StringBuilder();
+        var hasRuns = false;
+        var segments = 0;
+        foreach (XmlNode node in container.ChildNodes)
+        {
+            if (node is not XmlElement child)
+            {
+                if (node.NodeType is not (XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace))
+                    throw new NotSupportedException("Unsupported rich text content");
+                continue;
+            }
+            if (child.NamespaceURI != Main || child.LocalName is "rPh" or "phoneticPr")
+                throw new NotSupportedException("Rich text with phonetic or unknown content cannot be projected");
+            if (++segments > 256) throw new NotSupportedException("Rich text exceeds 256 segments");
+            if (child.LocalName == "t") markup.Append(Escape(ReadText(child)));
+            else if (child.LocalName == "r")
+            {
+                hasRuns = true;
+                var run = ReadRun(child);
+                markup.Append("<r");
+                foreach (var (name, value) in run.Properties)
+                    markup.Append(' ').Append(name).Append("=\"").Append(Escape(value)).Append('"');
+                markup.Append('>').Append(Escape(run.Text)).Append("</r>");
+            }
+            else throw new NotSupportedException("Unsupported rich text element");
+            if (markup.Length > 8192) throw new NotSupportedException("Rich text exceeds 8192 characters");
+        }
+        return hasRuns ? markup.ToString() : null;
+    }
+
+    private static string Escape(string value) => value.Replace("&", "&amp;").Replace("<", "&lt;")
+        .Replace(">", "&gt;").Replace("\"", "&quot;");
+
     public static bool Matches(CellRead? cell, string markup)
     {
         if (cell is null || cell.Kind is not ("text" or "inline") || cell.Formula is not null) return false;
@@ -109,9 +152,10 @@ public static class RichTextAssertions
 
     private static Run ReadRun(XmlElement run)
     {
-        if (run.Attributes.Count != 0 || run.ChildNodes.OfType<XmlCharacterData>()
-            .Any(node => node.NodeType is XmlNodeType.Text or XmlNodeType.CDATA &&
-                !string.IsNullOrWhiteSpace(node.Value)))
+        if (run.Attributes.Count != 0 || run.ChildNodes.Cast<XmlNode>()
+            .Any(node => node is not XmlElement &&
+                (node.NodeType is not (XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace) ||
+                 !string.IsNullOrWhiteSpace(node.Value))))
             throw new NotSupportedException("Unsupported rich run content");
         var properties = new SortedDictionary<string, string>(StringComparer.Ordinal);
         XmlElement? text = null;
@@ -129,6 +173,9 @@ public static class RichTextAssertions
                 if (sawProperties || text is not null || child.Attributes.Count != 0)
                     throw new NotSupportedException("Invalid rich run properties");
                 sawProperties = true;
+                if (child.ChildNodes.Cast<XmlNode>().Any(node => node is not XmlElement &&
+                    node.NodeType is not (XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace)))
+                    throw new NotSupportedException("Unsupported rich run properties");
                 foreach (var property in child.ChildNodes.OfType<XmlElement>())
                 {
                     if (property.NamespaceURI != Main || !ReverseNames.TryGetValue(property.LocalName, out var name) ||
@@ -148,7 +195,9 @@ public static class RichTextAssertions
 
     private static string ReadText(XmlElement text)
     {
-        if (text.ChildNodes.OfType<XmlElement>().Any() || text.Attributes.OfType<XmlAttribute>()
+        if (text.ChildNodes.Cast<XmlNode>().Any(node => node.NodeType is not
+                (XmlNodeType.Text or XmlNodeType.CDATA or XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace)) ||
+            text.Attributes.OfType<XmlAttribute>()
             .Any(attribute => attribute.LocalName != "space" || attribute.NamespaceURI != Xml ||
                 attribute.Value is not ("default" or "preserve")))
             throw new NotSupportedException("Unsupported rich text node");

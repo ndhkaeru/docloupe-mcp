@@ -405,6 +405,17 @@ try
     if (richSaved.IsError == true || richSaved.StructuredContent?.GetProperty("data")
         .GetProperty("status").GetString() != "verified" || !File.Exists(richOutput))
         throw new InvalidOperationException("MCP rich_set save failed: " + richSaved.StructuredContent?.GetRawText());
+    var richRead = await client.CallToolAsync("excel_read", new Dictionary<string, object?>
+    {
+        ["session"] = richId, ["sheet"] = "Sheet1", ["target"] = "D3:E12", ["include"] = new[] { "rich" }
+    });
+    if (richRead.IsError == true || richRead.StructuredContent?.GetProperty("data")
+        .GetProperty("cells").EnumerateArray().Single(cell => cell.GetProperty("Address").GetString() == "D3")
+        .GetProperty("rich").GetString() != "<r>bold</r><r b=\"true\" color=\"FF336699\"> text</r>" ||
+        richRead.StructuredContent?.GetProperty("data").GetProperty("cells").EnumerateArray()
+        .Single(cell => cell.GetProperty("Address").GetString() == "E12")
+        .GetProperty("rich").GetString() != runsMarkup)
+        throw new InvalidOperationException("MCP rich read failed: " + richRead.StructuredContent?.GetRawText());
     var richClosed = await client.CallToolAsync("excel_close", new Dictionary<string, object?>
     {
         ["session"] = richId, ["discard_unsaved"] = true
