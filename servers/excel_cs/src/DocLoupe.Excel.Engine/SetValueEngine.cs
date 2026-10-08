@@ -9,7 +9,7 @@ namespace DocLoupe.Excel.Engine;
 
 public sealed record FormulaCache(string Type, string Value);
 public sealed record CellPrecondition(bool CheckValue, string? Kind, string? Value, string? Formula, bool? Empty = null, string? Text = null, string? Rich = null, bool? FontBold = null);
-public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, CellPrecondition? Expect = null, int SourceIndex = -1, string? Label = null, string? RichMarkup = null);
+public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, CellPrecondition? Expect = null, int SourceIndex = -1, string? Label = null, string? RichMarkup = null, RichStylePatch? StylePatch = null);
 public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, string? RichMarkup = null);
 public sealed record ApplyResult(IReadOnlyList<ExpectedCell> Intent, IReadOnlyList<ByteEdit> Edits, IReadOnlyList<string> ChangedParts);
 
@@ -27,6 +27,10 @@ public static class SetValueEngine
             operation.ExplicitCache is not null && (operation.Operation != "set_formula" || operation.Kind != "formula" || operation.KeepCache) ||
             operation.RemoveCell && operation.Operation != "clear" ||
             operation.RichMarkup is not null && operation.Operation != "rich_set" ||
+            operation.StylePatch is not null && operation.Operation != "rich_style" ||
+            operation.Operation == "rich_style" &&
+            (operation.StylePatch is null || operation.Kind != "inline" || operation.Value is not null ||
+             operation.RichPolicy != "reject" || operation.AsText || operation.KeepCache || operation.ExplicitCache is not null) ||
             operation.Operation == "rich_set" &&
             (operation.Kind != "inline" || operation.RichMarkup is null || operation.RichPolicy != "reject" ||
              operation.AsText || operation.Value != RichSetMarkup.Parse(operation.RichMarkup).Text) ||
@@ -81,6 +85,17 @@ public static class SetValueEngine
                     var existingShared = cell.GetAttribute("t") == "s";
                     var index = existingShared ? int.Parse(Direct(cell, "v")?.InnerText ?? throw new InvalidDataException("Missing shared-string index"), CultureInfo.InvariantCulture) : -1;
                     var inline = Direct(cell, "is");
+                    if (operation.Operation == "rich_style")
+                    {
+                        var container = existingShared ? strings.Item(index) : inline ??
+                            throw new NotSupportedException("rich_style requires existing rich text");
+                        var styled = RichStyleMarkup.ApplyAll(container, operation.StylePatch!);
+                        operation = operation with
+                        {
+                            Kind = "inline", Value = styled.Text, Operation = "rich_set",
+                            RichMarkup = RichSetMarkup.Render(styled.Runs), StylePatch = null
+                        };
+                    }
                     var rich = existingShared && strings.IsRich(index) || inline is not null &&
                         inline.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "r" or "rPh" or "phoneticPr");
                     if (operation.Operation == "rich_set" &&
@@ -103,6 +118,8 @@ public static class SetValueEngine
                 }
                 else if (operation.Operation != "clear")
                 {
+                    if (operation.Operation == "rich_style")
+                        throw new NotSupportedException("rich_style requires existing rich text");
                     if (operation.KeepCache) throw new NotSupportedException("cache: keep requires an existing formula");
                     var markup = MakeCell(lexical.Document, null, operation, address, strings);
                     if (row is null)
@@ -398,6 +415,7 @@ public static class SetValueEngine
         private readonly string _part;
         private readonly string? _relationship;
         private readonly List<string?> _values = [];
+        private readonly List<XmlElement> _items = [];
         private readonly List<bool> _phonetic = [];
         private readonly List<string> _added = [];
         private int _references;
@@ -413,6 +431,7 @@ public static class SetValueEngine
             var document = PackageStore.Parse(store.Read(_part));
             foreach (var item in document.DocumentElement!.ChildNodes.OfType<XmlElement>().Where(item => item.LocalName == "si" && item.NamespaceURI == PackageStore.Main))
             {
+                _items.Add(item);
                 _values.Add(item.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "r" or "rPh" or "phoneticPr") ? null :
                     item.GetElementsByTagName("t", PackageStore.Main).OfType<XmlElement>().FirstOrDefault()?.InnerText);
                 _phonetic.Add(item.ChildNodes.OfType<XmlElement>().Any(child => child.LocalName is "rPh" or "phoneticPr"));
@@ -421,6 +440,9 @@ public static class SetValueEngine
 
         public bool IsRich(int index) => index < 0 || index >= _values.Count
             ? throw new InvalidDataException("Invalid shared-string index") : _values[index] is null;
+
+        public XmlElement Item(int index) => index < 0 || index >= _items.Count
+            ? throw new InvalidDataException("Invalid shared-string index") : _items[index];
 
         public bool IsPhonetic(int index) => index < 0 || index >= _phonetic.Count
             ? throw new InvalidDataException("Invalid shared-string index") : _phonetic[index];

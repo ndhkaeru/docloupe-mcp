@@ -410,6 +410,33 @@ try
         ["session"] = richId, ["discard_unsaved"] = true
     });
     if (richClosed.IsError == true) throw new InvalidOperationException("Rich smoke close failed");
+    var styledSession = await client.CallToolAsync("excel_open", new Dictionary<string, object?> { ["path"] = richOutput });
+    if (styledSession.IsError == true) throw new InvalidOperationException("Rich style smoke could not open rich output");
+    var styledId = styledSession.StructuredContent!.Value.GetProperty("data").GetProperty("session").GetString()!;
+    const string styledMarkup = "<r b=\"true\">bold</r><r b=\"true\" color=\"FF336699\"> text</r>";
+    var styledApplied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = styledId, ["base_revision"] = 0, ["sheet"] = "Sheet1",
+        ["ops"] = new[] { new { op = "rich_style", target = "D3", at = "all",
+            style = new { bold = true }, expect = new { rich = richMarkup } } }
+    });
+    if (styledApplied.IsError == true || styledApplied.StructuredContent?.GetProperty("data")
+        .GetProperty("readback").GetProperty("Sheet1!D3").GetProperty("Value").GetString() != "bold text")
+        throw new InvalidOperationException("MCP rich_style apply failed: " + styledApplied.StructuredContent?.GetRawText());
+    var styledOutput = Path.Combine(directory, "styled.xlsx");
+    var styledSaved = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
+    {
+        ["session"] = styledId, ["mode"] = "copy", ["path"] = styledOutput,
+        ["assert"] = new[] { new { target = "Sheet1!D3", equals = new { rich = styledMarkup } } }
+    });
+    if (styledSaved.IsError == true || styledSaved.StructuredContent?.GetProperty("data")
+        .GetProperty("status").GetString() != "verified" || !File.Exists(styledOutput))
+        throw new InvalidOperationException("MCP rich_style save failed: " + styledSaved.StructuredContent?.GetRawText());
+    var styledClosed = await client.CallToolAsync("excel_close", new Dictionary<string, object?>
+    {
+        ["session"] = styledId, ["discard_unsaved"] = true
+    });
+    if (styledClosed.IsError == true) throw new InvalidOperationException("Rich style smoke close failed");
     var verifiedGates = saved.StructuredContent.Value.GetProperty("data").GetProperty("gates").EnumerateArray()
         .Select(gate => gate.GetString()).ToArray();
     if (!verifiedGates.Contains("G6") || !verifiedGates.Contains("G7"))

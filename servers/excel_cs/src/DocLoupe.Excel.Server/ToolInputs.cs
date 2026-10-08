@@ -22,6 +22,10 @@ public sealed class SetValueRequest
     public JsonElement Rich { get; init; }
     [JsonPropertyName("runs")]
     public JsonElement Runs { get; init; }
+    [JsonPropertyName("at")]
+    public JsonElement At { get; init; }
+    [JsonPropertyName("style")]
+    public JsonElement Style { get; init; }
     [JsonPropertyName("values")]
     public JsonElement Values { get; init; }
     [JsonPropertyName("series")]
@@ -50,10 +54,12 @@ public sealed class SetValueRequest
     public SetValueOp Normalize(string? defaultSheet)
     {
         if (Label is { Length: > 256 }) throw new ArgumentException("Op label exceeds 256 characters");
-        if (Op is not ("set_value" or "set_formula" or "clear" or "rich_set")) throw new NotSupportedException("Unsupported cell operation");
+        if (Op is not ("set_value" or "set_formula" or "clear" or "rich_set" or "rich_style")) throw new NotSupportedException("Unsupported cell operation");
         if (Other is { Count: > 0 }) throw new NotSupportedException("Unsupported cell operation fields");
         if (Op != "rich_set" && (Rich.ValueKind != JsonValueKind.Undefined || Runs.ValueKind != JsonValueKind.Undefined))
             throw new NotSupportedException("rich and runs require rich_set");
+        if (Op != "rich_style" && (At.ValueKind != JsonValueKind.Undefined || Style.ValueKind != JsonValueKind.Undefined))
+            throw new NotSupportedException("at and style require rich_style");
         if (Op == "clear")
         {
             if (Value.ValueKind != JsonValueKind.Undefined || Values.ValueKind != JsonValueKind.Undefined ||
@@ -85,6 +91,21 @@ public sealed class SetValueRequest
             return new SetValueOp(richSheet, richAddress, "inline", RichSetMarkup.Parse(markup).Text,
                 Operation: "rich_set", Expect: NormalizeExpect(richSheet, richAddress), Label: Label,
                 RichMarkup: markup);
+        }
+        if (Op == "rich_style")
+        {
+            if (Target.Contains(':') || At.ValueKind != JsonValueKind.String || At.GetString() != "all" ||
+                Style.ValueKind != JsonValueKind.Object || Value.ValueKind != JsonValueKind.Undefined ||
+                Values.ValueKind != JsonValueKind.Undefined || Series.ValueKind != JsonValueKind.Undefined ||
+                AsText || RichPolicy != "reject" || Formula is not null || FormulaKind is not null ||
+                Reference is not null || Cache is not null || What.ValueKind != JsonValueKind.Undefined ||
+                RemoveCells.ValueKind != JsonValueKind.Undefined)
+                throw new NotSupportedException("rich_style currently requires one cell, at: all and a bounded style patch");
+            var styleSheet = CellAddress.SheetName(Target) ?? Sheet ?? defaultSheet ?? throw new ArgumentException("Missing sheet name");
+            var styleAddress = CellAddress.Parse(Target).ToString();
+            return new SetValueOp(styleSheet, styleAddress, "inline", null,
+                Operation: "rich_style", Expect: NormalizeExpect(styleSheet, styleAddress), Label: Label,
+                StylePatch: NormalizeRichStyle(Style));
         }
         if (What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
             throw new NotSupportedException("what and remove_cells require clear");
@@ -184,6 +205,31 @@ public sealed class SetValueRequest
         return RichSetMarkup.Render(runs);
     }
 
+    private static RichStylePatch NormalizeRichStyle(JsonElement input)
+    {
+        var fields = input.EnumerateObject().ToArray();
+        if (fields.Length is < 1 or > 3 || fields.Select(field => field.Name).Distinct(StringComparer.Ordinal).Count() != fields.Length ||
+            input.EnumerateObject().Any(property => property.Name is not ("bold" or "italic" or "color")))
+            throw new NotSupportedException("rich_style supports only bold, italic and RGB/ARGB color");
+        bool? Flag(string name)
+        {
+            if (!input.TryGetProperty(name, out var flag)) return null;
+            return flag.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                _ => throw new NotSupportedException("rich_style flags require booleans")
+            };
+        }
+        string? color = null;
+        if (input.TryGetProperty("color", out var value))
+            color = value.ValueKind == JsonValueKind.String ? value.GetString() :
+                throw new NotSupportedException("rich_style color requires RGB or ARGB hex text");
+        var patch = new RichStylePatch(Flag("bold"), Flag("italic"), color);
+        RichSetMarkup.Parse(RichSetMarkup.Render([new RichSetRun("x", patch.Bold, patch.Italic, patch.Color)]));
+        return patch;
+    }
+
     private CellPrecondition? NormalizeExpect(string sheet, string address)
     {
         if (Expect.ValueKind == JsonValueKind.Undefined) return null;
@@ -240,7 +286,9 @@ public sealed class SetValueRequest
     {
         if ((Rich.ValueKind != JsonValueKind.Undefined || Runs.ValueKind != JsonValueKind.Undefined) && Op != "rich_set")
             throw new NotSupportedException("rich and runs require rich_set");
-        if (Expect.ValueKind != JsonValueKind.Undefined && Op is not ("set_value" or "set_values" or "set_formula" or "fill" or "clear" or "rich_set"))
+        if ((At.ValueKind != JsonValueKind.Undefined || Style.ValueKind != JsonValueKind.Undefined) && Op != "rich_style")
+            throw new NotSupportedException("at and style require rich_style");
+        if (Expect.ValueKind != JsonValueKind.Undefined && Op is not ("set_value" or "set_values" or "set_formula" or "fill" or "clear" or "rich_set" or "rich_style"))
             throw new NotSupportedException("expect requires a supported cell operation");
         var hasValue = Value.ValueKind != JsonValueKind.Undefined;
         var hasSeries = Series.ValueKind != JsonValueKind.Undefined;

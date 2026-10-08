@@ -479,6 +479,9 @@ public sealed class ExcelSessions : IDisposable
             if (returnMode is not ("diff" or "diff+readback"))
                 throw new NotSupportedException("Unsupported apply return mode");
             if (baseRevision != session.Revision) throw new InvalidOperationException("REVISION_CONFLICT");
+            if (operations.Any(operation => operation.Operation == "rich_style" &&
+                session.Operations.Any(previous => previous.Sheet == operation.Sheet && previous.Address == operation.Address)))
+                throw new NotSupportedException("rich_style cannot follow another edit on the same cell yet");
             if (operations.Any(operation => operation.Expect is not null))
             {
                 var basePath = session.Preview();

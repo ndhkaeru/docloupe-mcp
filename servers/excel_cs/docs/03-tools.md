@@ -301,7 +301,9 @@ Effects listed per op are the semantic paths (02 §6) the op **declares**. G4 ch
 | `rich_delete` | `target`, `at: Span` | `.rich`, `.value` |
 | `phonetic_set` | `target`, `runs`, `properties?` | `.phonetic` |
 
-**Current `rich_set` slice:** requires a single cell and exactly one of `rich` markup or `runs: [{"text": "…", "font": {"bold"?: boolean, "italic"?: boolean, "color"?: RGB/ARGB hex}}]`. Both forms support 1–256 text-only runs with explicit `b`/`i`/`color` properties. It writes inline rich text, preserving run boundaries and whitespace. Existing shared-rich content without phonetic annotations may become inline while the original shared item remains unchanged and its reference count decreases. Existing shared/inline phonetic content, `phonetic`, and all other rich ops remain unsupported; unsupported input fails before the session revision changes.
+**Current `rich_set` slice:** requires a single cell and exactly one of `rich` markup or `runs: [{"text": "…", "font": {"bold"?: boolean, "italic"?: boolean, "color"?: RGB/ARGB hex}}]`. Both forms support 1–256 text-only runs with explicit `b`/`i`/`color` properties. It writes inline rich text, preserving run boundaries and whitespace. Existing shared-rich content without phonetic annotations may become inline while the original shared item remains unchanged and its reference count decreases. Existing shared/inline phonetic content and `phonetic` remain unsupported; unsupported input fails before the session revision changes.
+
+**Current `rich_style` slice:** requires an existing single-cell shared/inline rich string with 1–256 runs, `at: "all"`, and a nonempty `style` containing only Boolean `bold`/`italic` and/or RGB/ARGB hex `color`. It applies the patch to every run, retaining unpatched explicit attributes and run text, and converts shared text to inline without mutating the shared item. It rejects phonetic annotations, unknown run formatting/markup, absent or plain text, and a second edit to the same cell in one session; use `rich_set` to replace such a cell. G4/G5 check saved rich runs, but effective theme/inherited formatting and selected spans are not supported. All other rich ops remain unsupported.
 
 **Current `clear` slice:** only `what: ["values"]` (or omitted) is supported, for a cell or rectangular range of at most 500 cells. With `remove_cells: false` (default), existing cells retain their style; with `remove_cells: true`, existing `<c>` elements are removed while their rows remain. Absent cells remain absent in both modes. Clearing an existing formula invalidates its `calcChain` entry; a no-op clear leaves all package part bytes unchanged. Other facets fail closed.
 
@@ -311,7 +313,7 @@ Effects listed per op are the semantic paths (02 §6) the op **declares**. G4 ch
 
 `Span = { match: string, occurrence?: number | "all" = 1, normalize?: "nfc" | "none" } | { range: [number, number] } | "all"`. Ranges count graphemes (02 §4.2).
 
-Example: recolor one word in a three-run Vietnamese cell, guarded by the text the agent read.
+Future full-contract example (selected-span recoloring is **not** supported by the current `rich_style` slice):
 
 ```json
 { "op": "rich_style", "target": "A3",
