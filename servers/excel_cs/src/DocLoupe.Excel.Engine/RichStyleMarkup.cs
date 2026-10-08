@@ -7,11 +7,13 @@ namespace DocLoupe.Excel.Engine;
 
 public sealed record RichStylePatch(bool? Bold, bool? Italic, string? Color);
 public sealed record RichStyleSpan(int Start, int End);
-public sealed record RichStyleMatch(string Text, bool Normalize, int? Occurrence = 1);
+public sealed record RichStyleMatch(string Text, bool Normalize, int? Occurrence = 1, bool CaseSensitive = true);
 
 public static class RichStyleMarkup
 {
     private static readonly bool HasUnicodeNfc = "e\u0323\u0302".Normalize(NormalizationForm.FormC) == "ệ";
+    private static readonly bool HasUnicodeCase = CultureInfo.InvariantCulture.CompareInfo.Compare(
+        "Đ", "đ", CompareOptions.IgnoreCase) == 0;
 
     public static RichSetValue Apply(XmlElement container, RichStylePatch patch, RichStyleSpan? span, RichStyleMatch? match = null)
     {
@@ -73,10 +75,13 @@ public static class RichStyleMarkup
             match.Text[sought[index]..(index + 1 == sought.Length ? match.Text.Length : sought[index + 1])], match.Normalize)).ToArray();
         var actual = Enumerable.Range(0, graphemes.Length).Select(index => Normalize(
             text[graphemes[index]..(index + 1 == graphemes.Length ? text.Length : graphemes[index + 1])], match.Normalize)).ToArray();
+        if (!match.CaseSensitive && !HasUnicodeCase &&
+            (text.Any(character => character > 0x7f) || match.Text.Any(character => character > 0x7f)))
+            throw new NotSupportedException("rich_style case-insensitive Unicode matching requires globalization data");
         var found = new List<RichStyleSpan>();
         for (var start = 0; start <= graphemes.Length - expected.Length;)
         {
-            if (actual.AsSpan(start, expected.Length).SequenceEqual(expected))
+            if (MatchesAt(actual, expected, start, match.CaseSensitive))
             {
                 found.Add(new RichStyleSpan(start, start + expected.Length));
                 if (found.Count == match.Occurrence) return [found[^1]];
@@ -86,6 +91,18 @@ public static class RichStyleMarkup
         }
         if (match.Occurrence is null && found.Count > 0) return found.ToArray();
         throw new ArgumentException("rich_style match not found");
+    }
+
+    private static bool MatchesAt(string[] actual, string[] expected, int start, bool caseSensitive)
+    {
+        for (var index = 0; index < expected.Length; index++)
+        {
+            if (caseSensitive ? actual[start + index] != expected[index]
+                : CultureInfo.InvariantCulture.CompareInfo.Compare(actual[start + index], expected[index],
+                    CompareOptions.IgnoreCase) != 0)
+                return false;
+        }
+        return true;
     }
 
     private static string Normalize(string value, bool nfc)

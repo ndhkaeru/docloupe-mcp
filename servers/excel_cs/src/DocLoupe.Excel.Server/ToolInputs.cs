@@ -222,9 +222,9 @@ public sealed class SetValueRequest
     {
         if (input.ValueKind != JsonValueKind.Object || !input.TryGetProperty("match", out var match)) return null;
         var properties = input.EnumerateObject().ToArray();
-        if (properties.Length is < 1 or > 3 ||
+        if (properties.Length is < 1 or > 4 ||
             properties.Select(property => property.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length ||
-            properties.Any(property => property.Name is not ("match" or "normalize" or "occurrence")) ||
+            properties.Any(property => property.Name is not ("match" or "normalize" or "occurrence" or "case_sensitive")) ||
             match.ValueKind != JsonValueKind.String || match.GetString() is not { Length: > 0 and <= 8192 } text)
             throw new NotSupportedException("rich_style match requires nonempty text");
         var normalization = input.TryGetProperty("normalize", out var mode) && mode.ValueKind == JsonValueKind.String
@@ -241,7 +241,14 @@ public sealed class SetValueRequest
                 selectedOccurrence = index;
             else throw new NotSupportedException("rich_style occurrence must be 1..8192 or all");
         }
-        return new RichStyleMatch(text, normalization == "nfc", selectedOccurrence);
+        var caseSensitive = true;
+        if (input.TryGetProperty("case_sensitive", out var sensitivity))
+        {
+            if (sensitivity.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                throw new NotSupportedException("rich_style case_sensitive must be a Boolean");
+            caseSensitive = sensitivity.ValueKind == JsonValueKind.True;
+        }
+        return new RichStyleMatch(text, normalization == "nfc", selectedOccurrence, caseSensitive);
     }
 
     private static RichStylePatch NormalizeRichStyle(JsonElement input)

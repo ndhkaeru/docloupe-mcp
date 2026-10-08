@@ -462,9 +462,9 @@ try
     var matchApplied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
     {
         ["session"] = matchId, ["base_revision"] = 0, ["sheet"] = "Sheet1",
-        ["ops"] = new object[] { new { op = "rich_style", target = "D3", at = new { match = "t", occurrence = (object)2 },
+        ["ops"] = new object[] { new { op = "rich_style", target = "D3", at = new { match = "T", occurrence = (object)2, case_sensitive = false },
             style = new { italic = true }, expect = new { rich = styledMarkup } },
-            new { op = "rich_style", target = "E12", at = new { match = "r", occurrence = (object)"all" },
+            new { op = "rich_style", target = "E12", at = new { match = "R", occurrence = (object)"all", case_sensitive = false },
                 style = new { italic = true }, expect = new { rich = styledRangeMarkup } } }
     });
     if (matchApplied.IsError == true || matchApplied.StructuredContent?.GetProperty("data")

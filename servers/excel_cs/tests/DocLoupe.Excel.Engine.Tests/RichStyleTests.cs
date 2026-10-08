@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Xml;
@@ -362,11 +363,72 @@ public sealed class RichStyleTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Fact]
+    public void RichStyleCaseInsensitiveMatchAcrossRunsSavesAndVerifies()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docloupe-rich-case-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SyntheticFixtures.Create(directory);
+            var source = Path.Combine(directory, "rich.xlsx");
+            RichFixture.Create(Path.Combine(directory, "new-shared-strings.xlsx"), source, inline: true);
+            using var sessions = new ExcelSessions();
+            var session = JsonSerializer.SerializeToElement(sessions.Open(source)).GetProperty("session").GetString()!;
+            var exact = Request("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"HELLO BOLD"},"style":{"italic":true}}""");
+            Assert.Throws<ArgumentException>(() => sessions.Apply(session, 0, [exact]));
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(session)).GetProperty("revision").GetInt32());
+            var insensitive = Request("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"HELLO BOLD","case_sensitive":false},"style":{"italic":true}}""");
+            sessions.Apply(session, 0, [insensitive], dryRun: true);
+            Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(session)).GetProperty("revision").GetInt32());
+            sessions.Apply(session, 0, [insensitive]);
+            var output = Path.Combine(directory, "case.xlsx");
+            Assert.Equal("verified", JsonSerializer.SerializeToElement(sessions.Save(session, output,
+                [new ValueAssertion("Sheet1", "A1", false, null, null, null, Rich: Italic)]))
+                .GetProperty("status").GetString());
+            Assert.True(RichTextAssertions.Matches(Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["A1"])), Italic));
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void RichStyleCaseInsensitiveOccurrencesSelectWholeGraphemes()
+    {
+        var document = PackageStore.Parse(Encoding.UTF8.GetBytes(
+            "<is xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><r><t>aAa</t></r></is>"));
+        var all = RichStyleMarkup.Apply(document.DocumentElement!, new RichStylePatch(true, null, null), null,
+            new RichStyleMatch("A", false, null, false));
+        Assert.Equal("<r b=\"true\">aAa</r>", RichSetMarkup.Render(all.Runs));
+        var second = RichStyleMarkup.Apply(document.DocumentElement!, new RichStylePatch(true, null, null), null,
+            new RichStyleMatch("A", false, 2, false));
+        Assert.Equal("<r>a</r><r b=\"true\">A</r><r>a</r>", RichSetMarkup.Render(second.Runs));
+        Assert.Throws<ArgumentException>(() => RichStyleMarkup.Apply(document.DocumentElement!,
+            new RichStylePatch(true, null, null), null, new RichStyleMatch("A", false, 4, false)));
+    }
+
+    [Fact]
+    public void RichStyleUnicodeCaseMatchFailsClosedWithoutGlobalizationData()
+    {
+        var document = PackageStore.Parse(Encoding.UTF8.GetBytes(
+            "<is xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><r><t>Đđ</t></r></is>"));
+        var match = new RichStyleMatch("đ", false, null, false);
+        if (CultureInfo.InvariantCulture.CompareInfo.Compare("Đ", "đ", CompareOptions.IgnoreCase) != 0)
+            Assert.Throws<NotSupportedException>(() => RichStyleMarkup.Apply(document.DocumentElement!,
+                new RichStylePatch(null, true, null), null, match));
+        else
+        {
+            var result = RichStyleMarkup.Apply(document.DocumentElement!, new RichStylePatch(null, true, null), null, match);
+            Assert.Equal("<r i=\"true\">Đđ</r>", RichSetMarkup.Render(result.Runs));
+        }
+    }
+
     [Theory]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold","occurrence":0},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold","occurrence":8193},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold","occurrence":"last"},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold","normalize":"unknown"},"style":{"italic":true}}""")]
+    [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold","case_sensitive":null},"style":{"italic":true}}""")]
+    [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold","case_sensitive":"false"},"style":{"italic":true}}""")]
+    [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold","case_sensitive":false,"case_sensitive":true},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"range":[0,0]},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"range":[-1,1]},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"range":[0,2],"range":[0,3]},"style":{"italic":true}}""")]
