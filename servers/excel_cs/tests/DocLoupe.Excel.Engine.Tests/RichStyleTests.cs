@@ -14,6 +14,7 @@ public sealed class RichStyleTests
     private const string Original = "<r>hello</r><r b color=\"FFFF0000\"> bold</r>";
     private const string Italic = "<r i=\"true\">hello</r><r b i=\"true\" color=\"FFFF0000\"> bold</r>";
     private const string AcrossRuns = "<r>hel</r><r i=\"true\">lo</r><r b i=\"true\" color=\"FFFF0000\"> b</r><r b color=\"FFFF0000\">old</r>";
+    private const string MatchedRuns = "<r>hell</r><r i=\"true\">o</r><r b i=\"true\" color=\"FFFF0000\"> b</r><r b color=\"FFFF0000\">old</r>";
 
     [Fact]
     public void RichStyleAllUpdatesOnlySupportedRunsAndVerifiesSave()
@@ -78,6 +79,14 @@ public sealed class RichStyleTests
             Assert.Throws<ArgumentOutOfRangeException>(() => sessions.Apply(id, 0,
                 [operation with { StyleSpan = new RichStyleSpan(3, 11), Expect = null }]));
             Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+            Assert.Throws<ArgumentException>(() => sessions.Apply(id, 0,
+                [Request("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"missing"},"style":{"italic":true}}""")]));
+            var matched = Request("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"o b"},"style":{"italic":true}}""");
+            sessions.Apply(id, 0, [matched]);
+            var matchedOutput = Path.Combine(directory, "matched.xlsx");
+            sessions.Save(id, matchedOutput, [new ValueAssertion("Sheet1", "A1", true,
+                "text", "hello bold", null, Rich: MatchedRuns)]);
+            Assert.True(RichTextAssertions.Matches(Assert.Single(P2aGates.ReadCells(matchedOutput, "Sheet1", ["A1"])), MatchedRuns));
             sessions.Close(id, true);
         }
         finally { Directory.Delete(directory, true); }
@@ -117,6 +126,23 @@ public sealed class RichStyleTests
             var output = Path.Combine(directory, "styled.xlsx");
             sessions.Save(id, output, [new ValueAssertion("Sheet1", "A1", true, "text", original + " bold", null, Rich: expected)]);
             Assert.True(RichTextAssertions.Matches(Assert.Single(P2aGates.ReadCells(output, "Sheet1", ["A1"])), expected));
+            if (original == "Vie\u0323\u0302t")
+            {
+                sessions.Undo(id, 1, 0);
+                Assert.Throws<ArgumentException>(() => sessions.Apply(id, 0, [Request(
+                    """{"op":"rich_style","target":"Sheet1!A1","at":{"match":"ệ","normalize":"none"},"style":{"italic":true}}""")]));
+                Assert.Equal(0, JsonSerializer.SerializeToElement(sessions.Status(id)).GetProperty("revision").GetInt32());
+                var nfcAvailable = "e\u0323\u0302".Normalize(System.Text.NormalizationForm.FormC) == "ệ";
+                if (!nfcAvailable)
+                    Assert.Throws<NotSupportedException>(() => sessions.Apply(id, 0, [Request(
+                        """{"op":"rich_style","target":"Sheet1!A1","at":{"match":"ệ"},"style":{"italic":true}}""")]));
+                sessions.Apply(id, 0, [Request(nfcAvailable
+                    ? """{"op":"rich_style","target":"Sheet1!A1","at":{"match":"ệ"},"style":{"italic":true}}"""
+                    : """{"op":"rich_style","target":"Sheet1!A1","at":{"match":"ệ","normalize":"none"},"style":{"italic":true}}""")]);
+                var matchedOutput = Path.Combine(directory, "matched.xlsx");
+                sessions.Save(id, matchedOutput, [new ValueAssertion("Sheet1", "A1", true,
+                    "text", original + " bold", null, Rich: expected)]);
+            }
             sessions.Close(id, true);
         }
         finally { Directory.Delete(directory, true); }
@@ -242,7 +268,8 @@ public sealed class RichStyleTests
     }
 
     [Theory]
-    [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold"},"style":{"italic":true}}""")]
+    [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold","occurrence":2},"style":{"italic":true}}""")]
+    [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"match":"bold","normalize":"unknown"},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"range":[0,0]},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"range":[-1,1]},"style":{"italic":true}}""")]
     [InlineData("""{"op":"rich_style","target":"Sheet1!A1","at":{"range":[0,2],"range":[0,3]},"style":{"italic":true}}""")]

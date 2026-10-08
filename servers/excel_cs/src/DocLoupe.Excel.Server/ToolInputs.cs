@@ -105,7 +105,7 @@ public sealed class SetValueRequest
             var styleAddress = CellAddress.Parse(Target).ToString();
             return new SetValueOp(styleSheet, styleAddress, "inline", null,
                 Operation: "rich_style", Expect: NormalizeExpect(styleSheet, styleAddress), Label: Label,
-                StylePatch: NormalizeRichStyle(Style), StyleSpan: NormalizeRichSpan(At));
+                StylePatch: NormalizeRichStyle(Style), StyleSpan: NormalizeRichSpan(At), StyleMatch: NormalizeRichMatch(At));
         }
         if (What.ValueKind != JsonValueKind.Undefined || RemoveCells.ValueKind != JsonValueKind.Undefined)
             throw new NotSupportedException("what and remove_cells require clear");
@@ -208,6 +208,7 @@ public sealed class SetValueRequest
     private static RichStyleSpan? NormalizeRichSpan(JsonElement input)
     {
         if (input.ValueKind == JsonValueKind.String && input.GetString() == "all") return null;
+        if (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("match", out _)) return null;
         if (input.ValueKind != JsonValueKind.Object || input.EnumerateObject().Count() != 1 ||
             !input.TryGetProperty("range", out var range) || range.ValueKind != JsonValueKind.Array ||
             range.GetArrayLength() != 2 || range[0].ValueKind != JsonValueKind.Number ||
@@ -215,6 +216,24 @@ public sealed class SetValueRequest
             !range[1].TryGetInt32(out var end) || start < 0 || end <= start)
             throw new NotSupportedException("rich_style supports at: all or a nonempty grapheme range");
         return new RichStyleSpan(start, end);
+    }
+
+    private static RichStyleMatch? NormalizeRichMatch(JsonElement input)
+    {
+        if (input.ValueKind != JsonValueKind.Object || !input.TryGetProperty("match", out var match)) return null;
+        var properties = input.EnumerateObject().ToArray();
+        if (properties.Length is < 1 or > 3 ||
+            properties.Select(property => property.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length ||
+            properties.Any(property => property.Name is not ("match" or "normalize" or "occurrence")) ||
+            match.ValueKind != JsonValueKind.String || match.GetString() is not { Length: > 0 and <= 8192 } text ||
+            input.TryGetProperty("occurrence", out var occurrence) &&
+            (occurrence.ValueKind != JsonValueKind.Number || !occurrence.TryGetInt32(out var index) || index != 1))
+            throw new NotSupportedException("rich_style match requires nonempty text and at most occurrence: 1");
+        var normalization = input.TryGetProperty("normalize", out var mode) && mode.ValueKind == JsonValueKind.String
+            ? mode.GetString() : input.TryGetProperty("normalize", out _) ? null : "nfc";
+        if (normalization is not ("nfc" or "none"))
+            throw new NotSupportedException("rich_style match supports normalize: nfc or none");
+        return new RichStyleMatch(text, normalization == "nfc");
     }
 
     private static RichStylePatch NormalizeRichStyle(JsonElement input)

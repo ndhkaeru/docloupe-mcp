@@ -9,7 +9,7 @@ namespace DocLoupe.Excel.Engine;
 
 public sealed record FormulaCache(string Type, string Value);
 public sealed record CellPrecondition(bool CheckValue, string? Kind, string? Value, string? Formula, bool? Empty = null, string? Text = null, string? Rich = null, bool? FontBold = null);
-public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, CellPrecondition? Expect = null, int SourceIndex = -1, string? Label = null, string? RichMarkup = null, RichStylePatch? StylePatch = null, RichStyleSpan? StyleSpan = null);
+public sealed record SetValueOp(string Sheet, string Address, string Kind, string? Value, string RichPolicy = "reject", bool AsText = false, string Operation = "set_value", bool RemoveCell = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, CellPrecondition? Expect = null, int SourceIndex = -1, string? Label = null, string? RichMarkup = null, RichStylePatch? StylePatch = null, RichStyleSpan? StyleSpan = null, RichStyleMatch? StyleMatch = null);
 public sealed record ExpectedCell(string Sheet, string Address, string Kind, string? Value, bool AllowMissing = false, bool RequireMissing = false, bool KeepCache = false, FormulaCache? ExplicitCache = null, string? RichMarkup = null);
 public sealed record ApplyResult(IReadOnlyList<ExpectedCell> Intent, IReadOnlyList<ByteEdit> Edits, IReadOnlyList<string> ChangedParts);
 
@@ -29,6 +29,8 @@ public static class SetValueEngine
             operation.RichMarkup is not null && operation.Operation != "rich_set" ||
             operation.StylePatch is not null && operation.Operation != "rich_style" ||
             operation.StyleSpan is not null && operation.Operation != "rich_style" ||
+            operation.StyleMatch is not null && operation.Operation != "rich_style" ||
+            operation.StyleSpan is not null && operation.StyleMatch is not null ||
             operation.Operation == "rich_style" &&
             (operation.StylePatch is null || operation.Kind != "inline" || operation.Value is not null ||
              operation.RichPolicy != "reject" || operation.AsText || operation.KeepCache || operation.ExplicitCache is not null) ||
@@ -90,11 +92,11 @@ public static class SetValueEngine
                     {
                         var container = existingShared ? strings.Item(index) : inline ??
                             throw new NotSupportedException("rich_style requires existing rich text");
-                        var styled = RichStyleMarkup.Apply(container, operation.StylePatch!, operation.StyleSpan);
+                        var styled = RichStyleMarkup.Apply(container, operation.StylePatch!, operation.StyleSpan, operation.StyleMatch);
                         operation = operation with
                         {
                             Kind = "inline", Value = styled.Text, Operation = "rich_set",
-                            RichMarkup = RichSetMarkup.Render(styled.Runs), StylePatch = null, StyleSpan = null
+                            RichMarkup = RichSetMarkup.Render(styled.Runs), StylePatch = null, StyleSpan = null, StyleMatch = null
                         };
                     }
                     var rich = existingShared && strings.IsRich(index) || inline is not null &&

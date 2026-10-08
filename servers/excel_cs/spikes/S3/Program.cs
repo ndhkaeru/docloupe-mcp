@@ -443,6 +443,32 @@ try
         ["session"] = styledId, ["discard_unsaved"] = true
     });
     if (styledClosed.IsError == true) throw new InvalidOperationException("Rich style smoke close failed");
+    var matchSession = await client.CallToolAsync("excel_open", new Dictionary<string, object?> { ["path"] = styledOutput });
+    if (matchSession.IsError == true) throw new InvalidOperationException("Rich match smoke could not open styled output");
+    var matchId = matchSession.StructuredContent!.Value.GetProperty("data").GetProperty("session").GetString()!;
+    const string matchedMarkup = "<r b=\"true\">bold</r><r b=\"true\" color=\"FF336699\"> </r><r b=\"true\" i=\"true\" color=\"FF336699\">text</r>";
+    var matchApplied = await client.CallToolAsync("excel_apply", new Dictionary<string, object?>
+    {
+        ["session"] = matchId, ["base_revision"] = 0, ["sheet"] = "Sheet1",
+        ["ops"] = new[] { new { op = "rich_style", target = "D3", at = new { match = "text" },
+            style = new { italic = true }, expect = new { rich = styledMarkup } } }
+    });
+    if (matchApplied.IsError == true || matchApplied.StructuredContent?.GetProperty("data")
+        .GetProperty("readback").GetProperty("Sheet1!D3").GetProperty("Value").GetString() != "bold text")
+        throw new InvalidOperationException("MCP rich_style match failed: " + matchApplied.StructuredContent?.GetRawText());
+    var matchSaved = await client.CallToolAsync("excel_save", new Dictionary<string, object?>
+    {
+        ["session"] = matchId, ["mode"] = "copy", ["path"] = Path.Combine(directory, "matched.xlsx"),
+        ["assert"] = new[] { new { target = "Sheet1!D3", equals = new { rich = matchedMarkup } } }
+    });
+    if (matchSaved.IsError == true || matchSaved.StructuredContent?.GetProperty("data")
+        .GetProperty("status").GetString() != "verified")
+        throw new InvalidOperationException("MCP rich_style match save failed: " + matchSaved.StructuredContent?.GetRawText());
+    var matchClosed = await client.CallToolAsync("excel_close", new Dictionary<string, object?>
+    {
+        ["session"] = matchId, ["discard_unsaved"] = true
+    });
+    if (matchClosed.IsError == true) throw new InvalidOperationException("Rich match smoke close failed");
     var verifiedGates = saved.StructuredContent.Value.GetProperty("data").GetProperty("gates").EnumerateArray()
         .Select(gate => gate.GetString()).ToArray();
     if (!verifiedGates.Contains("G6") || !verifiedGates.Contains("G7"))

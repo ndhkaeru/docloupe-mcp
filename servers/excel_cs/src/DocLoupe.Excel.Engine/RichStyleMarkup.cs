@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Xml;
 using DocLoupe.Excel.Package;
 
@@ -6,10 +7,13 @@ namespace DocLoupe.Excel.Engine;
 
 public sealed record RichStylePatch(bool? Bold, bool? Italic, string? Color);
 public sealed record RichStyleSpan(int Start, int End);
+public sealed record RichStyleMatch(string Text, bool Normalize);
 
 public static class RichStyleMarkup
 {
-    public static RichSetValue Apply(XmlElement container, RichStylePatch patch, RichStyleSpan? span)
+    private static readonly bool HasUnicodeNfc = "e\u0323\u0302".Normalize(NormalizationForm.FormC) == "ệ";
+
+    public static RichSetValue Apply(XmlElement container, RichStylePatch patch, RichStyleSpan? span, RichStyleMatch? match = null)
     {
         if (container.NamespaceURI != PackageStore.Main || container.LocalName is not ("is" or "si"))
             throw new NotSupportedException("rich_style requires inline or shared rich text");
@@ -18,10 +22,13 @@ public static class RichStyleMarkup
                 element.LocalName != "r" || element.NamespaceURI != PackageStore.Main || element.HasAttributes))
             throw new NotSupportedException("rich_style supports only bounded rich runs without phonetics");
         var runs = elements.Select(ReadRun).ToArray();
-        if (span is null)
+        if (span is null && match is null)
             return RichSetMarkup.Parse(RichSetMarkup.Render(runs.Select(run => PatchRun(run, patch)).ToArray()));
         var text = string.Concat(runs.Select(run => run.Text));
+        if (text.Length > 8192) throw new NotSupportedException("rich_style exceeds 8192 characters");
         var graphemes = StringInfo.ParseCombiningCharacters(text);
+        if (match is not null) span = FindSpan(text, graphemes, match);
+        if (span is null) throw new InvalidOperationException("Missing rich_style selection");
         if (span.Start < 0 || span.End > graphemes.Length || span.Start >= span.End)
             throw new ArgumentOutOfRangeException(nameof(span), "rich_style range must select existing graphemes");
         var start = graphemes[span.Start];
@@ -38,6 +45,31 @@ public static class RichStyleMarkup
             offset += run.Text.Length;
         }
         return RichSetMarkup.Parse(RichSetMarkup.Render(styled));
+    }
+
+    private static RichStyleSpan FindSpan(string text, int[] graphemes, RichStyleMatch match)
+    {
+        var sought = StringInfo.ParseCombiningCharacters(match.Text);
+        if (sought.Length == 0 || sought.Length > graphemes.Length)
+            throw new ArgumentException("rich_style match not found");
+        var expected = Enumerable.Range(0, sought.Length).Select(index => Normalize(
+            match.Text[sought[index]..(index + 1 == sought.Length ? match.Text.Length : sought[index + 1])], match.Normalize)).ToArray();
+        var actual = Enumerable.Range(0, graphemes.Length).Select(index => Normalize(
+            text[graphemes[index]..(index + 1 == graphemes.Length ? text.Length : graphemes[index + 1])], match.Normalize)).ToArray();
+        for (var start = 0; start <= graphemes.Length - expected.Length; start++)
+        {
+            if (actual.AsSpan(start, expected.Length).SequenceEqual(expected))
+                return new RichStyleSpan(start, start + expected.Length);
+        }
+        throw new ArgumentException("rich_style match not found");
+    }
+
+    private static string Normalize(string value, bool nfc)
+    {
+        if (!nfc) return value;
+        if (!HasUnicodeNfc && value.Any(character => character > 0x7f))
+            throw new NotSupportedException("rich_style NFC requires Unicode normalization data");
+        return value.Normalize(NormalizationForm.FormC);
     }
 
     private static RichSetRun PatchRun(RichSetRun run, RichStylePatch patch) => run with

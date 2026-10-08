@@ -291,6 +291,8 @@ Kept from the legacy server, because this part of its design is sound: staging i
 | LibreOffice (oracle) | User's install | Oracle unavailable | Optional; never auto-installed. Path from `DOCLOUPE_SOFFICE_PATH` or the standard install locations |
 | Fonts (rendering) | OS | LibreOffice substitutes missing fonts (Calibri, Cambria…) | Listed in `fidelity_notes` |
 
+**S9 gap (2026-10-08):** .NET 10 `string.Normalize(FormC)` leaves decomposed Vietnamese text unchanged when `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`; `StringInfo` grapheme ranges still pass the NFD/emoji tests. The partial `rich_style.match` rejects non-ASCII NFC requests in that mode. S9 must supply verified Unicode normalization without ICU (or revise the release decision) before the proposed invariant self-contained build can claim NFC parity.
+
 ### 12.2 Distribution concerns that are not libraries
 
 | Concern | Note |
